@@ -1,0 +1,10 @@
+BigQuery Metadata.xlsx
+backend/vendor/
+backend/andsons.db
+backend/.env
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+__pycache__/
+*.pyc
+.DS_Store

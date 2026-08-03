@@ -1,0 +1,15 @@
+flask>=3.0,<4.0
+flask-cors>=4.0,<5.0
+python-dotenv>=1.0,<2.0
+langchain>=0.3,<0.4
+langchain-core>=0.3.17,<0.4
+langchain-community>=0.3,<0.4
+langchain-anthropic>=0.3,<0.4
+langchain-groq>=0.2,<0.3
+sqlalchemy>=2.0,<3.0
+faker>=30.0,<31.0
+openai>=1.50,<2.0
+google-cloud-bigquery>=3.25,<4.0
+sqlalchemy-bigquery>=1.11,<2.0
+slack_sdk>=3.27,<4.0
+requests>=2.31,<3.0

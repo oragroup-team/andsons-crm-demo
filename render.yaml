@@ -1,0 +1,58 @@
+# Render Blueprint - lets Render create this service automatically from the
+# repo instead of clicking through the dashboard by hand. Import via
+# "New +" -> "Blueprint" and point it at this repo.
+#
+# Free plan notes (see README "Deploying to Render" for the tradeoffs):
+# - No persistent disk on the free plan, so backend/andsons.db resets (and
+#   re-seeds with fresh synthetic data) on every restart/redeploy - fine for
+#   a demo, not fine if you need stable history across restarts.
+# - Free services spin down after 15 min idle and cold-start (~30-50s) on
+#   the next request - the very first Slack command after an idle period
+#   may time out because Slack's ack window is 3 seconds. Upgrade to the
+#   Starter plan (paid) to keep it always-on if that matters.
+
+services:
+  - type: web
+    name: andsons-crm-demo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_IMAGE_MODEL
+        value: gpt-image-1
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: BIGQUERY_PROJECT_ID
+        sync: false
+      - key: BIGQUERY_DATASET
+        sync: false
+      - key: COPYWRITER_PROVIDER
+        value: groq
+      - key: SWEEPER_PROVIDER
+        value: groq
+      - key: ANALYTICS_PROVIDER
+        value: groq
+      - key: COPYWRITER_GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: SWEEPER_GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: ANALYTICS_GROQ_MODEL
+        value: openai/gpt-oss-120b
+
+    # Uncomment to add a persistent disk for backend/andsons.db (requires a
+    # paid plan - Render's free plan does not support disks):
+    # disk:
+    #   name: andsons-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # ...and add this env var so the app writes there instead of the
+    # container's ephemeral filesystem:
+    #   - key: DATABASE_PATH
+    #     value: /var/data/andsons.db

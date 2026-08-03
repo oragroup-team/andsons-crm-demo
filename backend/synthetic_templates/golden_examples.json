@@ -1,0 +1,44 @@
+[
+  {
+    "id": "golden_p1_approved",
+    "flow_name": "p1_plan_not_purchased",
+    "approved": true,
+    "reason": "Exact match to the Thalia-approved P1 golden template \u2014 one hero, light 3-step block, thin trust line, real footer, no price, no Rx names.",
+    "email_text": "Subject: Your hair loss treatment plan is ready\nPreheader: One step left to begin your treatment.\n\nHi [name],\n\nYour hair loss treatment plan is ready. Your doctor put it together\nduring your consultation, around what you discussed.\n\nDeciding to treat hair loss is a big step, and you've already taken it\nby speaking with a doctor.\n\nWhat happens next\n1. Your doctor has finalised your personalised plan.\n2. Start your treatment below. It takes a minute.\n3. It arrives discreetly, and you begin when you're ready.\n\nHair loss tends to progress gradually, so treatment works best when it\nbegins early.\n\n[Start My Treatment]\n\nDoctor-led plan \u00b7 Clinically studied \u00b7 Discreet delivery\n\nThe andSons team\n\nWhatsApp customer service: https://api.whatsapp.com/message/VX2SIFBLE7ECI1?autoload=1&app_absent=0\nandSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522\nUnsubscribe"
+  },
+  {
+    "id": "flawed_two_heroes",
+    "flow_name": "p1_plan_not_purchased",
+    "approved": false,
+    "reason": "Two hero images \u2014 golden template allows at most one hero.",
+    "email_text": "Subject: Your hair loss treatment plan is ready\nPreheader: One step left to begin your treatment.\n\n[HERO IMAGE: \"Hair growth with real support\" \u2014 smiling man]\n\nHi [name],\n\nYour hair loss treatment plan is ready. Your doctor put it together\nduring your consultation, around what you discussed.\n\n[HERO IMAGE 2: \"Confident Man\" lifestyle banner]\n\nDeciding to treat hair loss is a big step, and you've already taken it\nby speaking with a doctor.\n\nWhat happens next\n1. Your doctor has finalised your personalised plan.\n2. Start your treatment below. It takes a minute.\n3. It arrives discreetly, and you begin when you're ready.\n\nHair loss tends to progress gradually, so treatment works best when it\nbegins early.\n\n[Start My Treatment]\n\nDoctor-led plan \u00b7 Clinically studied \u00b7 Discreet delivery\n\nThe andSons team\n\nWhatsApp customer service: https://api.whatsapp.com/message/VX2SIFBLE7ECI1?autoload=1&app_absent=0\nandSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522\nUnsubscribe"
+  },
+  {
+    "id": "flawed_missing_footer",
+    "flow_name": "p1_plan_not_purchased",
+    "approved": false,
+    "reason": "Missing footer (no WhatsApp CS link/address/unsubscribe) \u2014 Sweeper must fail anything missing the required footer.",
+    "email_text": "Subject: Your hair loss treatment plan is ready\nPreheader: One step left to begin your treatment.\n\nHi [name],\n\nYour hair loss treatment plan is ready. Your doctor put it together\nduring your consultation, around what you discussed.\n\nDeciding to treat hair loss is a big step, and you've already taken it\nby speaking with a doctor.\n\nWhat happens next\n1. Your doctor has finalised your personalised plan.\n2. Start your treatment below. It takes a minute.\n3. It arrives discreetly, and you begin when you're ready.\n\nHair loss tends to progress gradually, so treatment works best when it\nbegins early.\n\n[Start My Treatment]\n\nDoctor-led plan \u00b7 Clinically studied \u00b7 Discreet delivery"
+  },
+  {
+    "id": "flawed_price_in_p1",
+    "flow_name": "p1_plan_not_purchased",
+    "approved": false,
+    "reason": "Mentions a price ($49/month) in a P1 (Rx track) email \u2014 P1 must stay no-payment / no-price.",
+    "email_text": "Subject: Your hair loss treatment plan is ready \u2014 just $49/month\nPreheader: One step left to begin your treatment.\n\nHi [name],\n\nYour hair loss treatment plan is ready. Your doctor put it together\nduring your consultation, around what you discussed.\n\nDeciding to treat hair loss is a big step, and you've already taken it\nby speaking with a doctor. Your plan is just $49/month, billed after\nyour first shipment.\n\nWhat happens next\n1. Your doctor has finalised your personalised plan.\n2. Start your treatment below. It takes a minute.\n3. It arrives discreetly, and you begin when you're ready.\n\nHair loss tends to progress gradually, so treatment works best when it\nbegins early.\n\n[Start My Treatment \u2014 $49/month]\n\nDoctor-led plan \u00b7 Clinically studied \u00b7 Discreet delivery\n\nThe andSons team\n\nWhatsApp customer service: https://api.whatsapp.com/message/VX2SIFBLE7ECI1?autoload=1&app_absent=0\nandSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522\nUnsubscribe"
+  },
+  {
+    "id": "flawed_badge_trust_row",
+    "flow_name": "p1_plan_not_purchased",
+    "approved": false,
+    "reason": "Trust row uses badge graphics instead of a thin centred text line with light ticks.",
+    "email_text": "Subject: Your hair loss treatment plan is ready\nPreheader: One step left to begin your treatment.\n\nHi [name],\n\nYour hair loss treatment plan is ready. Your doctor put it together\nduring your consultation, around what you discussed.\n\nDeciding to treat hair loss is a big step, and you've already taken it\nby speaking with a doctor.\n\nWhat happens next\n1. Your doctor has finalised your personalised plan.\n2. Start your treatment below. It takes a minute.\n3. It arrives discreetly, and you begin when you're ready.\n\nHair loss tends to progress gradually, so treatment works best when it\nbegins early.\n\n[Start My Treatment]\n\n[BADGE GRAPHIC: Doctor-Led] [BADGE GRAPHIC: Clinically Studied] [BADGE GRAPHIC: 4.8-Star Rated]\n\nThe andSons team\n\nWhatsApp customer service: https://api.whatsapp.com/message/VX2SIFBLE7ECI1?autoload=1&app_absent=0\nandSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522\nUnsubscribe"
+  },
+  {
+    "id": "flawed_rx_named",
+    "flow_name": "p1_plan_not_purchased",
+    "approved": false,
+    "reason": "Names prescription medicines (Finasteride, Minoxidil) \u2014 never permitted in customer-facing copy on any flow.",
+    "email_text": "Subject: Your Finasteride and Minoxidil plan is ready\nPreheader: One step left to begin your treatment.\n\nHi [name],\n\nYour Finasteride 1mg and Minoxidil 5% plan is ready. Your doctor put it\ntogether during your consultation, around what you discussed.\n\nDeciding to treat hair loss is a big step, and you've already taken it\nby speaking with a doctor.\n\nWhat happens next\n1. Your doctor has finalised your personalised plan.\n2. Start your treatment below. It takes a minute.\n3. It arrives discreetly, and you begin when you're ready.\n\nHair loss tends to progress gradually, so treatment works best when it\nbegins early.\n\n[Start My Treatment]\n\nDoctor-led plan \u00b7 Clinically studied \u00b7 Discreet delivery\n\nThe andSons team\n\nWhatsApp customer service: https://api.whatsapp.com/message/VX2SIFBLE7ECI1?autoload=1&app_absent=0\nandSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522\nUnsubscribe"
+  }
+]

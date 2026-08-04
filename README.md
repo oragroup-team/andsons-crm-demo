@@ -7,10 +7,10 @@ A working prototype of two things, for manager review:
    stop after 2 automatic retries with `needs_human_review: true` instead of looping forever, and
    support a manual "give feedback" box so a human reviewer can redirect a draft too (with full
    memory of the current draft and every prior feedback round, not just the latest note).
-2. **Natural-language analytics chat** — a LangChain SQL agent over a synthetic andSons CRM
-   database that answers questions like *"how many products were sold after the P1 email was
-   clicked?"*, with every number in its answer traced back to an actual query result and the SQL
-   query shown alongside the answer.
+2. **Natural-language analytics chat** — a LangChain SQL agent that answers questions like *"what's
+   our total final revenue from delivered orders in Singapore?"* against either a synthetic mock
+   database or (when configured) the real ORA BigQuery warehouse, with every number in its answer
+   traced back to an actual query result and the SQL query shown alongside the answer.
 
 Runs entirely locally. No venv — Python dependencies are downloaded straight into
 `backend/vendor/` so the project is self-contained without touching your machine's global Python
@@ -234,27 +234,46 @@ correctly instead of guessing.
   Below that, a **feedback box** lets you type your own note and regenerate — the revision keeps
   the current draft and every earlier feedback round in view, so a new note can't silently undo an
   earlier one, and old/new drafts are both shown so you can compare.
-- **Analytics Chat tab** — ask a question in plain English, from simple email metrics ("how many
-  products were sold after the P1 email was clicked") to finance and marketing questions ("what's
-  our total final revenue from delivered orders", "how much did we spend on Google marketing for
-  Hair Loss last month", "how many orders were refunded"). The agent queries the SQLite database
-  with LangChain's SQL agent, and the response shows the answer plus the actual SQL that was run.
-  If a number in the drafted answer can't be traced back to a query result from that run, the
-  answer is replaced with an explicit "I couldn't verify that figure" instead of being shown.
-  A small "Source: mock data" / "Source: live BigQuery" line shows which database actually
-  answered (see **Analytics data source** below).
+- **Analytics Chat tab** — ask a question in plain English about orders, revenue, or marketing
+  spend ("how many orders has andSons had in Singapore", "what's our total final revenue from
+  delivered orders in Singapore", "how much have we spent on hair loss marketing in Singapore").
+  The agent queries the active database (mock or live BigQuery) with LangChain's SQL agent, and
+  the response shows the answer plus the actual SQL that was run. If a number in the drafted
+  answer can't be traced back to a query result from that run, the answer is replaced with an
+  explicit "I couldn't verify that figure" instead of being shown. A small "Source: mock data" /
+  "Source: live BigQuery" line shows which database actually answered (see **Analytics data
+  source** below). Note: neither database has email send/open/click event tracking — that's
+  probably tracked in a separate system (an ESP like Klaviyo/Iterable), not this warehouse.
 
 ## Analytics data source (mock data, with a live BigQuery fallback path)
 
 By default the Analytics Chat answers from the local SQLite mock database. If `BIGQUERY_PROJECT_ID`
-is set in `.env`, `backend/agents/analytics_agent.py` tries a real, read-only BigQuery connection
-first and only falls back to the mock database if that connection isn't actually usable right now
-(missing credentials, no IAM permission, wrong project) — nothing else to configure for the
-fallback itself. Every response reports which one answered via `data_source` (`"bigquery"` or
-`"mock"`). Two guardrails apply regardless of which database is answering: the connection is opened
-read-only so no query can ever write, and a customer's individual email/personal details are never
-included in a final answer (aggregates only) — both enforced at the prompt level and independently
-double-checked in code (`_contains_write_operation` / `_contains_pii` in `analytics_agent.py`).
+is set in `.env`, `backend/agents/analytics_agent.py` tries a real BigQuery connection first and
+only falls back to the mock database if that connection isn't actually usable right now (missing
+credentials, no IAM permission, wrong project). Every response reports which one answered via
+`data_source` (`"bigquery"` or `"mock"`), and the system prompt given to the agent switches to
+match — the real warehouse has different table/column names than the mock schema, so the agent is
+told the correct one for whichever database actually answered.
+
+The real warehouse (`ora_bigquery_pipeline` in the `ora-bigquery` GCP project) is the live ORA
+group data warehouse — it holds every ORA brand and country together in the same tables
+(`dotcom_plus_marketplace`, `updated_sales_data`, `marketing_spend_data`), not just andSons. Two
+things keep this safe and scoped:
+- `BIGQUERY_TABLES` (comma-separated) restricts which tables the agent can even see, via
+  LangChain's `include_tables`, so it can't wander into another brand's replica database or one of
+  the ~46 other staging/dated-snapshot tables in that dataset.
+- The agent's system prompt hard-codes `Brand = 'AndSons' AND Country = 'Singapore'` as the default
+  filter on every query against those tables, since they mix multiple brands and countries in the
+  same rows.
+
+Two guardrails apply regardless of which database is answering: a customer's individual email or
+personal details are never included in a final answer (aggregates only), and no write statement is
+ever allowed. For the mock SQLite database this is also enforced at the connection level (opened
+read-only, so a write physically cannot succeed); the live BigQuery connection currently relies on
+the prompt-level instruction and the code-level regex check (`_contains_write_operation` /
+`_contains_pii` in `analytics_agent.py`) rather than a database-level guarantee, since the
+provisioned service account currently has broader IAM permissions than strictly needed (see the
+project's notes on requesting a scoped-down role).
 
 ## Slack integration (optional, for office testing)
 

@@ -25,10 +25,17 @@ services:
         sync: false
       - key: SLACK_SIGNING_SECRET
         sync: false
+      # Not secrets (just config) - committed directly so Blueprint syncs
+      # keep them current. ora_bigquery_pipeline is the real ORA group
+      # warehouse (multi-brand/multi-country); restricted to the 3 tables
+      # that hold andSons data so the agent can't wander into another
+      # brand's replica or a stale dated-snapshot table.
       - key: BIGQUERY_PROJECT_ID
-        sync: false
+        value: ora-bigquery
       - key: BIGQUERY_DATASET
-        sync: false
+        value: ora_bigquery_pipeline
+      - key: BIGQUERY_TABLES
+        value: dotcom_plus_marketplace,updated_sales_data,marketing_spend_data
       # Points at the BigQuery service account key uploaded as a Render
       # "Secret File" (Environment tab -> Secret Files, not a normal env
       # var - the key's JSON content shouldn't sit in plain env vars). Set

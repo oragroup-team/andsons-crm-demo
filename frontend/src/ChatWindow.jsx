@@ -2,9 +2,9 @@ import { useState, useRef, useEffect } from "react";
 import { askQuestion } from "./api";
 
 const SUGGESTIONS = [
-  "How many products were sold after the p1_plan_not_purchased email was clicked?",
-  "What's the open rate for winback emails?",
-  "How many orders are attributed to a clicked email in the last 90 days?",
+  "How many orders has andSons had in Singapore?",
+  "What's our total final revenue from delivered orders in Singapore?",
+  "How much have we spent on hair loss marketing in Singapore?",
 ];
 
 export default function ChatWindow() {

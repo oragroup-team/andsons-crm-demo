@@ -1,4 +1,7 @@
 BigQuery Metadata.xlsx
+*.json.key
+Hari ORA Service Account Key.json
+*Service Account Key*.json
 backend/vendor/
 backend/andsons.db
 backend/.env

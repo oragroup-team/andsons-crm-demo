@@ -33,6 +33,13 @@ services:
         sync: false
       - key: BIGQUERY_DATASET
         sync: false
+      # Points at the BigQuery service account key uploaded as a Render
+      # "Secret File" (Environment tab -> Secret Files, not a normal env
+      # var - the key's JSON content shouldn't sit in plain env vars). Set
+      # this to whatever path you choose when uploading that file, e.g.
+      # /etc/secrets/gcp-key.json.
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false
       - key: COPYWRITER_PROVIDER
         value: groq
       - key: SWEEPER_PROVIDER

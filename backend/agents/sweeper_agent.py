@@ -52,8 +52,8 @@ pressure, or fake urgency/countdown framing.
 
 HERO IMAGE (when a "[HERO IMAGE: ...]" block is present at the top of the candidate, before Subject):
 - A deliberate no-hero, text-first email is a VALID choice, never a failure by itself.
-- The hero, when used, must be a real photo (or a real generated photo) - never a CSS shape, icon, \
-badge, illustration, or star-rating graphic standing in for one.
+- The hero, when used, must be a real approved bank photo - never a CSS shape, icon, badge, \
+illustration, or star-rating graphic standing in for one.
 - The hero must genuinely fit THIS email's message and moment; a hero that reads as generic, forced, or \
 mismatched to the email's content (e.g. a routine/grooming photo on a doctor-consult reminder) is a fail.
 - The overlay headline (when present) must be short, plain, and concrete (2-5 words), never poetic or \
@@ -127,9 +127,10 @@ def _price_rule_text(flow_name: str) -> str:
 
 
 def _hero_deterministic_issues(hero_info: Optional[dict]) -> List[str]:
-    """Python-level ground-truth checks the LLM shouldn't have to infer: is the
-    hero URL a real approved bank photo or a real generated image, never an
-    invented placeholder, and is a baked hero free of a redundant headline."""
+    """Python-level ground-truth checks the LLM shouldn't have to infer: is
+    the hero URL a real approved bank photo, never an invented placeholder,
+    and is a baked hero free of a redundant headline. Selection is
+    bank-only, so any non-bank, non-"none" source is itself a fail."""
     if not hero_info:
         return []
     issues = []
@@ -151,12 +152,11 @@ def _hero_deterministic_issues(hero_info: Optional[dict]) -> List[str]:
                 f"Hero '{hero}' already has a baked-in headline but a different overlay headline "
                 "was added on top of it."
             )
-    elif source == "generated":
-        if not url or not (url.startswith("data:image/") or url.startswith("http")):
-            issues.append("A generated hero is missing a real image payload/URL.")
     elif source == "none":
         if url:
             issues.append("Hero is marked 'none' but an image URL is still attached.")
+    else:
+        issues.append(f"Hero source '{source}' is not a real approved bank photo - selection is bank-only.")
 
     return issues
 

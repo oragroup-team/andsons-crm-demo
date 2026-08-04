@@ -40,8 +40,6 @@ Dotcom-only analytics demo — not the full multi-brand/multi-country/marketplac
 - Node.js + `npm` on your `PATH` (only needed the first time `app.py` runs, to build the
   frontend — see step 3)
 - A Groq and/or Anthropic API key
-- Optional: an OpenAI API key, only needed for the hero-image "generate" fallback (see
-  **Hero images** below) — without it, that path is simply skipped
 
 ## Tech stack
 
@@ -57,8 +55,7 @@ Dotcom-only analytics demo — not the full multi-brand/multi-country/marketplac
 backend/
   flows.py                  # canonical andSons Hair Loss lifecycle flows (real, not invented)
   text_sanitize.py           # shared cleanup: strips em-dashes/curly quotes/markdown from LLM output
-  image_bank.py              # real approved hero photo URLs + the Gen-AI image prompt standard
-  image_gen.py               # OpenAI gpt-image-1 wrapper for the "generate" hero fallback
+  image_bank.py              # real approved hero photo bank (served from backend/static/hero_images/)
   slack_integration.py       # Slack signature verification + Block Kit formatting for slash commands
   agents/
     llm_provider.py          # per-agent Groq/Anthropic provider factory
@@ -170,33 +167,36 @@ required); **neutral** flows stay price-free.
 
 ## Hero images
 
-Every email drafted by the Copywriter also makes a hero-image judgement call, matching the real
-production doctrine (`backend/image_bank.py`, `Agent Prompts VERBATIM`): a hero is **optional**,
-not a default habit — a clean text-first email is a valid, often better choice. When the
-Copywriter does pick a hero, it chooses exactly one of:
+Every email drafted by the Copywriter also makes a hero-image judgement call: a hero is
+**optional**, not a default habit — a clean text-first email is a valid, often better choice.
+Selection is **bank-only** — the Copywriter picks from 18 real approved photos
+(`backend/image_bank.py`), curated from the real andSons `Image_Bank` asset folder (including the
+locked P1 golden-example shots and several real alternate hero exports actually used in sent P1
+emails), covering a genuine range of moments: warm/affirming, quiet concern, grooming ritual,
+reflective/decision, milestone/confident, and OTC product shots (single serum, full range, the
+premium kit). There is no image-generation fallback; if nothing in the bank fits, the correct
+choice is `none`. When the Copywriter does pick a hero, it chooses exactly one of:
 
 - **A locked bank photo** (`smiling`, `adjusting`) — already has a headline baked into the image
   file, so the Copywriter must not add a redundant overlay headline.
-- **A raw bank photo** (`earlysigns`, `combing`, `thoughtful`, `redensyl`) — no baked text, so the
-  Copywriter writes a short, plain, concrete 2-5 word overlay headline for it.
-- **`generate`** — only when none of the 6 approved photos genuinely fit this email's moment. The
-  Copywriter writes one specific pose/scene line, which is combined with the approved andSons
-  Gen-AI image prompt standard (`image_bank.IMAGE_STANDARD_PROMPT`) and sent to OpenAI's
-  `gpt-image-1` (`backend/image_gen.py`), capped at one generation per email. If `OPENAI_API_KEY`
-  isn't set, or the call fails for any reason, generation is skipped and the email falls back to a
-  text-first layout — it never blocks or errors out the pipeline.
+- **A raw bank photo** (the other 16 keys) — no baked text, so the Copywriter writes a short,
+  plain, concrete 2-5 word overlay headline for it.
 - **`none`** — a deliberate text-first email; not a failure.
 
+The actual image files are re-encoded (resized, re-compressed) copies of the source assets, served
+directly by Flask at `/hero-images/<key>.jpg` (`backend/static/hero_images/`, route in
+`backend/app.py`) — this works both locally and once deployed, with no external image host or API
+key required.
+
 The Sweeper checks the hero on two levels: a Python-level ground-truth check
-(`sweeper_agent._hero_deterministic_issues`) confirms the image URL is either a real approved bank
-URL or a real generated image payload — never an invented placeholder — and that a baked hero
-never carries a duplicate overlay headline; the LLM-level checklist covers judgement calls like
-whether the hero genuinely fits the email's moment, and that it's a real photo, never a badge/CSS
-graphic. Either check failing fails the whole email.
+(`sweeper_agent._hero_deterministic_issues`) confirms the image URL is a real approved bank URL —
+never an invented placeholder — and that a baked hero never carries a duplicate overlay headline;
+the LLM-level checklist covers judgement calls like whether the hero genuinely fits the email's
+moment, and that it's a real photo, never a badge/CSS graphic. Either check failing fails the
+whole email.
 
 The frontend (`EmailPanel.jsx`) renders the hero photo (when chosen) at the top of the email card,
-with the overlay headline layered on top and a small caption noting whether it came from the image
-bank or was AI-generated.
+with the overlay headline layered on top.
 
 ## Database schema
 

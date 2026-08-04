@@ -139,6 +139,11 @@ def ask_endpoint():
     return jsonify(result)
 
 
+@app.route("/hero-images/<path:filename>")
+def hero_image(filename):
+    return send_from_directory(os.path.join(BACKEND_DIR, "static", "hero_images"), filename)
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})

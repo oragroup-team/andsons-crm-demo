@@ -23,10 +23,6 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: OPENAI_IMAGE_MODEL
-        value: gpt-image-1
       - key: SLACK_SIGNING_SECRET
         sync: false
       - key: BIGQUERY_PROJECT_ID

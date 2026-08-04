@@ -12,8 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from flows import FLOW_BY_SLUG
-from image_bank import HERO_BANK, HERO_KEYS, IMAGE_STANDARD_PROMPT
-from image_gen import generate_hero_image
+from image_bank import HERO_BANK, HERO_KEYS
 from text_sanitize import sanitize_text
 
 from .llm_provider import get_llm
@@ -143,20 +142,16 @@ HERO IMAGE SELECTION (per-email judgement, not a default habit): a hero is OPTIO
 it genuinely strengthens THIS message; a clean text-first email (hero: "none") is often more premium and \
 personal than a forced photo. The image is an argument: it must argue the same thing the copy argues, at \
 the same emotional moment. Never repeat a hero out of habit; a weak or ill-fitting image is worse than no \
-image.
+image. Choose ONLY from the approved photo bank below - never invent or request a new image.
 Choose exactly one of: {hero_keys}, or "none".
 - "smiling" and "adjusting" are LOCKED heroes with a headline already baked into the image file - do NOT \
 set hero_headline for these (leave it null); adding one would duplicate the text on the image.
 - {raw_hero_keys} are RAW photos with no baked text - if you use one, set hero_headline to a short, PLAIN, \
 CONCRETE, literal headline (2-5 words a real person would say, e.g. "Your plan is ready", "Why starting \
 early matters"). Never poetic/abstract wordplay ("the window worth protecting"). Sentence case, no dash.
-- "generate": only when NONE of the bank photos genuinely fit this email's message. Set image_prompt to \
-one vivid, specific line describing the pose/scene for THIS email (a real North-Asian man mid-30s in a \
-calm, confident, hopeful moment relevant to the message - never sad or worried); it is combined \
-automatically with the approved andSons image standard. Never request text, logos, or watermarks in the \
-prompt.
+- If none of the bank photos genuinely fit this email's moment, choose "none" - a text-first email is \
+always a valid, often better choice than forcing a mismatched photo.
 - Always set hero_rationale to one short line: why this hero (or "none") fits this specific moment.
-- Never invent a new image URL - only the bank keys above, or "generate".
 
 FLOW FOR THIS EMAIL: {flow_name}
 {flow_brief}
@@ -220,22 +215,17 @@ class EmailContent(BaseModel):
         "'Doctor-led plan · Clinically studied · Discreet delivery'. Omit for a simpler email.",
     )
     hero: Literal[tuple(HERO_KEYS)] = Field(
-        description="Which hero image to use: one of the approved bank keys, 'generate' (only when no "
-        "bank photo fits), or 'none' for a deliberate text-first email."
+        description="Which hero image to use: one of the approved bank keys, or 'none' for a deliberate "
+        "text-first email."
     )
     hero_headline: Optional[str] = Field(
         default=None,
-        description="Short, plain, concrete overlay headline (2-5 words) for a RAW bank photo or a "
-        "generated hero. Leave null for 'smiling'/'adjusting' (already baked in) and for 'none'.",
+        description="Short, plain, concrete overlay headline (2-5 words) for a RAW bank photo. Leave "
+        "null for 'smiling'/'adjusting' (already baked in) and for 'none'.",
     )
     hero_rationale: Optional[str] = Field(
         default=None,
         description="One short line: why this hero (or 'none') fits this specific email's moment.",
-    )
-    image_prompt: Optional[str] = Field(
-        default=None,
-        description="Required only when hero is 'generate': one vivid line describing the pose/scene "
-        "for this email, combined automatically with the approved andSons image standard.",
     )
 
 
@@ -266,10 +256,10 @@ def _sanitize_content(content: EmailContent) -> EmailContent:
 
 def resolve_hero(content: EmailContent) -> dict:
     """Turn the Copywriter's hero decision into an actual displayable image.
-    Bank keys resolve to their real approved URL; 'generate' calls the image
-    model (falling back to a text-first email if generation is unavailable
-    or fails); 'none' stays text-first. Baked heroes ('smiling'/'adjusting')
-    never carry a separate overlay headline, since the image already has one."""
+    Bank keys resolve to their real approved local URL; 'none' stays
+    text-first. Baked heroes ('smiling'/'adjusting') never carry a separate
+    overlay headline, since the image already has one. Selection is
+    bank-only - there is no generation fallback."""
     hero = content.hero
     reasons = []
 
@@ -286,33 +276,6 @@ def resolve_hero(content: EmailContent) -> dict:
             "hero_image_url": bank_entry["url"],
             "hero_headline": headline,
             "hero_source": "bank",
-            "hero_rationale": content.hero_rationale,
-            "hero_notes": reasons,
-        }
-
-    if hero == "generate":
-        prompt_line = content.image_prompt or (
-            "He is featured in a calm, professional moment relevant to a hair loss treatment email."
-        )
-        if not content.image_prompt:
-            reasons.append("image_prompt was missing for a 'generate' hero - used a generic fallback scene.")
-        full_prompt = f"{IMAGE_STANDARD_PROMPT} {prompt_line}"
-        image_url = generate_hero_image(full_prompt)
-        if image_url:
-            return {
-                "hero": "generate",
-                "hero_image_url": image_url,
-                "hero_headline": content.hero_headline,
-                "hero_source": "generated",
-                "hero_rationale": content.hero_rationale,
-                "hero_notes": reasons,
-            }
-        reasons.append("Hero generation was unavailable or failed - fell back to a text-first email.")
-        return {
-            "hero": "none",
-            "hero_image_url": None,
-            "hero_headline": None,
-            "hero_source": "none",
             "hero_rationale": content.hero_rationale,
             "hero_notes": reasons,
         }
@@ -342,7 +305,7 @@ def render_email(content: EmailContent, first_name: str, hero_info: Optional[dic
     parts = []
     if hero_info and hero_info.get("hero") != "none" and hero_info.get("hero_image_url"):
         hero_key = hero_info["hero"]
-        description = HERO_BANK.get(hero_key, {}).get("description", "AI-generated hero image")
+        description = HERO_BANK.get(hero_key, {}).get("description", "hero image")
         headline = hero_info.get("hero_headline")
         headline_part = f' — overlay headline: "{headline}"' if headline else ""
         parts.append(f'[HERO IMAGE: {description}{headline_part}]')

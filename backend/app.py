@@ -13,13 +13,19 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from agents.analytics_agent import ask_analytics
+from agents.copywriter_agent import parse_email_request
 from agents.feedback_node import revise_with_feedback, run_email_pipeline
 from flows import VALID_FLOW_SLUGS
 from slack_integration import (
     format_analytics_blocks,
     format_email_blocks,
+    get_email_session,
+    is_retry,
+    post_message,
     post_result_to_slack,
     run_in_background,
+    save_email_session,
+    strip_mention,
     verify_slack_request,
 )
 
@@ -218,6 +224,137 @@ def slack_analytics():
 
     run_in_background(_work)
     return jsonify({"response_type": "ephemeral", "text": "Looking that up..."})
+
+
+# --- Slack @-mention bots (Events API, two separate Slack apps) ---
+# Unlike slash commands, there's no response_url for events - replies go
+# through chat.postMessage with each app's own bot token. Feedback on an
+# email draft is tracked by Slack thread (in-memory), so replying to the
+# bot in the same thread continues that draft instead of starting a new one.
+
+
+@app.route("/slack/events/email", methods=["POST"])
+def slack_events_email():
+    data = request.get_json(silent=True) or {}
+    if data.get("type") == "url_verification":
+        return jsonify({"challenge": data.get("challenge", "")})
+
+    if not verify_slack_request(request, secret=os.environ.get("SLACK_EMAIL_SIGNING_SECRET", "")):
+        return "Invalid request signature", 403
+    if is_retry(request):
+        return "", 200
+
+    event = data.get("event", {})
+    if event.get("type") != "app_mention" or event.get("bot_id"):
+        return "", 200
+
+    channel = event.get("channel")
+    thread_ts = event.get("thread_ts") or event.get("ts")
+    text = strip_mention(event.get("text", ""))
+    bot_token = os.environ.get("SLACK_EMAIL_BOT_TOKEN", "")
+
+    def _work():
+        try:
+            session = get_email_session(channel, thread_ts)
+            if session:
+                result = revise_with_feedback(
+                    session["flow_name"],
+                    session["first_name"],
+                    text,
+                    previous_rendered_text=session["rendered_text"],
+                    feedback_history=session.get("feedback_history", []),
+                )
+                save_email_session(
+                    channel,
+                    thread_ts,
+                    {
+                        "flow_name": session["flow_name"],
+                        "first_name": session["first_name"],
+                        "rendered_text": result["rendered_text"],
+                        "feedback_history": result["feedback_history"],
+                    },
+                )
+                blocks = format_email_blocks(
+                    {"email": result["email"], "passed": result["sweeper_pass"], "retries_used": None},
+                    session["flow_name"],
+                    session["first_name"],
+                )
+                post_message(bot_token, channel, thread_ts=thread_ts, text="Updated draft", blocks=blocks)
+                return
+
+            intent = parse_email_request(text)
+            missing = []
+            if not intent["flow_name"]:
+                missing.append(
+                    "which flow this is for (e.g. \"plan not purchased\", \"cart abandon\", \"consult no-show\", "
+                    "\"winback\")"
+                )
+            if not intent["first_name"]:
+                missing.append("the customer's first name")
+            if missing:
+                post_message(
+                    bot_token, channel, thread_ts=thread_ts,
+                    text="I need a bit more to draft this - tell me " + " and ".join(missing) + ".",
+                )
+                return
+
+            result = run_email_pipeline(intent["flow_name"], intent["first_name"])
+            save_email_session(
+                channel,
+                thread_ts,
+                {
+                    "flow_name": intent["flow_name"],
+                    "first_name": intent["first_name"],
+                    "rendered_text": result["rendered_text"],
+                    "feedback_history": [],
+                },
+            )
+            blocks = format_email_blocks(result, intent["flow_name"], intent["first_name"])
+            post_message(bot_token, channel, thread_ts=thread_ts, text="Draft ready", blocks=blocks)
+        except Exception as exc:  # noqa: BLE001 — surfaced back to Slack
+            post_message(bot_token, channel, thread_ts=thread_ts, text=f"Error generating email: {exc}")
+
+    run_in_background(_work)
+    return "", 200
+
+
+@app.route("/slack/events/analytics", methods=["POST"])
+def slack_events_analytics():
+    data = request.get_json(silent=True) or {}
+    if data.get("type") == "url_verification":
+        return jsonify({"challenge": data.get("challenge", "")})
+
+    if not verify_slack_request(request, secret=os.environ.get("SLACK_ANALYTICS_SIGNING_SECRET", "")):
+        return "Invalid request signature", 403
+    if is_retry(request):
+        return "", 200
+
+    event = data.get("event", {})
+    if event.get("type") != "app_mention" or event.get("bot_id"):
+        return "", 200
+
+    channel = event.get("channel")
+    thread_ts = event.get("thread_ts") or event.get("ts")
+    question = strip_mention(event.get("text", ""))
+    bot_token = os.environ.get("SLACK_ANALYTICS_BOT_TOKEN", "")
+
+    if not question:
+        post_message(
+            bot_token, channel, thread_ts=thread_ts,
+            text="Ask me a question about andSons orders, revenue, or marketing spend.",
+        )
+        return "", 200
+
+    def _work():
+        try:
+            result = ask_analytics(question)
+            blocks = format_analytics_blocks(result, question)
+            post_message(bot_token, channel, thread_ts=thread_ts, blocks=blocks)
+        except Exception as exc:  # noqa: BLE001 — surfaced back to Slack
+            post_message(bot_token, channel, thread_ts=thread_ts, text=f"Error answering question: {exc}")
+
+    run_in_background(_work)
+    return "", 200
 
 
 # --- Serve the built React frontend (so app.py alone serves the whole demo) ---

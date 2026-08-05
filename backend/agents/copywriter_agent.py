@@ -11,7 +11,7 @@ from typing import List, Literal, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from flows import FLOW_BY_SLUG
+from flows import FLOW_BY_SLUG, VALID_FLOW_SLUGS
 from image_bank import HERO_BANK, HERO_KEYS
 from text_sanitize import sanitize_text
 
@@ -431,3 +431,42 @@ def generate_email(flow_name: str, first_name: str, correction: Optional[str] = 
         "rendered_text": rendered,
         "hero_notes": hero_info["hero_notes"],
     }
+
+
+class EmailIntent(BaseModel):
+    flow_name: Optional[Literal[tuple(VALID_FLOW_SLUGS)]] = Field(
+        default=None,
+        description="The andSons lifecycle flow slug this request is asking for, or null if it "
+        "can't be confidently determined from the message.",
+    )
+    first_name: Optional[str] = Field(
+        default=None,
+        description="The customer's first name mentioned in the request, or null if none was given.",
+    )
+
+
+def parse_email_request(text: str) -> dict:
+    """Turn a free-text request (e.g. from a Slack mention - 'write a P1
+    email for Marcus', 'make one for someone who abandoned their cart, his
+    name's Wei') into a flow slug + first name, by matching against the
+    real flow catalog. Either value can be None if the request didn't make
+    it clear, so the caller can ask for clarification instead of guessing."""
+    llm = get_llm("COPYWRITER")
+    structured_llm = llm.with_structured_output(EmailIntent)
+
+    catalog = "\n".join(
+        f'- "{slug}": {flow["label"]} ({flow["track"]} track) - {flow["audience"]}'
+        for slug, flow in FLOW_BY_SLUG.items()
+    )
+    system_text = (
+        "You match a free-text request to exactly one andSons CRM lifecycle flow, from this real "
+        "catalog (slug: label - who it's for):\n" + catalog + "\n\n"
+        "Extract the customer's first name if one is mentioned. If the message doesn't clearly map "
+        "to one of these flows, leave flow_name null rather than guessing - do not default to the "
+        "first flow in the list just because none matched. If no name is mentioned, leave "
+        "first_name null."
+    )
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", text)])
+    chain = prompt | structured_llm
+    result: EmailIntent = chain.invoke({})
+    return {"flow_name": result.flow_name, "first_name": result.first_name}

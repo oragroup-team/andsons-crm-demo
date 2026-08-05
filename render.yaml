@@ -25,6 +25,14 @@ services:
         sync: false
       - key: SLACK_SIGNING_SECRET
         sync: false
+      - key: SLACK_EMAIL_SIGNING_SECRET
+        sync: false
+      - key: SLACK_EMAIL_BOT_TOKEN
+        sync: false
+      - key: SLACK_ANALYTICS_SIGNING_SECRET
+        sync: false
+      - key: SLACK_ANALYTICS_BOT_TOKEN
+        sync: false
       # Not secrets (just config) - committed directly so Blueprint syncs
       # keep them current. ora_bigquery_pipeline is the real ORA group
       # warehouse (multi-brand/multi-country); restricted to the 3 tables

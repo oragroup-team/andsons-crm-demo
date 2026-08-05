@@ -1,24 +1,33 @@
-"""Slack integration - lets office coworkers ask analytics questions and
-generate CRM emails directly from Slack via slash commands, for testing.
+"""Slack integration - lets office coworkers use both agents directly from
+Slack, for testing. Two interaction styles:
 
-Slash commands must be acknowledged within 3 seconds, so each command
-immediately returns a short placeholder response and does the real work
-(LLM calls, which can take several seconds) in a background thread, then
-posts the final result to Slack's one-time `response_url` when it's done.
+1. Slash commands (/andsons-email, /andsons-ask) - original, simplest style.
+   No bot token needed; Slack's one-time `response_url` lets the app post
+   back without any OAuth install/scopes.
+2. @-mentioning a bot in a channel and talking to it in plain language -
+   two separate Slack apps/bots (one for email generation, one for
+   analytics), each with their own name, Signing Secret, and Bot Token.
+   This style needs the Events API (app_mention) and a real bot token,
+   since there's no response_url for events - replies go through
+   chat.postMessage. Feedback on an email draft is tracked by Slack thread
+   (thread_ts), in-memory, so replying in the same thread continues that
+   draft instead of starting a new one.
 
-No bot token is needed for this - a slash command's `response_url` lets the
-app post back without any OAuth install/scopes, so the only Slack-side
-secret required is the app's Signing Secret (used to verify a request
-genuinely came from Slack, not an impersonator hitting these endpoints).
+Both styles ack within Slack's 3-second window and do the real work (LLM
+calls, which can take several seconds) in a background thread.
 """
 import logging
 import os
+import re
 import threading
 
 import requests
+from slack_sdk import WebClient
 from slack_sdk.signature import SignatureVerifier
 
 logger = logging.getLogger("slack_integration")
+
+_MENTION_RE = re.compile(r"^\s*<@[A-Z0-9]+>\s*[:,]?\s*", re.IGNORECASE)
 
 
 def _signing_secret() -> str:
@@ -29,12 +38,13 @@ def slack_configured() -> bool:
     return bool(_signing_secret())
 
 
-def verify_slack_request(request) -> bool:
+def verify_slack_request(request, secret: str = None) -> bool:
     """Confirm a request actually came from Slack (HMAC-signed with the
-    app's Signing Secret) before doing any work on its behalf."""
-    secret = _signing_secret()
+    given Signing Secret, or SLACK_SIGNING_SECRET by default) before doing
+    any work on its behalf."""
+    secret = secret if secret is not None else _signing_secret()
     if not secret:
-        logger.warning("SLACK_SIGNING_SECRET not set - rejecting Slack request.")
+        logger.warning("No Slack signing secret configured - rejecting request.")
         return False
     verifier = SignatureVerifier(secret)
     return verifier.is_valid_request(request.get_data(), request.headers)
@@ -47,9 +57,47 @@ def post_result_to_slack(response_url: str, payload: dict) -> None:
         logger.exception("Failed to post result back to Slack response_url.")
 
 
+def post_message(bot_token: str, channel: str, thread_ts: str = None, text: str = "", blocks: list = None) -> None:
+    """Post a message to a channel via chat.postMessage (needs a real bot
+    token - used by the mention-based bots, which have no response_url)."""
+    try:
+        client = WebClient(token=bot_token)
+        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text or " ", blocks=blocks)
+    except Exception:
+        logger.exception("Failed to post message via chat.postMessage.")
+
+
 def run_in_background(target, *args, **kwargs) -> None:
     thread = threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True)
     thread.start()
+
+
+def strip_mention(text: str) -> str:
+    """Remove the leading '<@BOTID>' Slack renders at the start of an
+    app_mention event's text, leaving just what the person actually said."""
+    return _MENTION_RE.sub("", text or "").strip()
+
+
+def is_retry(request) -> bool:
+    """Slack redelivers an event if it doesn't get a fast-enough ack; since
+    our real work happens in a background thread after acking, a retried
+    delivery would otherwise double-process and double-post. Skip it."""
+    return bool(request.headers.get("X-Slack-Retry-Num"))
+
+
+# --- In-memory per-thread session state (email feedback loops) -------------
+# Keyed by (channel, thread_ts). Resets on process restart - fine for a demo,
+# same tradeoff as the free-tier mock database.
+
+_EMAIL_SESSIONS: dict = {}
+
+
+def get_email_session(channel: str, thread_ts: str) -> dict:
+    return _EMAIL_SESSIONS.get((channel, thread_ts))
+
+
+def save_email_session(channel: str, thread_ts: str, session: dict) -> None:
+    _EMAIL_SESSIONS[(channel, thread_ts)] = session
 
 
 # --- Slack Block Kit formatting --------------------------------------------
@@ -104,11 +152,13 @@ def format_email_blocks(result: dict, flow_name: str, first_name: str) -> list:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": email["trust_line"]}]})
 
     status = "Passed brand QA" if result.get("passed") else "Needs human review"
-    retries = result.get("retries_used", 0)
+    retries = result.get("retries_used")
+    footer = f"{status} - {retries} automatic revision(s)" if retries else status
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": footer}]})
     blocks.append(
         {
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"{status} - {retries} automatic revision(s)"}],
+            "elements": [{"type": "mrkdwn", "text": "Reply in this thread with feedback to revise this draft."}],
         }
     )
 

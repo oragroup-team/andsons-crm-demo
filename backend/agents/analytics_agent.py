@@ -1,4 +1,4 @@
-"""Analytics chat agent - LangChain SQL agent over the andSons SQLite DB.
+"""Analytics chat agent - LangChain SQL agent over the live ORA BigQuery warehouse.
 
 The agent must NEVER state a number in its final answer that didn't come
 from an actual query result. Enforced with a system-prompt instruction PLUS
@@ -24,34 +24,6 @@ from text_sanitize import sanitize_text
 from .llm_provider import get_llm
 
 logger = logging.getLogger("analytics_agent")
-
-MOCK_SCHEMA_NOTES = """SCHEMA NOTES (the financial/status columns are grounded in andSons' real BigQuery \
-sales and marketing tables, so use the exact real-world semantics below, not guesses):
-- campaigns.flow_name holds the andSons hair-loss lifecycle flow slugs (e.g. p1_plan_not_purchased, \
-p2_consult_no_show, p3_otc_cart_abandon, the_valley, consult_booking, replenishment_dunning, \
-rx_not_suitable_otc, aov_growth, winback, results_milestone, quiz_recovery).
-- orders.status is the order lifecycle state: DELIVERED, PACKED_DISPATCHED, PAID_APPROVED, \
-PAID_PENDING_DOCTOR, PAID_CONSULTATION_ONLY, REFUND, or CANCELLED. REFUND means the order was paid then \
-fully reversed (final_revenue is 0 for those rows); CANCELLED means it never completed (revenue, cogs, \
-and final_revenue are all 0 for those rows) - exclude both from "how much did we sell" style questions \
-unless asked specifically about refunds/cancellations.
-- orders.order_type is either "Products" (a physical product shipped) or "Consult Only" (a free, \
-doctor-led consultation with no product - revenue is 0 for these).
-- orders.revenue is gross revenue before discounts/cashback; orders.final_revenue is net revenue after \
-discounts and cashback (use final_revenue for "how much revenue" questions unless the user asks for \
-gross). orders.cogs is cost of goods sold. orders.delivery_fee is always 0 (andSons ships free).
-- orders.revenue_type classifies the sale, e.g. "New Customer 3 Month Sub", "Repeat 1 Month Sub", \
-"Repeat 6 Month Sub", "New Customer One-off", or "Consult Only".
-- products.prescription_type is "Prescription" (the doctor-prescribed Rx plan) or "Non-Prescription" \
-(OTC products like the Redensyl serum) - do not name the specific prescription medicine even if asked, \
-only refer to it as "the doctor-prescribed plan" (the real product name is intentionally generic in this \
-database too, matching the brand's compliance rule that prescription medicines are never named).
-- marketing_spend holds weekly ad spend by channel (Facebook, Google, TikTok) at two classification \
-levels: "Category-Level" (category = 'HL', spend specifically on Hair Loss) and "Overall-Level" (the \
-whole andSons account on that channel, category is null). NEVER sum both classification levels together \
-in the same total - that double-counts spend. Default to Category-Level ('HL') rows for "how much did we \
-spend on marketing" questions unless the user asks about overall/account-wide spend.
-This is a demo/mock database, standing in for the real warehouse below while it isn't connected."""
 
 BIGQUERY_SCHEMA_NOTES = """SCHEMA NOTES (this is the real ORA group data warehouse - it holds every ORA \
 brand and country together, so filtering correctly is essential, not optional):
@@ -174,28 +146,16 @@ plain hyphen (-), regular periods, and normal single spaces.
 """
 
 
-def _get_mock_db() -> SQLDatabase:
-    db_path = os.environ.get(
-        "DATABASE_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "andsons.db")
-    )
-    abs_path = os.path.abspath(db_path)
-    # Read-only connection: a real, database-level guarantee that no query
-    # this agent runs can ever write, regardless of how the question is
-    # phrased or whether the prompt-level instruction is followed - not just
-    # a prompt-level ask.
-    return SQLDatabase.from_uri(f"sqlite:///file:{abs_path}?mode=ro&uri=true")
-
-
-def _try_bigquery_db() -> "SQLDatabase | None":
-    """Attempt a live, read-only BigQuery connection if BIGQUERY_PROJECT_ID
-    is configured. Returns None (never raises) if it isn't configured, or if
-    the connection can't actually be used right now (missing/expired
-    credentials, no IAM permission, wrong project) - the caller falls back
-    to the local mock database in that case, so a broken or not-yet-granted
-    BigQuery connection never breaks the demo."""
+def _connect_bigquery() -> SQLDatabase:
+    """Connect to the real ORA BigQuery warehouse. Raises clearly (caught in
+    ask_analytics, surfaced as a plain error to the caller) if it isn't
+    configured or isn't reachable right now - there is no mock-data
+    fallback, this agent only ever answers from the live warehouse."""
     project_id = os.environ.get("BIGQUERY_PROJECT_ID")
     if not project_id:
-        return None
+        raise RuntimeError(
+            "BIGQUERY_PROJECT_ID is not set. The analytics agent requires a live BigQuery connection."
+        )
 
     dataset = os.environ.get("BIGQUERY_DATASET")
     uri = f"bigquery://{project_id}/{dataset}" if dataset else f"bigquery://{project_id}"
@@ -208,42 +168,19 @@ def _try_bigquery_db() -> "SQLDatabase | None":
     tables_env = os.environ.get("BIGQUERY_TABLES")
     include_tables = [t.strip() for t in tables_env.split(",") if t.strip()] if tables_env else None
 
-    try:
-        kwargs = {"include_tables": include_tables} if include_tables else {}
-        db = SQLDatabase.from_uri(uri, **kwargs)
-        db.get_usable_table_names()  # forces a real connectivity/permission check now
-        logger.info("Connected to live BigQuery project %s.", project_id)
-        return db
-    except Exception:
-        logger.warning(
-            "BigQuery project %s configured but not reachable right now - falling back to local "
-            "mock data for this session.",
-            project_id,
-            exc_info=True,
-        )
-        return None
-
-
-@functools.lru_cache(maxsize=1)
-def _get_db_cached() -> tuple:
-    """Resolve the database once per process (BigQuery reachability doesn't
-    change mid-session) and remember which source is actually in use, so the
-    UI can show it and repeated questions don't pay the connectivity-check
-    cost every time."""
-    bq_db = _try_bigquery_db()
-    if bq_db is not None:
-        return bq_db, "bigquery"
-    return _get_mock_db(), "mock"
-
-
-def _get_db() -> SQLDatabase:
-    db, _ = _get_db_cached()
+    kwargs = {"include_tables": include_tables} if include_tables else {}
+    db = SQLDatabase.from_uri(uri, **kwargs)
+    db.get_usable_table_names()  # forces a real connectivity/permission check now
+    logger.info("Connected to live BigQuery project %s.", project_id)
     return db
 
 
-def _data_source() -> str:
-    _, source = _get_db_cached()
-    return source
+@functools.lru_cache(maxsize=1)
+def _get_db_cached() -> SQLDatabase:
+    """Resolve the connection once per process - BigQuery reachability
+    doesn't change mid-session, so this avoids paying the connectivity-check
+    cost on every question."""
+    return _connect_bigquery()
 
 
 NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
@@ -324,7 +261,7 @@ def _verify_numbers(answer: str, tool_results_text: str) -> bool:
     source_numbers = [float(n) for n in _extract_numbers(tool_results_text)]
     for num in numbers:
         # Try exact token match first, then a loose substring match (handles
-        # "39.0" vs "39.00" style formatting differences from SQLite).
+        # "39.0" vs "39.00" style formatting differences from BigQuery).
         if num in haystack:
             continue
         try:
@@ -347,16 +284,25 @@ def ask_analytics(question: str, conversation_history: Optional[list] = None) ->
     actual answer with a fresh query rather than reuse a figure from an
     earlier turn, so the number-grounding guardrail below still applies in
     full to every answer regardless of history."""
-    db, data_source = _get_db_cached()
-
     if _contains_write_operation(question):
-        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": data_source}
+        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": "bigquery"}
+
+    try:
+        db = _get_db_cached()
+    except Exception:
+        logger.exception("BigQuery connection unavailable.")
+        return {
+            "answer": "I can't reach the live BigQuery connection right now, so I can't answer that. "
+            "This usually means the credentials or IAM permission need attention.",
+            "sql_query": "",
+            "verified": False,
+            "data_source": "bigquery",
+        }
 
     llm = get_llm("ANALYTICS")
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
-    schema_notes = BIGQUERY_SCHEMA_NOTES if data_source == "bigquery" else MOCK_SCHEMA_NOTES
-    system_prefix = SYSTEM_PREFIX_TEMPLATE.format(schema_notes=schema_notes)
+    system_prefix = SYSTEM_PREFIX_TEMPLATE.format(schema_notes=BIGQUERY_SCHEMA_NOTES)
 
     agent_executor = create_sql_agent(
         llm=llm,
@@ -407,10 +353,10 @@ def ask_analytics(question: str, conversation_history: Optional[list] = None) ->
     sql_query = "\n\n".join(executed_queries)
 
     if _contains_write_operation(sql_query):
-        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": data_source}
+        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery"}
 
     if _contains_pii(raw_answer):
-        return {"answer": PII_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": data_source}
+        return {"answer": PII_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery"}
 
     verified = _verify_numbers(raw_answer, tool_results_text)
     if verified:
@@ -422,5 +368,5 @@ def ask_analytics(question: str, conversation_history: Optional[list] = None) ->
         "answer": answer,
         "sql_query": sql_query,
         "verified": verified,
-        "data_source": data_source,
+        "data_source": "bigquery",
     }

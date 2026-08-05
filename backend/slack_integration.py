@@ -86,8 +86,8 @@ def is_retry(request) -> bool:
 
 
 # --- In-memory per-thread session state (email feedback loops) -------------
-# Keyed by (channel, thread_ts). Resets on process restart - fine for a demo,
-# same tradeoff as the free-tier mock database.
+# Keyed by (channel, thread_ts). Resets on process restart - fine for a demo
+# on Render's free tier, which spins down on idle anyway.
 
 _EMAIL_SESSIONS: dict = {}
 
@@ -200,7 +200,7 @@ def format_email_blocks(result: dict, flow_name: str, first_name: str) -> list:
 
 def format_analytics_blocks(result: dict, question: str) -> list:
     verified_text = "grounded in query result" if result.get("verified") else "unverified"
-    source = "live BigQuery" if result.get("data_source") == "bigquery" else "mock data"
+    source = "live BigQuery"
 
     blocks = [
         {

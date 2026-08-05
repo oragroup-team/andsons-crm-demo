@@ -36,18 +36,6 @@ FRONTEND_DIR = os.path.abspath(os.path.join(BACKEND_DIR, "..", "frontend"))
 FRONTEND_DIST = os.path.join(FRONTEND_DIR, "dist")
 
 
-def ensure_db_seeded():
-    """Seed the SQLite database on first run so `python3 app.py` alone is
-    enough to get a working demo — no separate seed_data.py step required."""
-    db_path = os.environ.get("DATABASE_PATH", os.path.join(BACKEND_DIR, "andsons.db"))
-    if os.path.exists(db_path):
-        return
-    print("No database found at", db_path, "— seeding it now (first run only)...")
-    import seed_data
-
-    seed_data.main()
-
-
 def ensure_frontend_built():
     """Build the React frontend on first run (if it hasn't been built yet)
     so app.py can serve it directly — no separate `npm run dev` needed."""
@@ -71,7 +59,6 @@ def ensure_frontend_built():
     print("Frontend built.")
 
 
-ensure_db_seeded()
 ensure_frontend_built()
 
 app = Flask(__name__, static_folder=FRONTEND_DIST, static_url_path="")

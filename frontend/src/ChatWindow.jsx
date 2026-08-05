@@ -75,9 +75,7 @@ export default function ChatWindow() {
                     {m.verified ? "✓ grounded in query result" : "⚠ unverified"}
                   </div>
                   {m.dataSource && (
-                    <div className="data-source-badge">
-                      Source: {m.dataSource === "bigquery" ? "live BigQuery" : "mock data"}
-                    </div>
+                    <div className="data-source-badge">Source: live BigQuery</div>
                   )}
                   {m.sqlQuery && (
                     <details className="sql-details">

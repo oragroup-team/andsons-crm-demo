@@ -3,9 +3,6 @@
 # "New +" -> "Blueprint" and point it at this repo.
 #
 # Free plan notes (see README "Deploying to Render" for the tradeoffs):
-# - No persistent disk on the free plan, so backend/andsons.db resets (and
-#   re-seeds with fresh synthetic data) on every restart/redeploy - fine for
-#   a demo, not fine if you need stable history across restarts.
 # - Free services spin down after 15 min idle and cold-start (~30-50s) on
 #   the next request - the very first Slack command after an idle period
 #   may time out because Slack's ack window is 3 seconds. Upgrade to the
@@ -68,14 +65,3 @@ services:
         value: openai/gpt-oss-120b
       - key: ANALYTICS_GROQ_MODEL
         value: openai/gpt-oss-120b
-
-    # Uncomment to add a persistent disk for backend/andsons.db (requires a
-    # paid plan - Render's free plan does not support disks):
-    # disk:
-    #   name: andsons-data
-    #   mountPath: /var/data
-    #   sizeGB: 1
-    # ...and add this env var so the app writes there instead of the
-    # container's ephemeral filesystem:
-    #   - key: DATABASE_PATH
-    #     value: /var/data/andsons.db

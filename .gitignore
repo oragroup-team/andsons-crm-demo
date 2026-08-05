@@ -4,7 +4,6 @@ Image_Bank/
 Hari ORA Service Account Key.json
 *Service Account Key*.json
 backend/vendor/
-backend/andsons.db
 backend/.env
 frontend/node_modules/
 frontend/dist/

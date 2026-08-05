@@ -103,6 +103,20 @@ def save_email_session(channel: str, thread_ts: str, session: dict) -> None:
 # --- Slack Block Kit formatting --------------------------------------------
 
 
+def _absolute_url(path: str) -> str:
+    """Slack's image blocks are downloaded server-side, so a relative path
+    like /hero-images/adjusting.jpg (fine in a browser, which resolves it
+    against the page's own origin) fails with 'downloading image failed' -
+    Slack has no such origin context. Render sets RENDER_EXTERNAL_URL
+    automatically to the service's own public URL; PUBLIC_BASE_URL is a
+    manual override for other hosts. Falls back to the path itself
+    unchanged if neither is set (e.g. running purely locally)."""
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    base = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+    return f"{base.rstrip('/')}{path}" if base else path
+
+
 def format_email_blocks(result: dict, flow_name: str, first_name: str) -> list:
     email = result["email"]
     blocks = [
@@ -116,7 +130,7 @@ def format_email_blocks(result: dict, flow_name: str, first_name: str) -> list:
         blocks.append(
             {
                 "type": "image",
-                "image_url": email["hero_image_url"],
+                "image_url": _absolute_url(email["hero_image_url"]),
                 "alt_text": email.get("hero_headline") or email.get("hero") or "hero image",
             }
         )

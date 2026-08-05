@@ -33,6 +33,11 @@ services:
         sync: false
       - key: SLACK_ANALYTICS_BOT_TOKEN
         sync: false
+      # Slack's Block Kit image blocks are fetched server-side, so a
+      # relative hero image path needs an absolute URL to resolve - not a
+      # secret, hardcoded here since the service's URL is fixed.
+      - key: PUBLIC_BASE_URL
+        value: https://andsons-crm-demo.onrender.com
       # Not secrets (just config) - committed directly so Blueprint syncs
       # keep them current. ora_bigquery_pipeline is the real ORA group
       # warehouse (multi-brand/multi-country); restricted to the 3 tables

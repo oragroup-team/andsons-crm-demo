@@ -104,6 +104,13 @@ Replenishment/Dunning), stated plainly and without guilt.
 - CTA convention: verb + "My" + noun, e.g. "Start My Treatment", "Book My Free Consultation", "Complete \
 My Order", "Confirm My Next Delivery" - match the flow's suggested CTA below unless a closer variant \
 reads more naturally.
+- WRITE LIKE A SHARP HUMAN, NOT A BROCHURE: every line - subject, preheader, opening lines, hero \
+headline, CTA - should sound like something a smart, warm person would actually say out loud, never a \
+clinical label or a form field. Avoid flat administrative nouns standing in for the real moment: \
+"consult" / "consultation" (say "talk to a doctor", "your doctor call" instead), "appointment", \
+"engagement", "assessment" (say "the quiz", "what you told us"), "solution" for a product. Prefer a \
+concrete verb and a specific detail over an abstract noun. If a line could be pasted into any generic \
+telehealth brand's email unchanged, it's too generic - make it specific to andSons and this moment.
 
 COMPLIANCE (hard rules, every flow):
 - NEVER name a prescription medicine (Minoxidil, Finasteride, or any drug name) anywhere in the copy. Rx \
@@ -142,13 +149,25 @@ HERO IMAGE SELECTION (per-email judgement, not a default habit): a hero is OPTIO
 it genuinely strengthens THIS message; a clean text-first email (hero: "none") is often more premium and \
 personal than a forced photo. The image is an argument: it must argue the same thing the copy argues, at \
 the same emotional moment. Never repeat a hero out of habit; a weak or ill-fitting image is worse than no \
-image. Choose ONLY from the approved photo bank below - never invent or request a new image.
-Choose exactly one of: {hero_keys}, or "none".
+image. Choose ONLY from the approved photo bank below - never invent or request a new image. Actually \
+look at what each photo shows and the moment it's built for before choosing - don't default to \
+whichever key sounds vaguely safe; across many emails you should draw from across this whole bank, not \
+lean on one or two favourites.
+
+APPROVED PHOTO BANK:
+{hero_catalog}
+
 - "smiling" and "adjusting" are LOCKED heroes with a headline already baked into the image file - do NOT \
 set hero_headline for these (leave it null); adding one would duplicate the text on the image.
-- {raw_hero_keys} are RAW photos with no baked text - if you use one, set hero_headline to a short, PLAIN, \
-CONCRETE, literal headline (2-5 words a real person would say, e.g. "Your plan is ready", "Why starting \
-early matters"). Never poetic/abstract wordplay ("the window worth protecting"). Sentence case, no dash.
+- Every other key is a RAW photo with no baked text - if you use one, set hero_headline to a short, \
+CONCRETE line (2-5 words, strictly - count them) a real person would actually SAY out loud in \
+conversation, not a label or a feature name. Never a formal/clinical noun phrase like "Your private \
+consult" or "Your treatment appointment" - those are things a brochure calls a thing, not something a \
+person says. Prefer a plain sentence fragment with a verb or a feeling in it, all within 2-5 words. \
+These are ILLUSTRATIVE STYLE EXAMPLES ONLY, to show the register - never reuse one of them verbatim, \
+write a fresh line specific to what THIS email is actually about: "Your plan is ready", "Small \
+changes, real difference", "Worth ten minutes", "See what changed". Never poetic/abstract wordplay \
+either ("the window worth protecting"). Sentence case, no dash.
 - If none of the bank photos genuinely fit this email's moment, choose "none" - a text-first email is \
 always a valid, often better choice than forcing a mismatched photo.
 - Always set hero_rationale to one short line: why this hero (or "none") fits this specific moment.
@@ -158,6 +177,18 @@ FLOW FOR THIS EMAIL: {flow_name}
 
 Address the customer by first name: {first_name}.
 """
+
+
+def _build_hero_catalog() -> str:
+    """Render the full hero bank - key, what the photo actually shows, and
+    the moment it's built for - so the Copywriter chooses based on real
+    content instead of guessing from a bare key name (that gap was why it
+    kept defaulting to the same one or two 'safe-sounding' keys)."""
+    lines = []
+    for key, entry in HERO_BANK.items():
+        locked = " [LOCKED - headline already baked in, do not add hero_headline]" if entry["baked_headline"] else ""
+        lines.append(f'- "{key}"{locked}: {entry["description"]}. Best for: {entry["moment"]}.')
+    return "\n".join(lines)
 
 
 def _build_flow_brief(flow_slug: str) -> str:
@@ -305,9 +336,20 @@ def render_email(content: EmailContent, first_name: str, hero_info: Optional[dic
     parts = []
     if hero_info and hero_info.get("hero") != "none" and hero_info.get("hero_image_url"):
         hero_key = hero_info["hero"]
-        description = HERO_BANK.get(hero_key, {}).get("description", "hero image")
+        bank_entry = HERO_BANK.get(hero_key, {})
+        description = bank_entry.get("description", "hero image")
         headline = hero_info.get("hero_headline")
-        headline_part = f' — overlay headline: "{headline}"' if headline else ""
+        is_baked = bank_entry.get("baked_headline") is not None
+        # Label matters for the Sweeper: a baked-in headline is part of the
+        # approved image file itself (exempt from the 2-5 word overlay
+        # rule), never text the Copywriter wrote - mislabelling it as an
+        # "overlay headline" makes the Sweeper wrongly fail a real, already
+        # approved hero photo.
+        if headline:
+            label = "baked-in headline (already part of the approved image, not subject to the overlay word-count rule)" if is_baked else "overlay headline"
+            headline_part = f' — {label}: "{headline}"'
+        else:
+            headline_part = ""
         parts.append(f'[HERO IMAGE: {description}{headline_part}]')
         parts.append("")
 
@@ -350,14 +392,12 @@ def generate_email(flow_name: str, first_name: str, correction: Optional[str] = 
     structured_llm = llm.with_structured_output(EmailContent)
 
     flow_brief = _build_flow_brief(flow_name)
-    raw_hero_keys = [k for k, v in HERO_BANK.items() if v["baked_headline"] is None]
     system_text = SYSTEM_PROMPT.format(
         golden_reference=GOLDEN_P1_REFERENCE,
         flow_name=flow_name,
         flow_brief=flow_brief,
         first_name=first_name,
-        hero_keys=", ".join(f'"{k}"' for k in HERO_BANK.keys()),
-        raw_hero_keys=", ".join(f'"{k}"' for k in raw_hero_keys),
+        hero_catalog=_build_hero_catalog(),
     )
 
     human_text = f"Write the {flow_name} email for {first_name}."

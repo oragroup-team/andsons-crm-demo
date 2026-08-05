@@ -56,8 +56,10 @@ HERO IMAGE (when a "[HERO IMAGE: ...]" block is present at the top of the candid
 illustration, or star-rating graphic standing in for one.
 - The hero must genuinely fit THIS email's message and moment; a hero that reads as generic, forced, or \
 mismatched to the email's content (e.g. a routine/grooming photo on a doctor-consult reminder) is a fail.
-- The overlay headline (when present) must be short, plain, and concrete (2-5 words), never poetic or \
-abstract wordplay, and never duplicated for a hero that already has a baked-in headline.
+- An "overlay headline" (when present) must be short, plain, and concrete (2-5 words), never poetic or \
+abstract wordplay - but a "baked-in headline" is different: it's text already part of the approved \
+image file itself, not something the Copywriter wrote, so it is NOT subject to the 2-5 word rule or \
+any wording check - never fail an email for a baked-in headline's length or phrasing.
 - The hero block must appear first, before Subject/Preheader, when present.
 - At most one hero per email (this is enforced upstream, but flag it if you somehow see more than one).
 

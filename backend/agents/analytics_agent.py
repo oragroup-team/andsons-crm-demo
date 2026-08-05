@@ -83,6 +83,12 @@ signup_timestamp, cohort/attribution fields) - use it only when a question needs
 attribution or cohort data that dotcom_plus_marketplace doesn't have. NEVER sum revenue across both \
 tables together in the same total - that double-counts the same orders. updated_sales_data.email and \
 .phone are real customer PII - never state one in an answer, aggregate only.
+- EMAIL / CRM IMPACT: updated_sales_data.orders_utm_medium is the real (order-level) proxy for \
+email-driven orders - values include "email", "EMAIL", and "ATM_EMAIL" (case-varies, match with LOWER() \
+LIKE '%email%'). orders_utm_source also includes "MoEngage" and "Insider", which are real CRM/email \
+marketing platforms - include them when a question is about CRM/lifecycle-email impact broadly. This is \
+order-attribution, not send/open/click event data - phrase answers as "email-attributed orders/revenue", \
+never as "opens" or "clicks" (that data doesn't exist here).
 - marketing_spend_data holds spend by Country, Brand, Channel, and month (Spends, Clicks, Impressions), \
 at several Classification levels: "Category-Level" (paired with a Category like 'HL' for Hair Loss, \
 'Weight_Loss', 'Supplements', 'EDPE'), "Overall-Level" (whole-account spend on that channel), and \

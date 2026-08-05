@@ -13,6 +13,7 @@ import functools
 import logging
 import os
 import re
+from typing import Optional
 
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
@@ -338,7 +339,14 @@ def _verify_numbers(answer: str, tool_results_text: str) -> bool:
     return True
 
 
-def ask_analytics(question: str) -> dict:
+def ask_analytics(question: str, conversation_history: Optional[list] = None) -> dict:
+    """conversation_history, if given, is a list of {"question": ..., "answer": ...}
+    dicts from earlier turns in the same thread/session - used only to resolve
+    context ("the same", "that flow", "what about X instead"), never as a
+    source of numbers. The model is explicitly told to always recompute the
+    actual answer with a fresh query rather than reuse a figure from an
+    earlier turn, so the number-grounding guardrail below still applies in
+    full to every answer regardless of history."""
     db, data_source = _get_db_cached()
 
     if _contains_write_operation(question):
@@ -359,7 +367,21 @@ def ask_analytics(question: str) -> dict:
         agent_executor_kwargs={"return_intermediate_steps": True},
     )
 
-    result = agent_executor.invoke({"input": question})
+    if conversation_history:
+        history_text = "\n\n".join(
+            f"Q: {h['question']}\nA: {h['answer']}" for h in conversation_history
+        )
+        agent_input = (
+            "Conversation so far in this thread, for CONTEXT ONLY - use it to resolve references like "
+            "\"the same\", \"that flow\", \"what about X instead\", but NEVER copy a number from it "
+            "directly into your new answer. Always compute the new answer with a fresh query, even if "
+            "it looks like something already answered above:\n---\n" + history_text + "\n---\n\n"
+            "New question: " + question
+        )
+    else:
+        agent_input = question
+
+    result = agent_executor.invoke({"input": agent_input})
     raw_output = result.get("output", "").strip()
     if raw_output.lower().startswith("agent stopped due to"):
         raw_output = (

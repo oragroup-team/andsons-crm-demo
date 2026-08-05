@@ -17,8 +17,10 @@ from agents.copywriter_agent import parse_email_request
 from agents.feedback_node import revise_with_feedback, run_email_pipeline
 from flows import VALID_FLOW_SLUGS
 from slack_integration import (
+    append_analytics_exchange,
     format_analytics_blocks,
     format_email_blocks,
+    get_analytics_history,
     get_email_session,
     is_retry,
     post_message,
@@ -347,7 +349,9 @@ def slack_events_analytics():
 
     def _work():
         try:
-            result = ask_analytics(question)
+            history = get_analytics_history(channel, thread_ts)
+            result = ask_analytics(question, conversation_history=history)
+            append_analytics_exchange(channel, thread_ts, question, result["answer"])
             blocks = format_analytics_blocks(result, question)
             post_message(bot_token, channel, thread_ts=thread_ts, blocks=blocks)
         except Exception as exc:  # noqa: BLE001 — surfaced back to Slack

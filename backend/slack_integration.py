@@ -100,6 +100,25 @@ def save_email_session(channel: str, thread_ts: str, session: dict) -> None:
     _EMAIL_SESSIONS[(channel, thread_ts)] = session
 
 
+# --- In-memory per-thread conversation history (analytics bot context) -----
+# Same tradeoff as above. Capped per-thread so a very long-running thread
+# doesn't grow the prompt unboundedly.
+
+_ANALYTICS_SESSIONS: dict = {}
+_ANALYTICS_HISTORY_LIMIT = 6
+
+
+def get_analytics_history(channel: str, thread_ts: str) -> list:
+    return _ANALYTICS_SESSIONS.get((channel, thread_ts), [])
+
+
+def append_analytics_exchange(channel: str, thread_ts: str, question: str, answer: str) -> None:
+    key = (channel, thread_ts)
+    history = _ANALYTICS_SESSIONS.get(key, [])
+    history.append({"question": question, "answer": answer})
+    _ANALYTICS_SESSIONS[key] = history[-_ANALYTICS_HISTORY_LIMIT:]
+
+
 # --- Slack Block Kit formatting --------------------------------------------
 
 

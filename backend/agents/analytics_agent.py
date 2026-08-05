@@ -65,8 +65,12 @@ revenue/order questions.
 - status values are channel-prefixed, e.g. "[Dotcom] DELIVERED", "[Dotcom] PACKED_DISPATCHED", \
 "[Dotcom] PAID_CONSULTATION_ONLY", "[Dotcom] REFUND", "[Dotcom] PAYMENT_EXPIRED", "[Marketplace] \
 Completed", "[Marketplace] Confirmed", "[Marketplace] Cancelled", "[Marketplace] Delivered" - match with \
-LIKE '%DELIVERED%' / '%Completed%' style patterns rather than assuming the exact prefix, and exclude \
-REFUND/CANCELLED/EXPIRED-style statuses from "how much did we sell" questions unless asked specifically.
+LIKE '%DELIVERED%' / '%Completed%' style patterns rather than assuming the exact prefix. ALWAYS exclude \
+REFUND/CANCELLED/EXPIRED-style statuses by default on EVERY revenue or order-count question on this table \
+or updated_sales_data - not only ones phrased like "how much did we sell", but also comparisons, shares, \
+rates, and trends - so that two numbers being compared or combined are always measuring the same \
+population. Only include them if the question explicitly asks about refunds/cancellations, or asks for a \
+gross/all-orders figure specifically.
 - Channel spans Dotcom, Shopee, Lazada, Zalora, and TikTok - andSons sells on real marketplaces, not just \
 its own site. Default to no channel filter (all channels) unless asked about one specifically.
 - Order_Type is "Products" or "Consult Only" (free doctor-led consult, no product, revenue is 0).

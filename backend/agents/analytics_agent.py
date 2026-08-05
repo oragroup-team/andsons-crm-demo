@@ -89,6 +89,11 @@ LIKE '%email%'). orders_utm_source also includes "MoEngage" and "Insider", which
 marketing platforms - include them when a question is about CRM/lifecycle-email impact broadly. This is \
 order-attribution, not send/open/click event data - phrase answers as "email-attributed orders/revenue", \
 never as "opens" or "clicks" (that data doesn't exist here).
+- SPECIFIC LIFECYCLE FLOW TAGS: updated_sales_data.orders_utm_campaign carries real named CRM flow tags \
+you can match with LOWER() LIKE, e.g. "abandoned_cart_v8" (cart-abandon recovery), "winback" (win-back), \
+"WelcomeFlow_New" (welcome flow), "tp_email" (treatment-plan email), "order_approved" (order confirmation) \
+- these let you answer "how much did flow X drive" questions precisely, grounded in the real campaign tag, \
+rather than only the broad orders_utm_medium = email proxy.
 - marketing_spend_data holds spend by Country, Brand, Channel, and month (Spends, Clicks, Impressions), \
 at several Classification levels: "Category-Level" (paired with a Category like 'HL' for Hair Loss, \
 'Weight_Loss', 'Supplements', 'EDPE'), "Overall-Level" (whole-account spend on that channel), and \

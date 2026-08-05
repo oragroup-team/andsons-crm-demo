@@ -292,21 +292,18 @@ Slack's one-time `response_url` when it's ready. No bot token or OAuth install s
 slash commands work off `response_url` alone — the only secret required is the app's **Signing
 Secret**, used to verify a request genuinely came from Slack before running any agent on its behalf.
 
-**Setup:**
+**Setup** (the app is hosted on Render at a permanent URL, so no ngrok/local tunnel is needed):
 
-1. Get a public HTTPS URL to your locally-running `app.py` (Slack can't reach `localhost`) — e.g.
-   `ngrok http 5001` — and note the `https://...ngrok...` forwarding URL it prints. Free ngrok URLs
-   change every restart, so you'll need to update the Slack command URLs again if you restart it.
-2. Go to `https://api.slack.com/apps` → **Create New App** → **From scratch** → pick your workspace.
-3. **Slash Commands** → **Create New Command**, twice:
-   - Command `/andsons-email`, Request URL `https://<your-ngrok-url>/slack/generate-email`
-   - Command `/andsons-ask`, Request URL `https://<your-ngrok-url>/slack/analytics`
-4. **Basic Information** → **App Credentials** → copy the **Signing Secret** → set
-   `SLACK_SIGNING_SECRET` in `backend/.env` to it.
-5. **Install App** → **Install to Workspace** → Allow (required for slash commands to fire, even
+1. Go to `https://api.slack.com/apps` → **Create New App** → **From scratch** → pick your workspace.
+2. **Slash Commands** → **Create New Command**, twice:
+   - Command `/andsons-email`, Request URL `https://andsons-crm-demo.onrender.com/slack/generate-email`
+   - Command `/andsons-ask`, Request URL `https://andsons-crm-demo.onrender.com/slack/analytics`
+3. **Basic Information** → **App Credentials** → copy the **Signing Secret** → set it as the
+   `SLACK_SIGNING_SECRET` environment variable on the Render service (Environment tab).
+4. **Install App** → **Install to Workspace** → Allow (required for slash commands to fire, even
    without any bot scopes).
-6. Restart `python3 app.py` so it picks up the new env var, then run either command in any channel
-   the app has been invited to.
+5. Run either command in any channel the app has been invited to — no restart needed locally, since
+   the change takes effect on Render's next deploy/restart after saving the env var.
 
 ## Notes
 

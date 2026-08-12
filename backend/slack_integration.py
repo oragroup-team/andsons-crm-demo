@@ -87,7 +87,7 @@ def is_retry(request) -> bool:
 
 # --- In-memory per-thread session state (email feedback loops) -------------
 # Keyed by (channel, thread_ts). Resets on process restart - fine for a demo
-# on Render's free tier, which spins down on idle anyway.
+# on Cloud Run, which scales to zero on idle anyway.
 
 _EMAIL_SESSIONS: dict = {}
 
@@ -126,13 +126,14 @@ def _absolute_url(path: str) -> str:
     """Slack's image blocks are downloaded server-side, so a relative path
     like /hero-images/adjusting.jpg (fine in a browser, which resolves it
     against the page's own origin) fails with 'downloading image failed' -
-    Slack has no such origin context. Render sets RENDER_EXTERNAL_URL
-    automatically to the service's own public URL; PUBLIC_BASE_URL is a
-    manual override for other hosts. Falls back to the path itself
-    unchanged if neither is set (e.g. running purely locally)."""
+    Slack has no such origin context. Unlike some PaaS hosts, Cloud Run
+    doesn't auto-inject an env var pointing at the service's own URL, so
+    PUBLIC_BASE_URL must be set explicitly (see .env.example / the Cloud Run
+    service's env vars). Falls back to the path itself unchanged if unset
+    (e.g. running purely locally)."""
     if path.startswith("http://") or path.startswith("https://"):
         return path
-    base = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+    base = os.environ.get("PUBLIC_BASE_URL")
     return f"{base.rstrip('/')}{path}" if base else path
 
 

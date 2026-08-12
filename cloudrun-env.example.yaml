@@ -1,0 +1,22 @@
+# Template for `gcloud run deploy --env-vars-file=...`. Copy to
+# cloudrun-env.yaml, fill in real values, and never commit the filled-in
+# copy (it's in .gitignore) — same secrets as backend/.env.example, just in
+# the YAML shape Cloud Run's --env-vars-file flag expects (comma-delimited
+# --set-env-vars breaks on BIGQUERY_TABLES' commas, hence the YAML file).
+GROQ_API_KEY: ""
+ANTHROPIC_API_KEY: ""
+COPYWRITER_PROVIDER: "groq"
+SWEEPER_PROVIDER: "groq"
+ANALYTICS_PROVIDER: "groq"
+COPYWRITER_GROQ_MODEL: "openai/gpt-oss-120b"
+SWEEPER_GROQ_MODEL: "openai/gpt-oss-120b"
+ANALYTICS_GROQ_MODEL: "openai/gpt-oss-120b"
+BIGQUERY_PROJECT_ID: "ora-bigquery"
+BIGQUERY_DATASET: "ora_bigquery_pipeline"
+BIGQUERY_TABLES: "dotcom_plus_marketplace,updated_sales_data,marketing_spend_data"
+# Path where the mounted Secret Manager secret lands inside the container —
+# see deploy.sh's --set-secrets flag. Leave as-is unless you change that flag.
+GOOGLE_APPLICATION_CREDENTIALS: "/secrets/gcp-key.json"
+# Fill in after the first deploy, once you know the real Cloud Run URL (see
+# deploy.sh step 2) — required for Slack's image blocks to resolve.
+PUBLIC_BASE_URL: ""

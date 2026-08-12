@@ -371,8 +371,8 @@ def serve_frontend(path):
 
 
 if __name__ == "__main__":
-    # Render (and most PaaS hosts) inject PORT and require the app to bind to
-    # it; FLASK_PORT remains the local-dev override, defaulting to 5001.
+    # Cloud Run (and most PaaS hosts) inject PORT and require the app to bind
+    # to it; FLASK_PORT remains the local-dev override, defaulting to 5001.
     port = int(os.environ.get("PORT", os.environ.get("FLASK_PORT", 5001)))
     debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     print(f"\nandSons CRM demo running at http://localhost:{port}\n")

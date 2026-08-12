@@ -275,18 +275,20 @@ Slack's one-time `response_url` when it's ready. No bot token or OAuth install s
 slash commands work off `response_url` alone — the only secret required is the app's **Signing
 Secret**, used to verify a request genuinely came from Slack before running any agent on its behalf.
 
-**Setup** (the app is hosted on Render at a permanent URL, so no ngrok/local tunnel is needed):
+**Setup** (the app is hosted on Cloud Run at a permanent URL, so no ngrok/local tunnel is needed):
 
 1. Go to `https://api.slack.com/apps` → **Create New App** → **From scratch** → pick your workspace.
 2. **Slash Commands** → **Create New Command**, twice:
-   - Command `/andsons-email`, Request URL `https://andsons-crm-demo.onrender.com/slack/generate-email`
-   - Command `/andsons-ask`, Request URL `https://andsons-crm-demo.onrender.com/slack/analytics`
+   - Command `/andsons-email`, Request URL `https://andsons-crm-demo-762730591203.us-central1.run.app/slack/generate-email`
+   - Command `/andsons-ask`, Request URL `https://andsons-crm-demo-762730591203.us-central1.run.app/slack/analytics`
 3. **Basic Information** → **App Credentials** → copy the **Signing Secret** → set it as the
-   `SLACK_SIGNING_SECRET` environment variable on the Render service (Environment tab).
+   `SLACK_SIGNING_SECRET` environment variable on the Cloud Run service (`gcloud run services update
+   andsons-crm-demo --region=us-central1 --update-env-vars=SLACK_SIGNING_SECRET=...`, or add it to
+   `cloudrun-env.yaml` and redeploy via `./deploy.sh`).
 4. **Install App** → **Install to Workspace** → Allow (required for slash commands to fire, even
    without any bot scopes).
-5. Run either command in any channel the app has been invited to — no restart needed locally, since
-   the change takes effect on Render's next deploy/restart after saving the env var.
+5. Run either command in any channel the app has been invited to — takes effect on Cloud Run's next
+   revision after the env var is set (a config-only `services update` is fast; no rebuild needed).
 
 ### @-mention bots (two separate named bots, natural language)
 
@@ -312,19 +314,67 @@ of its own **Signing Secret**.
 1. Go to `https://api.slack.com/apps` → **Create New App** → **From scratch** → pick your workspace
    → give it a distinct name (e.g. "andSons Email" / "andSons Analytics").
 2. **Event Subscriptions** → toggle on → Request URL:
-   - Email bot: `https://andsons-crm-demo.onrender.com/slack/events/email`
-   - Analytics bot: `https://andsons-crm-demo.onrender.com/slack/events/analytics`
+   - Email bot: `https://andsons-crm-demo-762730591203.us-central1.run.app/slack/events/email`
+   - Analytics bot: `https://andsons-crm-demo-762730591203.us-central1.run.app/slack/events/analytics`
    Slack sends a `url_verification` challenge the moment you enter this - the endpoint already
    handles it, so the URL should verify immediately (it needs `SLACK_*_SIGNING_SECRET` already set
-   on Render first, or verification will fail).
+   on Cloud Run first, or verification will fail).
 3. Still on **Event Subscriptions** → **Subscribe to bot events** → add `app_mention`.
 4. **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → add `app_mentions:read` and
    `chat:write`.
 5. **Basic Information** → App Credentials → copy the **Signing Secret** → set
-   `SLACK_EMAIL_SIGNING_SECRET` (or `SLACK_ANALYTICS_SIGNING_SECRET`) on Render.
+   `SLACK_EMAIL_SIGNING_SECRET` (or `SLACK_ANALYTICS_SIGNING_SECRET`) on Cloud Run (same
+   `services update --update-env-vars` or `cloudrun-env.yaml` + `./deploy.sh` approach as above).
 6. **OAuth & Permissions** → **Install to Workspace** → Allow → copy the **Bot User OAuth Token**
-   (starts `xoxb-`) → set `SLACK_EMAIL_BOT_TOKEN` (or `SLACK_ANALYTICS_BOT_TOKEN`) on Render.
+   (starts `xoxb-`) → set `SLACK_EMAIL_BOT_TOKEN` (or `SLACK_ANALYTICS_BOT_TOKEN`) on Cloud Run.
 7. Invite the bot to your test channel (`/invite @andSons Email`), then @-mention it.
+
+## Deploying to Google Cloud (Cloud Run)
+
+Live at: `https://andsons-crm-demo-762730591203.us-central1.run.app`
+
+The app runs as a single Cloud Run service, built directly from the repo's `Dockerfile` — no code
+changes needed for the container itself, since `app.py` already binds to the `PORT` env var Cloud
+Run injects, the same way Render's did.
+
+**One-time setup:**
+
+1. `gcloud config set project crm-mail-automation-dev` (or whichever GCP project you're deploying
+   to — billing must already be enabled on it).
+2. Enable the required APIs: `gcloud services enable run.googleapis.com cloudbuild.googleapis.com
+   artifactregistry.googleapis.com secretmanager.googleapis.com`.
+3. Upload the BigQuery service account key as a **Secret Manager** secret (never as a plain env
+   var, and never committed to the repo):
+   ```sh
+   gcloud secrets create bigquery-service-account-key \
+     --data-file=/path/to/your-service-account-key.json \
+     --replication-policy=automatic
+   gcloud secrets add-iam-policy-binding bigquery-service-account-key \
+     --member="serviceAccount:<PROJECT_NUMBER>-compute@developer.gserviceaccount.com" \
+     --role="roles/secretmanager.secretAccessor"
+   ```
+   (Find `<PROJECT_NUMBER>` via `gcloud projects describe <project-id> --format="value(projectNumber)"`.
+   If the service account you're using instead has direct `roles/iam.serviceAccountUser` granted on
+   a BigQuery-scoped service account, you can skip the secret and pass `--service-account=...` to
+   `gcloud run deploy` instead — no key file needed at all in that case.)
+4. `cp cloudrun-env.example.yaml cloudrun-env.yaml` and fill in real values (Groq/Anthropic keys,
+   BigQuery project/dataset/tables, Slack secrets if using the Slack integration).
+
+**Deploy:**
+
+```sh
+./deploy.sh
+```
+
+First deploy only: copy the **Service URL** it prints, set it as `PUBLIC_BASE_URL` in
+`cloudrun-env.yaml`, and run `./deploy.sh` again (or `gcloud run services update andsons-crm-demo
+--region=us-central1 --update-env-vars=PUBLIC_BASE_URL=...` for a config-only update that skips
+the rebuild) — required for Slack's image blocks to resolve hero image URLs.
+
+**Continuous deployment from GitHub:** Cloud Run can rebuild and redeploy automatically on every
+push to `main`, via Cloud Build → Triggers → **Connect Repository** (one-time OAuth authorization
+of the Cloud Build GitHub App against `oragroup-team/andsons-crm-demo`), then **Create Trigger**
+pointed at the `Dockerfile`. Until that's set up, `./deploy.sh` is the deploy path.
 
 ## Notes
 

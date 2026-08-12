@@ -11,3 +11,4 @@ frontend/.env
 __pycache__/
 *.pyc
 .DS_Store
+cloudrun-env.yaml

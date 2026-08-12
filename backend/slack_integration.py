@@ -78,6 +78,27 @@ def strip_mention(text: str) -> str:
     return _MENTION_RE.sub("", text or "").strip()
 
 
+def download_slack_file(file_info: dict, bot_token: str) -> bytes:
+    """Download an uploaded file's real bytes from Slack. `url_private` (on
+    the `files` array of an app_mention event) is only fetchable with the
+    bot's own token in the Authorization header - a plain GET (e.g. what a
+    browser would do while logged into Slack) gets an HTML login page back,
+    not the file. Needs the `files:read` scope on the bot. Raises on
+    anything other than a real 200, so a bad/expired token surfaces as a
+    clear error instead of silently "parsing" an HTML error page as data."""
+    resp = requests.get(
+        file_info["url_private"], headers={"Authorization": f"Bearer {bot_token}"}, timeout=20
+    )
+    resp.raise_for_status()
+    content_type = resp.headers.get("Content-Type", "")
+    if "text/html" in content_type:
+        raise RuntimeError(
+            f"Slack returned an HTML page instead of the file {file_info.get('name')!r} - the bot token "
+            "likely lacks the files:read scope, or isn't a member of this channel."
+        )
+    return resp.content
+
+
 def is_retry(request) -> bool:
     """Slack redelivers an event if it doesn't get a fast-enough ack; since
     our real work happens in a background thread after acking, a retried
@@ -145,6 +166,14 @@ def format_email_blocks(result: dict, flow_name: str, first_name: str) -> list:
             "text": {"type": "plain_text", "text": f"{flow_name} -> {first_name}"},
         }
     ]
+
+    insight = result.get("insight_brief")
+    if insight:
+        note = f"*Why this draft:* {insight['bigquery_answer']}"
+        if not insight.get("bigquery_verified"):
+            note += " (directional - not fully verified)"
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": note}})
+        blocks.append({"type": "divider"})
 
     if email.get("hero_image_url"):
         blocks.append(

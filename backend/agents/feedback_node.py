@@ -11,7 +11,8 @@ import difflib
 import logging
 from typing import Optional
 
-from .copywriter_agent import generate_email
+from .copywriter_agent import generate_email, pick_flow_for_signal
+from .insight_agent import investigate
 from .sweeper_agent import sweep_email
 
 logger = logging.getLogger("feedback_node")
@@ -48,8 +49,12 @@ def _diff_summary(before: Optional[str], after: str) -> str:
     return f"{len(changed_lines)} line(s) changed"
 
 
-def run_email_pipeline(flow_name: str, first_name: str) -> dict:
-    """Copywriter -> Sweeper -> Feedback loop, capped at MAX_RETRIES retries."""
+def _run_pipeline_loop(flow_name: str, first_name: str, insight_brief: Optional[str] = None) -> dict:
+    """Shared Copywriter -> Sweeper -> Feedback retry loop (capped at
+    MAX_RETRIES), used by both the plain flow+name pipeline and the
+    insight-driven one. `insight_brief`, when given, is passed to
+    generate_email() on every attempt (including retries) so a correction
+    round never loses the strategy context that motivated the email."""
     attempts = []
     previous_text = None
     correction = None
@@ -58,7 +63,7 @@ def run_email_pipeline(flow_name: str, first_name: str) -> dict:
     needs_human_review = False
 
     for attempt_num in range(MAX_RETRIES + 1):  # attempt 0 = first draft, 1 and 2 = retries
-        email = generate_email(flow_name, first_name, correction=correction)
+        email = generate_email(flow_name, first_name, correction=correction, insight_brief=insight_brief)
         rendered = email["rendered_text"]
 
         sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"])
@@ -108,6 +113,44 @@ def run_email_pipeline(flow_name: str, first_name: str) -> dict:
         "retries_used": len(attempts) - 1,
         "attempts": attempts,
     }
+
+
+def run_email_pipeline(flow_name: str, first_name: str, file_context: str = "") -> dict:
+    """Copywriter -> Sweeper -> Feedback loop, capped at MAX_RETRIES retries.
+    file_context, if given (a summary from a file uploaded alongside the
+    request), is passed through as strategy context via the same
+    leak-prevention path as an insight brief - see generate_email()'s
+    _INSIGHT_BRIEF_INSTRUCTION."""
+    brief = f"DATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}" if file_context else None
+    return _run_pipeline_loop(flow_name, first_name, insight_brief=brief)
+
+
+def run_insight_email_pipeline(
+    question: str, first_name: str, flow_name: Optional[str] = None, file_context: str = ""
+) -> dict:
+    """Investigate a business signal (real BigQuery data, plus real MoEngage
+    data if configured) and write an email addressing it, through the same
+    Copywriter -> Sweeper -> Feedback loop as run_email_pipeline. If
+    `flow_name` isn't given, it's picked from the investigation findings via
+    pick_flow_for_signal(); if nothing genuinely fits, returns
+    needs_flow_clarification=True instead of forcing a weak match."""
+    brief = investigate(question, file_context=file_context)
+
+    if not flow_name:
+        flow_name = pick_flow_for_signal(question, brief["brief_text"])
+    if not flow_name:
+        return {
+            "needs_flow_clarification": True,
+            "brief": brief,
+            "question": question,
+            "first_name": first_name,
+        }
+
+    result = _run_pipeline_loop(flow_name, first_name, insight_brief=brief["brief_text"])
+    result["needs_flow_clarification"] = False
+    result["insight_brief"] = brief
+    result["signal_question"] = question
+    return result
 
 
 def format_human_feedback(

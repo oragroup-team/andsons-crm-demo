@@ -384,10 +384,33 @@ def render_email(content: EmailContent, first_name: str, hero_info: Optional[dic
     return "\n".join(parts).strip()
 
 
-def generate_email(flow_name: str, first_name: str, correction: Optional[str] = None) -> dict:
+_INSIGHT_BRIEF_INSTRUCTION = """INTERNAL STRATEGY CONTEXT (why this email is being written right now) - \
+this is real business/marketing data gathered to inform your ANGLE and EMPHASIS only. It is NOT \
+customer-facing content:
+- Never quote a raw number, percentage, table/column name, SQL, campaign ID, or phrase like "engagement \
+dropped" / "sales are down" / "we noticed you..." anywhere in the copy - a customer must never sense this \
+email exists because of an internal metric.
+- Use it only to decide which real, already-approved benefit or reassurance to lead with, and how much \
+urgency (still never fake urgency) the moment genuinely calls for.
+- Every compliance rule above still applies in full - this context does not unlock a new stat, price, or \
+claim; a clinical stat still needs its DOI footnote regardless of anything mentioned here.
+
+{brief}
+"""
+
+
+def generate_email(
+    flow_name: str,
+    first_name: str,
+    correction: Optional[str] = None,
+    insight_brief: Optional[str] = None,
+) -> dict:
     """Run the Copywriter agent. If `correction` is provided, it is appended
     to the ORIGINAL system prompt/constraints (never sent alone) so the model
-    keeps the full brand context on every retry."""
+    keeps the full brand context on every retry. If `insight_brief` is
+    provided (from agents.insight_agent), it's included as internal strategy
+    context only - see _INSIGHT_BRIEF_INSTRUCTION for the leak-prevention
+    rules enforced around it."""
     llm = get_llm("COPYWRITER")
     structured_llm = llm.with_structured_output(EmailContent)
 
@@ -399,6 +422,8 @@ def generate_email(flow_name: str, first_name: str, correction: Optional[str] = 
         first_name=first_name,
         hero_catalog=_build_hero_catalog(),
     )
+    if insight_brief:
+        system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
 
     human_text = f"Write the {flow_name} email for {first_name}."
     if correction:
@@ -434,23 +459,39 @@ def generate_email(flow_name: str, first_name: str, correction: Optional[str] = 
 
 
 class EmailIntent(BaseModel):
+    mode: Literal["direct", "insight"] = Field(
+        description="'direct' if this is a plain request naming (or clearly implying) one specific "
+        "flow, e.g. 'write a P1 email for Marcus'. 'insight' if this describes a business problem/signal "
+        "and asks for an email to address it, e.g. 'OTC serum sales are down, write something to fix "
+        "it' or 'winback isn't converting, draft an email for Wei about it' - i.e. the flow should be "
+        "figured out FROM investigating the signal, not just matched from the wording."
+    )
     flow_name: Optional[Literal[tuple(VALID_FLOW_SLUGS)]] = Field(
         default=None,
-        description="The andSons lifecycle flow slug this request is asking for, or null if it "
-        "can't be confidently determined from the message.",
+        description="For mode='direct': the flow slug this request is asking for. For mode='insight': "
+        "the flow slug ONLY if the message itself clearly names/implies one (e.g. mentions 'winback' by "
+        "name) - otherwise null, so the caller investigates first and picks the best-fitting flow. "
+        "Null if it can't be confidently determined either way - do not guess.",
     )
     first_name: Optional[str] = Field(
         default=None,
         description="The customer's first name mentioned in the request, or null if none was given.",
+    )
+    signal_question: Optional[str] = Field(
+        default=None,
+        description="For mode='insight' only: the business signal/problem/question to investigate, "
+        "as its own clean sentence (e.g. 'Is OTC serum revenue declining?'). Null for mode='direct'.",
     )
 
 
 def parse_email_request(text: str) -> dict:
     """Turn a free-text request (e.g. from a Slack mention - 'write a P1
     email for Marcus', 'make one for someone who abandoned their cart, his
-    name's Wei') into a flow slug + first name, by matching against the
-    real flow catalog. Either value can be None if the request didn't make
-    it clear, so the caller can ask for clarification instead of guessing."""
+    name's Wei', or 'OTC serum sales are down, write something to fix it for
+    Wei') into either a direct flow+name request or an insight-driven
+    business signal to investigate first, by matching against the real flow
+    catalog. Any field can be None if the request didn't make it clear, so
+    the caller can ask for clarification instead of guessing."""
     llm = get_llm("COPYWRITER")
     structured_llm = llm.with_structured_output(EmailIntent)
 
@@ -459,14 +500,58 @@ def parse_email_request(text: str) -> dict:
         for slug, flow in FLOW_BY_SLUG.items()
     )
     system_text = (
-        "You match a free-text request to exactly one andSons CRM lifecycle flow, from this real "
-        "catalog (slug: label - who it's for):\n" + catalog + "\n\n"
-        "Extract the customer's first name if one is mentioned. If the message doesn't clearly map "
-        "to one of these flows, leave flow_name null rather than guessing - do not default to the "
-        "first flow in the list just because none matched. If no name is mentioned, leave "
-        "first_name null."
+        "You classify a free-text CRM email request against this real andSons flow catalog "
+        "(slug: label - who it's for):\n" + catalog + "\n\n"
+        "First decide the mode (see field description): a plain 'write me the <flow> email for <name>' "
+        "request is 'direct'. A request that describes a problem, a metric moving the wrong way, or asks "
+        "the agent to figure out what to write based on what's happening is 'insight' - the flow isn't "
+        "picked from wording alone in that case, it's investigated. "
+        "Extract the customer's first name if one is mentioned; leave it null if not. For 'direct' mode, "
+        "leave flow_name null rather than guessing if it doesn't clearly map to one of these flows - do "
+        "not default to the first flow in the list. For 'insight' mode, only fill flow_name if the "
+        "message itself names/clearly implies a specific flow; otherwise leave it null."
     )
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", text)])
     chain = prompt | structured_llm
     result: EmailIntent = chain.invoke({})
-    return {"flow_name": result.flow_name, "first_name": result.first_name}
+    return {
+        "mode": result.mode,
+        "flow_name": result.flow_name,
+        "first_name": result.first_name,
+        "signal_question": result.signal_question,
+    }
+
+
+class FlowPick(BaseModel):
+    flow_name: Optional[Literal[tuple(VALID_FLOW_SLUGS)]] = Field(
+        default=None,
+        description="The single best-fitting flow slug for this investigated business signal, or null "
+        "if none of the real flows genuinely fit - do not force a pick.",
+    )
+
+
+def pick_flow_for_signal(question: str, brief_text: str) -> Optional[str]:
+    """After investigate() has actually looked at the data, pick which real
+    andSons flow this email should be framed as (its audience/goal/track/CTA
+    still come from flows.py - the insight brief only changes emphasis, not
+    which lifecycle moment the email represents). Returns None if nothing
+    genuinely fits, so the caller can ask a person instead of forcing one."""
+    llm = get_llm("COPYWRITER")
+    structured_llm = llm.with_structured_output(FlowPick)
+
+    catalog = "\n".join(
+        f'- "{slug}": {flow["label"]} ({flow["track"]} track) - {flow["audience"]} Goal: {flow["goal"]}'
+        for slug, flow in FLOW_BY_SLUG.items()
+    )
+    system_text = (
+        "Given this investigated business signal and the real andSons flow catalog below, pick the ONE "
+        "flow whose real trigger/audience/goal genuinely fits sending this email right now. Do not pick "
+        "one just because it's topically related - the flow's actual trigger condition should plausibly "
+        "apply. Leave flow_name null if nothing genuinely fits rather than forcing a weak match.\n\n"
+        + catalog
+    )
+    human_text = f"Signal: {question}\n\nInvestigation findings:\n{brief_text}"
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+    result: FlowPick = chain.invoke({})
+    return result.flow_name

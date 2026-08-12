@@ -276,14 +276,22 @@ def _verify_numbers(answer: str, tool_results_text: str) -> bool:
     return True
 
 
-def ask_analytics(question: str, conversation_history: Optional[list] = None) -> dict:
+def ask_analytics(
+    question: str, conversation_history: Optional[list] = None, file_context: Optional[str] = None
+) -> dict:
     """conversation_history, if given, is a list of {"question": ..., "answer": ...}
     dicts from earlier turns in the same thread/session - used only to resolve
     context ("the same", "that flow", "what about X instead"), never as a
     source of numbers. The model is explicitly told to always recompute the
     actual answer with a fresh query rather than reuse a figure from an
     earlier turn, so the number-grounding guardrail below still applies in
-    full to every answer regardless of history."""
+    full to every answer regardless of history.
+
+    file_context, if given (a summary from file_context.summarize_files - a
+    file uploaded alongside the question), is real data too - the model may
+    cite numbers from it directly (the number-verification guardrail below
+    checks against BOTH the SQL tool results AND this file context, so a
+    figure genuinely from the uploaded file still passes)."""
     if _contains_write_operation(question):
         return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": "bigquery"}
 
@@ -313,6 +321,7 @@ def ask_analytics(question: str, conversation_history: Optional[list] = None) ->
         agent_executor_kwargs={"return_intermediate_steps": True},
     )
 
+    agent_input = question
     if conversation_history:
         history_text = "\n\n".join(
             f"Q: {h['question']}\nA: {h['answer']}" for h in conversation_history
@@ -322,10 +331,14 @@ def ask_analytics(question: str, conversation_history: Optional[list] = None) ->
             "\"the same\", \"that flow\", \"what about X instead\", but NEVER copy a number from it "
             "directly into your new answer. Always compute the new answer with a fresh query, even if "
             "it looks like something already answered above:\n---\n" + history_text + "\n---\n\n"
-            "New question: " + question
+            "New question: " + agent_input
         )
-    else:
-        agent_input = question
+    if file_context:
+        agent_input = (
+            "A file was uploaded alongside this question - real data, safe to cite directly if it "
+            "answers the question. Combine it with the database when relevant (e.g. the file lists "
+            "products, the database has revenue for them):\n---\n" + file_context + "\n---\n\n" + agent_input
+        )
 
     result = agent_executor.invoke({"input": agent_input})
     raw_output = result.get("output", "").strip()
@@ -357,6 +370,9 @@ def ask_analytics(question: str, conversation_history: Optional[list] = None) ->
 
     if _contains_pii(raw_answer):
         return {"answer": PII_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery"}
+
+    if file_context:
+        tool_results_text += "\n" + file_context
 
     verified = _verify_numbers(raw_answer, tool_results_text)
     if verified:

@@ -92,6 +92,10 @@ action is starting/continuing treatment, not paying) - UNLESS the flow is genuin
 (Replenishment/Dunning), where a plain, guilt-free mention in the body is acceptable.
 - Any implication that days have passed since the underlying trigger event when the flow can plausibly \
 send same-day ("taking a few days", "you've been thinking it over").
+- Any trace of an internal business/marketing metric leaking into customer-facing copy - a raw number, \
+percentage, table/column name, campaign ID, or a phrase like "we noticed your engagement dropped" / \
+"sales have been declining" / "your open rate". This email must read exactly like every other one, with \
+no sign it exists because of an internal report.
 
 OPTIONAL BLOCKS - DO NOT FAIL FOR OMISSION: the "what happens next" list, the trust line, and the gentle \
 truth line are judgement calls the Copywriter makes per email. An email that omits one or all of them is \

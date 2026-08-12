@@ -14,10 +14,12 @@ from flask_cors import CORS
 
 from agents.analytics_agent import ask_analytics
 from agents.copywriter_agent import parse_email_request
-from agents.feedback_node import revise_with_feedback, run_email_pipeline
+from agents.feedback_node import revise_with_feedback, run_email_pipeline, run_insight_email_pipeline
+from file_context import summarize_files
 from flows import VALID_FLOW_SLUGS
 from slack_integration import (
     append_analytics_exchange,
+    download_slack_file,
     format_analytics_blocks,
     format_email_blocks,
     get_analytics_history,
@@ -222,6 +224,28 @@ def slack_analytics():
 # bot in the same thread continues that draft instead of starting a new one.
 
 
+def _collect_uploaded_file_context(event: dict, bot_token: str) -> tuple:
+    """Download and summarize every CSV/Excel file attached to an
+    app_mention event. Returns (summary_text, error_messages) - a file that
+    fails to download or parse is reported, never silently dropped, but one
+    bad file doesn't block the others."""
+    files = event.get("files") or []
+    if not files:
+        return "", []
+
+    downloaded = []
+    errors = []
+    for file_info in files:
+        try:
+            content = download_slack_file(file_info, bot_token)
+            downloaded.append((file_info.get("name", "upload"), content))
+        except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+            errors.append(f"{file_info.get('name', 'upload')}: couldn't download ({exc})")
+
+    summary, parse_errors = summarize_files(downloaded)
+    return summary, errors + parse_errors
+
+
 @app.route("/slack/events/email", methods=["POST"])
 def slack_events_email():
     data = request.get_json(silent=True) or {}
@@ -244,12 +268,26 @@ def slack_events_email():
 
     def _work():
         try:
+            file_context, file_errors = _collect_uploaded_file_context(event, bot_token)
+            for err in file_errors:
+                post_message(bot_token, channel, thread_ts=thread_ts, text=f"Couldn't read {err}")
+            if file_context:
+                post_message(
+                    bot_token, channel, thread_ts=thread_ts,
+                    text="Read the attached file, factoring it in now...",
+                )
+
             session = get_email_session(channel, thread_ts)
             if session:
+                feedback_text = text
+                if file_context:
+                    feedback_text = (text + "\n\n" if text else "") + (
+                        "Also take this uploaded file into account:\n" + file_context
+                    )
                 result = revise_with_feedback(
                     session["flow_name"],
                     session["first_name"],
-                    text,
+                    feedback_text,
                     previous_rendered_text=session["rendered_text"],
                     feedback_history=session.get("feedback_history", []),
                 )
@@ -271,23 +309,60 @@ def slack_events_email():
                 post_message(bot_token, channel, thread_ts=thread_ts, text="Updated draft", blocks=blocks)
                 return
 
-            intent = parse_email_request(text)
-            missing = []
-            if not intent["flow_name"]:
-                missing.append(
-                    "which flow this is for (e.g. \"plan not purchased\", \"cart abandon\", \"consult no-show\", "
-                    "\"winback\")"
-                )
+            # No text but a file was attached (e.g. "@andSonsEmail" + upload) -
+            # skip intent classification on an empty string and go straight
+            # to investigating the file.
+            if not text and file_context:
+                intent = {"mode": "insight", "flow_name": None, "first_name": None, "signal_question": None}
+            else:
+                intent = parse_email_request(text)
+
             if not intent["first_name"]:
-                missing.append("the customer's first name")
-            if missing:
                 post_message(
                     bot_token, channel, thread_ts=thread_ts,
-                    text="I need a bit more to draft this - tell me " + " and ".join(missing) + ".",
+                    text="I need the customer's first name to draft this.",
                 )
                 return
 
-            result = run_email_pipeline(intent["flow_name"], intent["first_name"])
+            if intent["mode"] == "insight":
+                question = intent["signal_question"] or text or "Review the attached data and identify what needs addressing."
+                result = run_insight_email_pipeline(
+                    question, intent["first_name"], flow_name=intent["flow_name"], file_context=file_context
+                )
+                if result["needs_flow_clarification"]:
+                    post_message(
+                        bot_token, channel, thread_ts=thread_ts,
+                        text=(
+                            f"Here's what the data shows: {result['brief']['bigquery_answer']}\n\n"
+                            "But none of our real flows clearly fit sending an email for this - tell me "
+                            "which one to frame it as: " + ", ".join(sorted(VALID_FLOW_SLUGS))
+                        ),
+                    )
+                    return
+                save_email_session(
+                    channel,
+                    thread_ts,
+                    {
+                        "flow_name": result["flow_name"],
+                        "first_name": intent["first_name"],
+                        "rendered_text": result["rendered_text"],
+                        "feedback_history": [],
+                    },
+                )
+                blocks = format_email_blocks(result, result["flow_name"], intent["first_name"])
+                post_message(bot_token, channel, thread_ts=thread_ts, text="Draft ready", blocks=blocks)
+                return
+
+            if not intent["flow_name"]:
+                post_message(
+                    bot_token, channel, thread_ts=thread_ts,
+                    text="I need to know which flow this is for (e.g. \"plan not purchased\", "
+                    "\"cart abandon\", \"consult no-show\", \"winback\") - or describe what's going on "
+                    "(e.g. \"OTC serum sales are down\") and I'll investigate and pick one.",
+                )
+                return
+
+            result = run_email_pipeline(intent["flow_name"], intent["first_name"], file_context=file_context)
             save_email_session(
                 channel,
                 thread_ts,
@@ -326,20 +401,27 @@ def slack_events_analytics():
     thread_ts = event.get("thread_ts") or event.get("ts")
     question = strip_mention(event.get("text", ""))
     bot_token = os.environ.get("SLACK_ANALYTICS_BOT_TOKEN", "")
+    has_files = bool(event.get("files"))
 
-    if not question:
+    if not question and not has_files:
         post_message(
             bot_token, channel, thread_ts=thread_ts,
-            text="Ask me a question about andSons orders, revenue, or marketing spend.",
+            text="Ask me a question about andSons orders, revenue, or marketing spend - you can also "
+            "attach a CSV/Excel file and I'll factor it in.",
         )
         return "", 200
 
     def _work():
         try:
+            file_context, file_errors = _collect_uploaded_file_context(event, bot_token)
+            for err in file_errors:
+                post_message(bot_token, channel, thread_ts=thread_ts, text=f"Couldn't read {err}")
+
+            effective_question = question or "Summarize the attached file and point out anything notable."
             history = get_analytics_history(channel, thread_ts)
-            result = ask_analytics(question, conversation_history=history)
-            append_analytics_exchange(channel, thread_ts, question, result["answer"])
-            blocks = format_analytics_blocks(result, question)
+            result = ask_analytics(effective_question, conversation_history=history, file_context=file_context)
+            append_analytics_exchange(channel, thread_ts, effective_question, result["answer"])
+            blocks = format_analytics_blocks(result, effective_question)
             post_message(bot_token, channel, thread_ts=thread_ts, blocks=blocks)
         except Exception as exc:  # noqa: BLE001 — surfaced back to Slack
             post_message(bot_token, channel, thread_ts=thread_ts, text=f"Error answering question: {exc}")

@@ -20,3 +20,9 @@ GOOGLE_APPLICATION_CREDENTIALS: "/secrets/gcp-key.json"
 # Fill in after the first deploy, once you know the real Cloud Run URL (see
 # deploy.sh step 2) — required for Slack's image blocks to resolve.
 PUBLIC_BASE_URL: ""
+# Optional — MoEngage (see README "MoEngage integration"). Leave blank until
+# requested/granted; insight-driven emails work from BigQuery alone without it.
+MOENGAGE_WORKSPACE_ID: ""
+MOENGAGE_DATA_API_KEY: ""
+MOENGAGE_DC: ""
+MOENGAGE_CHARTS: ""

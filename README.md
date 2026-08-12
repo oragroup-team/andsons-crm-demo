@@ -46,6 +46,8 @@ scoped to the real andSons tables) — see **Database schema** below.
 - Agent orchestration: LangChain (`langchain-groq` + `langchain-anthropic`, provider is
   per-agent and configurable via `.env`)
 - Database: Google BigQuery (`google-cloud-bigquery` + `sqlalchemy-bigquery`), live and read-only
+- File parsing: `pandas` + `openpyxl`, for CSV/Excel files uploaded via Slack (see **Slack
+  integration** below)
 - Frontend: React + Vite, plain `fetch` calls to the Flask API
 
 ## Project structure
@@ -55,6 +57,8 @@ backend/
   flows.py                  # canonical andSons Hair Loss lifecycle flows (real, not invented)
   text_sanitize.py           # shared cleanup: strips em-dashes/curly quotes/markdown from LLM output
   image_bank.py              # real approved hero photo bank (served from backend/static/hero_images/)
+  file_context.py            # summarizes an uploaded CSV/Excel file into LLM-ready context
+  moengage_client.py         # real MoEngage Analytics API connector, no mock fallback
   slack_integration.py       # Slack signature verification + Block Kit formatting for slash commands
   agents/
     llm_provider.py          # per-agent Groq/Anthropic provider factory
@@ -62,6 +66,7 @@ backend/
     sweeper_agent.py         # brand-QA pass/fail gate, real compliance checklist
     feedback_node.py         # Python functions: auto retry loop + human-feedback revision
     analytics_agent.py       # LangChain SQL agent + number-grounding check
+    insight_agent.py         # investigates a business signal (BigQuery + MoEngage) into a brief
   app.py                      # Flask API
   requirements.txt
   .env.example
@@ -258,6 +263,53 @@ the prompt-level instruction and a code-level regex check (`_contains_write_oper
 provisioned service account currently has broader IAM permissions than strictly needed (see the
 project's notes on requesting a scoped-down role).
 
+## MoEngage integration (optional, for insight-driven emails)
+
+MoEngage is where andSons' real CRM campaigns run — connecting it lets the email bot ground a draft
+in real campaign/engagement data, not just BigQuery sales data. It's optional: without it,
+insight-driven emails (below) still work from BigQuery alone, just without the MoEngage layer.
+
+**What to ask for:** a **Data API key** (Data API ID + Data API Key, read-only) from the MoEngage
+dashboard's **Settings → Account → APIs** page — this is separate from the write-side event-tracking
+API key and doesn't need workspace admin rights to issue, the same way the Slack integration only
+ever needed a non-admin app install.
+
+MoEngage's Analytics API is dashboard/chart-based (`backend/moengage_client.py` calls the real
+`GET /v5/analytics/dashboards/{id}/charts/{id}` endpoint) — there's no free-form "give me campaign
+X's stats" query, so whoever owns the MoEngage dashboard first builds a chart for whatever should be
+visible here (e.g. campaign send/open/click rates, segment engagement trend), then names it in
+`MOENGAGE_CHARTS` (`label:dashboard_id:chart_id`, comma-separated for more than one). Set
+`MOENGAGE_WORKSPACE_ID`, `MOENGAGE_DATA_API_KEY`, and `MOENGAGE_DC` (the data center from your
+dashboard URL, `dashboard-0X.moengage.com` → `"0X"`) to connect.
+
+Once connected, `agents/insight_agent.py` pulls every chart named in `MOENGAGE_CHARTS` and has an
+LLM summarize each one in plain English — explicitly instructed to describe only what's actually in
+that chart's real API response, never to invent a metric that isn't there. If a chart fails to load
+(bad ID, deleted), that's reported per-chart rather than silently dropped.
+
+## Insight-driven emails (from a business signal, not a fixed flow)
+
+Alongside "write the P1 email for Marcus", the email bot understands a business signal instead:
+**"OTC serum sales are declining, write something to fix it for Wei"**. Instead of matching the
+wording to one of the 11 flows directly, it:
+
+1. Classifies the request as `insight` mode (`agents.copywriter_agent.parse_email_request`) and
+   pulls out the underlying question ("is OTC serum revenue declining?").
+2. Investigates it for real (`agents.insight_agent.investigate`) — runs the question through the
+   same hardened Analytics agent used by the Analytics Chat (write-blocked, PII-blocked,
+   number-verified against actual query results), plus MoEngage campaign context if configured.
+3. Picks the real andSons flow whose actual trigger/audience/goal genuinely fits sending an email
+   right now (`agents.copywriter_agent.pick_flow_for_signal`) — or asks a person to pick one if
+   nothing genuinely fits, rather than forcing a weak match.
+4. Runs the normal Copywriter → Sweeper → Feedback loop, with the investigation findings passed in
+   as **internal strategy context only**: the Copywriter is explicitly instructed to use it to
+   choose an angle/emphasis, never to quote a raw number, percentage, or phrase like "sales are
+   down" in the customer-facing copy — the Sweeper hard-fails the email if any of that leaks
+   through, on top of every existing compliance rule.
+
+The Slack response includes a "Why this draft" line (the real, verified finding that motivated it),
+and the draft still supports the same in-thread feedback loop as any other draft.
+
 ## Slack integration (optional, for office testing)
 
 Two slash commands let coworkers use both systems directly from Slack, for testing:
@@ -296,13 +348,21 @@ Instead of (or alongside) slash commands, two separate Slack apps — each with 
 icon — can be @-mentioned directly in a channel and talked to in plain language:
 
 - **Email bot** — `@andSons Email <describe the email>`, e.g. `@andSons Email create the plan-not-
-  purchased email for Marcus`. It matches the request against the real 11-flow catalog and extracts
-  the customer's first name with a small LLM call (`agents.copywriter_agent.parse_email_request`);
-  if either is unclear, it asks for clarification instead of guessing. Reply **in the same thread**
-  with feedback (still @-mentioning the bot) and it revises the draft in place — feedback is tracked
-  per Slack thread, in-memory, so a different thread always starts a fresh draft.
+  purchased email for Marcus`, or a business signal instead of a named flow, e.g. `@andSons Email
+  OTC serum sales are down, write something to fix it for Wei` (see **Insight-driven emails**
+  above). It classifies the request, extracts the customer's first name, and — for a direct
+  request — matches it against the real 11-flow catalog (`agents.copywriter_agent.parse_email_request`);
+  if the first name is unclear, or a direct request doesn't map to a flow, it asks for clarification
+  instead of guessing. Reply **in the same thread** with feedback (still @-mentioning the bot) and
+  it revises the draft in place — feedback is tracked per Slack thread, in-memory, so a different
+  thread always starts a fresh draft. Attach a CSV/Excel file to the mention (or to a feedback
+  reply) and its contents are read and folded in as extra context — real numbers from the file are
+  fair game for the strategy brief, but same as any other internal context, never quoted directly
+  in the customer-facing copy.
 - **Analytics bot** — `@andSons Analytics <question>`, e.g. `@andSons Analytics how many orders has
-  andSons had in Singapore`. The mention text is passed straight through as the question.
+  andSons had in Singapore`. The mention text is passed straight through as the question. Attach a
+  CSV/Excel file and it's read and can be cited directly in the answer, combined with BigQuery when
+  relevant (e.g. the file lists products, BigQuery has revenue for them).
 
 Handled by `POST /slack/events/email` and `POST /slack/events/analytics` in `backend/app.py`,
 subscribed to Slack's **Events API** (`app_mention`). Unlike slash commands, events have no
@@ -320,8 +380,8 @@ of its own **Signing Secret**.
    handles it, so the URL should verify immediately (it needs `SLACK_*_SIGNING_SECRET` already set
    on Cloud Run first, or verification will fail).
 3. Still on **Event Subscriptions** → **Subscribe to bot events** → add `app_mention`.
-4. **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → add `app_mentions:read` and
-   `chat:write`.
+4. **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → add `app_mentions:read`,
+   `chat:write`, and `files:read` (needed to download a CSV/Excel file someone attaches).
 5. **Basic Information** → App Credentials → copy the **Signing Secret** → set
    `SLACK_EMAIL_SIGNING_SECRET` (or `SLACK_ANALYTICS_SIGNING_SECRET`) on Cloud Run (same
    `services update --update-env-vars` or `cloudrun-env.yaml` + `./deploy.sh` approach as above).

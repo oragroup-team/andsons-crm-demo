@@ -91,6 +91,72 @@ def _draw_wrapped(draw, text, x, y, font, max_width, fill, line_height=None) -> 
     return y
 
 
+def _draw_check(draw, x, y_top, size, color, width=None):
+    """Draws a checkmark as two line strokes rather than a Unicode glyph -
+    the bundled font doesn't actually have a clean check glyph (renders as
+    a broken/missing-glyph box), so this guarantees a consistent look
+    regardless of font coverage. Returns the mark's width."""
+    width = width or max(2, int(size * 0.16))
+    p1 = (x, y_top + size * 0.5)
+    p2 = (x + size * 0.35, y_top + size * 0.85)
+    p3 = (x + size, y_top + size * 0.05)
+    draw.line([p1, p2], fill=color, width=width, joint="curve")
+    draw.line([p2, p3], fill=color, width=width, joint="curve")
+    return size
+
+
+def _draw_rich_wrapped(draw, runs, x, y, font, max_width, line_height=None) -> int:
+    """Like _draw_wrapped, but runs is a list of (text, color, underline)
+    spans drawn inline with mixed styling (e.g. a sentence with one styled
+    "link" phrase in it) - Pillow has no native rich-text support, so this
+    wraps word-by-word across run boundaries, tracking which run (and
+    therefore which color/underline) each word belongs to."""
+    line_height = line_height or int(font.size * 1.45)
+    space_w = draw.textlength(" ", font=font)
+
+    words = []  # (word_text, color, underline)
+    for text, color, underline in runs:
+        for word in text.split(" "):
+            if word:
+                words.append((word, color, underline))
+
+    # Pass 1: lay out each word's position first (no drawing yet) - needed
+    # so contiguous underlined words can be joined into ONE continuous
+    # underline stroke per line, instead of one short stroke per word (which
+    # reads as a dashed/broken line under a multi-word phrase).
+    placed = []  # (word, color, underline, word_x, word_y, word_w)
+    cursor_x, cursor_y = x, y
+    for word, color, underline in words:
+        word_w = draw.textlength(word, font=font)
+        if cursor_x != x and cursor_x + word_w > x + max_width:
+            cursor_y += line_height
+            cursor_x = x
+        placed.append((word, color, underline, cursor_x, cursor_y, word_w))
+        cursor_x += word_w + space_w
+
+    for word, color, underline, wx, wy, word_w in placed:
+        draw.text((wx, wy), word, font=font, fill=color)
+
+    # Pass 2: draw one underline per contiguous run of underlined words that
+    # share the same line (same wy) and color.
+    i = 0
+    while i < len(placed):
+        _, color, underline, wx, wy, word_w = placed[i]
+        if not underline:
+            i += 1
+            continue
+        run_start_x = wx
+        run_end_x = wx + word_w
+        j = i + 1
+        while j < len(placed) and placed[j][2] and placed[j][4] == wy and placed[j][1] == color:
+            run_end_x = placed[j][3] + placed[j][5]
+            j += 1
+        draw.line([(run_start_x, wy + font.size + 2), (run_end_x, wy + font.size + 2)], fill=color, width=1)
+        i = j
+
+    return (placed[-1][4] if placed else y) + line_height
+
+
 def _draw_hero(canvas: Image.Image, hero_key: str, hero_headline: Optional[str], y: int) -> int:
     path = os.path.join(HERO_DIR, f"{hero_key}.jpg")
     if not os.path.isfile(path):
@@ -149,9 +215,11 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     y = 0
 
     # --- Logo header ("&sons" wordmark - the real andSons logotype; body
-    # copy still always says "andSons", per brand rules) ---
+    # copy still always says "andSons", per brand rules) - centered, matching
+    # the real sent-email template Thalia shared. ---
     logo_font = _font(_s(28), "Bold")
-    draw.text((MARGIN, _s(24)), "&sons", font=logo_font, fill=COLOR_TEXT)
+    logo_w = draw.textlength("&sons", font=logo_font)
+    draw.text(((CANVAS_WIDTH - logo_w) / 2, _s(24)), "&sons", font=logo_font, fill=COLOR_TEXT)
     y = _s(24) + _s(40)
     draw.line([(0, y), (CANVAS_WIDTH, y)], fill=COLOR_BORDER, width=_s(1))
     y += _s(1)
@@ -237,10 +305,26 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     draw.text((MARGIN + btn_padding_x, y + btn_padding_y - _s(2)), cta_text, font=cta_font, fill=COLOR_WHITE)
     y += btn_h + _s(24)
 
-    # --- Trust line ---
+    # --- Trust line (checkmark-prefixed, centered - matches the real sent-
+    # email template: "check Doctor-led plan   check Clinically studied
+    # check Discreet delivery", not the plain " · "-joined string the
+    # Copywriter outputs) ---
     if content.get("trust_line"):
         trust_font = _font(_s(13), "Regular")
-        draw.text((MARGIN, y), content["trust_line"], font=trust_font, fill=COLOR_MUTED)
+        items = [seg.strip() for seg in content["trust_line"].split("·") if seg.strip()]
+        check_size = int(trust_font.size * 0.6)
+        check_gap = int(trust_font.size * 0.3)
+        item_gap = int(trust_font.size * 1.4)
+
+        item_widths = [check_size + check_gap + draw.textlength(item, font=trust_font) for item in items]
+        total_w = sum(item_widths) + item_gap * (len(items) - 1)
+
+        cursor_x = (CANVAS_WIDTH - total_w) / 2
+        text_y_offset = (check_size - trust_font.size) / 2  # vertically center check against the text
+        for item, item_w in zip(items, item_widths):
+            _draw_check(draw, cursor_x, y - text_y_offset, check_size, COLOR_MUTED)
+            draw.text((cursor_x + check_size + check_gap, y), item, font=trust_font, fill=COLOR_MUTED)
+            cursor_x += item_w + item_gap
         y += int(_s(13) * 1.6) + _s(20)
 
     # --- Signature ---
@@ -251,14 +335,25 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     draw.line([(MARGIN, y), (CANVAS_WIDTH - MARGIN, y)], fill=COLOR_BORDER, width=_s(1))
     y += _s(16)
     footer_font = _font(_s(12), "Regular")
+
+    # WhatsApp CS line as one inline sentence with the WhatsApp phrase styled
+    # like a link (matches the real sent-email template) instead of a bare
+    # "WhatsApp customer service" label line - same real WhatsApp contact,
+    # just phrased as a sentence rather than a standalone label.
+    runs = [
+        ("Questions about your plan or your order? Chat with our ", COLOR_MUTED, False),
+        ("customer service team on WhatsApp", COLOR_ACCENT, True),
+        (".", COLOR_MUTED, False),
+    ]
+    footer_line_height = int(_s(12) * 1.6)
+    y = _draw_rich_wrapped(draw, runs, MARGIN, y, footer_font, CONTENT_WIDTH, line_height=footer_line_height)
+
     footer_lines = [
-        "WhatsApp customer service",
         "andSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522",
         "Unsubscribe",
     ]
     for line in footer_lines:
-        fill = COLOR_ACCENT if line == "WhatsApp customer service" else COLOR_MUTED
-        draw.text((MARGIN, y), line, font=footer_font, fill=fill)
+        draw.text((MARGIN, y), line, font=footer_font, fill=COLOR_MUTED)
         y += int(_s(12) * 1.6)
 
     y += _s(24)

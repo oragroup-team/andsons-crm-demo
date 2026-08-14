@@ -89,8 +89,17 @@ def post_rendered_email(bot_token: str, channel: str, thread_ts: str, image, fil
             filename=filename,
             initial_comment=comment,
         )
-    except Exception:
+    except Exception as exc:
+        # A silent failure here (log only, no Slack message) is a real dead
+        # end for whoever's waiting - they see nothing at all with no way to
+        # know something went wrong (this is exactly what happened with the
+        # missing files:write scope). Always leave a visible trace in the
+        # thread, even if it's just "something broke" plus the draft text.
         logger.exception("Failed to upload rendered email image to Slack.")
+        post_message(
+            bot_token, channel, thread_ts=thread_ts,
+            text=f"Drafted the email but couldn't post the image ({exc}). {comment}",
+        )
 
 
 def run_in_background(target, *args, **kwargs) -> None:

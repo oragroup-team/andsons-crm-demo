@@ -11,9 +11,15 @@ campaign X's stats" query: you first build a dashboard + chart in the
 MoEngage UI, then this client pulls that chart's data by (dashboard_id,
 chart_id). There is no way to fetch arbitrary campaign performance without a
 chart existing for it - that's a real MoEngage platform constraint, not a
-limitation of this client. Charts to pull are configured via MOENGAGE_CHARTS
-(see get_configured_chart_snapshots below) so whoever owns the MoEngage
-dashboard controls what's exposed here, without a code change.
+limitation of this client.
+
+By default, EVERY chart on EVERY workspace-level dashboard is pulled (see
+get_all_chart_snapshots) - there's no manual per-chart allowlist to keep up
+to date. At this workspace's real scale that's 29 dashboards / ~138 charts,
+so fetches are parallelized (ThreadPoolExecutor) and cached for
+_CACHE_TTL_SECONDS, since re-hitting ~170 endpoints on every single Slack
+question would be slow and needless - the underlying MoEngage data doesn't
+change meaningfully within a few minutes.
 
 Same hard-fail philosophy as the BigQuery connection in analytics_agent.py:
 if credentials aren't set, functions raise a clear RuntimeError rather than
@@ -23,13 +29,22 @@ as "skip this data source and say so", never as "pretend it's empty".
 import base64
 import logging
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
 
 logger = logging.getLogger("moengage_client")
 
-_TIMEOUT_SECONDS = 15
+_TIMEOUT_SECONDS = 25
+_MAX_WORKERS = 6  # higher concurrency measurably increases MoEngage read-timeout
+# rate at this workspace's scale (~1/3 of 137 charts timed out at 16 workers) -
+# this is empirically the more reliable tradeoff, not just a slower one.
+_MAX_RETRIES = 2
+_CACHE_TTL_SECONDS = 900  # 15 min - see module docstring
+
+_cache = {"snapshots": None, "fetched_at": 0.0}
 
 
 def is_configured() -> bool:
@@ -63,12 +78,28 @@ def _auth_header() -> dict:
 
 
 def _get(path: str, params: Optional[dict] = None) -> dict:
+    """A read timeout under concurrent load is common at this workspace's
+    scale (empirically ~1/3 of requests at high concurrency) and usually
+    transient, so a couple of quick retries meaningfully improves the real
+    success rate - a genuine failure (404, bad auth) still raises straight
+    away, only timeouts/connection errors are retried."""
     url = f"{_base_url()}{path}"
-    resp = requests.get(url, headers=_auth_header(), params=params, timeout=_TIMEOUT_SECONDS)
-    if resp.status_code == 401:
-        raise RuntimeError("MoEngage rejected the request (401) - check MOENGAGE_WORKSPACE_ID/MOENGAGE_DATA_API_KEY.")
-    resp.raise_for_status()
-    return resp.json()
+    headers = _auth_header()
+    last_exc = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=_TIMEOUT_SECONDS)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_exc = exc
+            if attempt < _MAX_RETRIES:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+        if resp.status_code == 401:
+            raise RuntimeError("MoEngage rejected the request (401) - check MOENGAGE_WORKSPACE_ID/MOENGAGE_DATA_API_KEY.")
+        resp.raise_for_status()
+        return resp.json()
+    raise last_exc  # unreachable, satisfies type checkers
 
 
 def list_dashboards() -> list:
@@ -77,8 +108,9 @@ def list_dashboards() -> list:
 
 
 def get_dashboard_charts(dashboard_id: str) -> list:
-    """GET /v5/analytics/dashboards/{dashboard_id} - the charts on one dashboard."""
-    return _get(f"/v5/analytics/dashboards/{dashboard_id}").get("data", [])
+    """GET /v5/analytics/dashboards/{dashboard_id}/charts - the charts on one
+    dashboard (id + name only, not their data - see get_chart_data)."""
+    return _get(f"/v5/analytics/dashboards/{dashboard_id}/charts").get("data", {}).get("chart_ids", [])
 
 
 def get_chart_data(dashboard_id: str, chart_id: str) -> dict:
@@ -89,41 +121,64 @@ def get_chart_data(dashboard_id: str, chart_id: str) -> dict:
     return _get(f"/v5/analytics/dashboards/{dashboard_id}/charts/{chart_id}")
 
 
-def _configured_chart_refs() -> list:
-    """Parse MOENGAGE_CHARTS, a comma-separated list of
-    'label:dashboard_id:chart_id' triples naming which real charts (already
-    built by whoever owns the MoEngage dashboard) this app is allowed to
-    pull, e.g.:
-    MOENGAGE_CHARTS=campaign_engagement:63ede292b4c6a68b18c2c93f:63ef1f824da10b4fd96c6e3b,segment_overview:...
-    """
-    raw = os.environ.get("MOENGAGE_CHARTS", "")
+def _list_all_chart_refs() -> list:
+    """Every (dashboard, chart) pair across every workspace-level dashboard,
+    fetched in parallel - the 29-way dashboard listing call is itself fast,
+    it's this fan-out (one call per dashboard) that benefits from threading."""
+    dashboards = list_dashboards()
     refs = []
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        parts = entry.split(":")
-        if len(parts) != 3:
-            logger.warning("Skipping malformed MOENGAGE_CHARTS entry (expected label:dashboard_id:chart_id): %r", entry)
-            continue
-        label, dashboard_id, chart_id = parts
-        refs.append({"label": label, "dashboard_id": dashboard_id, "chart_id": chart_id})
+
+    def _charts_for(dashboard: dict) -> list:
+        try:
+            charts = get_dashboard_charts(dashboard["_id"])
+        except Exception as exc:  # noqa: BLE001 - one bad dashboard shouldn't drop the rest
+            logger.warning("Could not list charts for dashboard %r: %s", dashboard.get("name"), exc)
+            return []
+        return [
+            {
+                "dashboard_id": dashboard["_id"],
+                "dashboard_name": dashboard.get("name") or dashboard["_id"],
+                "chart_id": c["_id"],
+                "chart_name": c.get("name") or c["_id"],
+            }
+            for c in charts
+        ]
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        for result in pool.map(_charts_for, dashboards):
+            refs.extend(result)
     return refs
 
 
-def get_configured_chart_snapshots() -> list:
-    """Pull every chart named in MOENGAGE_CHARTS. Returns a list of
-    {"label", "data", "error"} - a single chart failing (bad id, chart
-    deleted) doesn't take down the others; the error is reported per-chart
-    so a caller can say "X wasn't available" instead of silently omitting
-    it. Returns [] (not an error) if MOENGAGE_CHARTS isn't set - configuring
-    Data API credentials is enough to connect, chart selection is separate."""
+def get_all_chart_snapshots(force_refresh: bool = False) -> list:
+    """Pull EVERY chart's real data from EVERY workspace-level dashboard -
+    the full ~138-chart set, not a curated subset. Returns a list of
+    {"label" (dashboard - chart), "data", "error"} - one chart failing
+    (deleted, permission change) doesn't drop the rest, and is reported
+    rather than silently omitted. Cached for _CACHE_TTL_SECONDS so repeated
+    questions in the same few minutes don't re-fetch ~170 endpoints every
+    time; pass force_refresh=True to bypass that."""
+    now = time.time()
+    if not force_refresh and _cache["snapshots"] is not None and (now - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+        return _cache["snapshots"]
+
+    refs = _list_all_chart_refs()
     snapshots = []
-    for ref in _configured_chart_refs():
+
+    def _fetch(ref: dict) -> dict:
+        label = f"{ref['dashboard_name']} - {ref['chart_name']}"
         try:
             data = get_chart_data(ref["dashboard_id"], ref["chart_id"])
-            snapshots.append({"label": ref["label"], "data": data, "error": None})
+            return {"label": label, "data": data.get("data"), "error": None}
         except Exception as exc:  # noqa: BLE001 - reported per-chart, not raised
-            logger.warning("MoEngage chart %r failed: %s", ref["label"], exc)
-            snapshots.append({"label": ref["label"], "data": None, "error": str(exc)})
+            logger.warning("MoEngage chart %r failed: %s", label, exc)
+            return {"label": label, "data": None, "error": str(exc)}
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        futures = [pool.submit(_fetch, ref) for ref in refs]
+        for future in as_completed(futures):
+            snapshots.append(future.result())
+
+    _cache["snapshots"] = snapshots
+    _cache["fetched_at"] = now
     return snapshots

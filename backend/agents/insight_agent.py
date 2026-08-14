@@ -7,11 +7,14 @@ PII-blocking, number-verification against actual query results) applies for
 free here too, instead of a second, less-hardened path to the same
 warehouse.
 
-MoEngage (campaign/engagement data) is optional context, summarized by an
-LLM call that is explicitly instructed to describe only what's in the real
-API response - never invent a metric that isn't there. If MoEngage isn't
-configured, that's stated plainly rather than silently omitted, so nobody
-mistakes "not connected" for "nothing interesting going on".
+MoEngage (campaign/engagement data) is optional context, pulled from EVERY
+chart on EVERY dashboard in the workspace (moengage_client.get_all_chart_snapshots
+- ~138 charts across the real andSons workspace) and reduced to one LLM
+summarization call that's told which charts are actually relevant to this
+question and to describe only what's really in the data - never invent a
+metric that isn't there. If MoEngage isn't configured, that's stated
+plainly rather than silently omitted, so nobody mistakes "not connected"
+for "nothing interesting going on".
 
 The brief text handed to the Copywriter is framed as STRATEGY CONTEXT, not
 customer-facing content: generate_email() is responsible for making sure no
@@ -28,47 +31,69 @@ from .llm_provider import get_llm
 
 logger = logging.getLogger("insight_agent")
 
-_MOENGAGE_SUMMARY_PROMPT = """You are summarizing one real MoEngage analytics chart's raw API response \
-for an internal marketing brief. Describe ONLY what is actually present in this JSON - if a number, \
-trend, or breakdown isn't in the data, do not mention it or guess at it. Two to four short sentences, \
-plain English, no code/JSON formatting in your answer.
+_MOENGAGE_SUMMARY_PROMPT = """You are given the REAL raw data from every chart on every MoEngage \
+analytics dashboard in this workspace ({chart_count} charts total), for an internal marketing brief. \
+The business question motivating this brief is:
+{question}
 
-Chart label: {label}
-Raw chart data:
-{data}
+Pick out and summarize ONLY the charts whose data is actually relevant to that question (e.g. a \
+question about winback pulls from the Winback charts, not the ED/Weight-Loss funnel charts - this \
+workspace covers multiple andSons programs, so most charts will be irrelevant to any one question - \
+skip them). Describe ONLY what is actually present in the data you use - never invent or estimate a \
+number, trend, or breakdown that isn't really there, and never mention a chart you're not actually \
+using. If genuinely nothing here is relevant to the question, say so plainly instead of forcing a \
+connection. Three to six short sentences, plain English, no code/JSON formatting, no markdown.
+
+Charts (label: raw data):
+{charts}
 """
 
+# Cap per-chart data in the summarization prompt so ~138 charts' worth of
+# real payloads stays within a sane prompt size - full data is still fetched
+# and available (get_all_chart_snapshots), this cap only bounds what goes
+# into this one summarization call.
+_PER_CHART_CHAR_CAP = 800
 
-def _summarize_moengage_snapshot(label: str, data: dict) -> str:
+
+def _summarize_all_snapshots(question: str, snapshots: list) -> str:
+    lines = []
+    for snap in snapshots:
+        if snap["error"]:
+            lines.append(f"- {snap['label']}: [unavailable - {snap['error']}]")
+        else:
+            lines.append(f"- {snap['label']}: {str(snap['data'])[:_PER_CHART_CHAR_CAP]}")
+
     llm = get_llm("ANALYTICS")
     prompt = ChatPromptTemplate.from_messages([("human", _MOENGAGE_SUMMARY_PROMPT)])
     chain = prompt | llm
-    result = chain.invoke({"label": label, "data": str(data)[:6000]})
+    result = chain.invoke(
+        {"question": question, "chart_count": len(snapshots), "charts": "\n".join(lines)}
+    )
     return result.content.strip() if hasattr(result, "content") else str(result).strip()
 
 
-def _gather_moengage_notes() -> str:
+def _gather_moengage_notes(question: str) -> str:
     if not moengage_client.is_configured():
         return "MoEngage is not connected yet - this brief is based on BigQuery sales data only."
 
-    snapshots = moengage_client.get_configured_chart_snapshots()
+    snapshots = moengage_client.get_all_chart_snapshots()
     if not snapshots:
         return (
-            "MoEngage is connected but no charts are configured (set MOENGAGE_CHARTS) - this brief is "
-            "based on BigQuery sales data only."
+            "MoEngage is connected but has no dashboards/charts yet - this brief is based on BigQuery "
+            "sales data only."
         )
 
-    notes = []
-    for snap in snapshots:
-        if snap["error"]:
-            notes.append(f"- {snap['label']}: unavailable ({snap['error']})")
-        else:
-            try:
-                notes.append(f"- {snap['label']}: {_summarize_moengage_snapshot(snap['label'], snap['data'])}")
-            except Exception as exc:  # noqa: BLE001 - one bad summary shouldn't kill the brief
-                logger.warning("Failed to summarize MoEngage chart %r: %s", snap["label"], exc)
-                notes.append(f"- {snap['label']}: could not summarize (see logs)")
-    return "MoEngage campaign/engagement context:\n" + "\n".join(notes)
+    failed = [s for s in snapshots if s["error"]]
+    try:
+        summary = _summarize_all_snapshots(question, snapshots)
+    except Exception as exc:  # noqa: BLE001 - a summarization failure shouldn't kill the whole brief
+        logger.warning("Failed to summarize MoEngage snapshots: %s", exc)
+        return f"MoEngage is connected ({len(snapshots)} charts pulled) but the summary step failed - this brief is based on BigQuery sales data only."
+
+    notes = f"MoEngage campaign/engagement context ({len(snapshots)} charts checked):\n{summary}"
+    if failed:
+        notes += f"\n({len(failed)} chart(s) could not be fetched and were excluded.)"
+    return notes
 
 
 def investigate(question: str, file_context: str = "") -> dict:
@@ -83,7 +108,7 @@ def investigate(question: str, file_context: str = "") -> dict:
     )
     bq_result = ask_analytics(bigquery_question)
 
-    moengage_notes = _gather_moengage_notes()
+    moengage_notes = _gather_moengage_notes(question)
 
     sections = [
         "BUSINESS SIGNAL RAISED: " + question,

@@ -276,16 +276,20 @@ ever needed a non-admin app install.
 
 MoEngage's Analytics API is dashboard/chart-based (`backend/moengage_client.py` calls the real
 `GET /v5/analytics/dashboards/{id}/charts/{id}` endpoint) — there's no free-form "give me campaign
-X's stats" query, so whoever owns the MoEngage dashboard first builds a chart for whatever should be
-visible here (e.g. campaign send/open/click rates, segment engagement trend), then names it in
-`MOENGAGE_CHARTS` (`label:dashboard_id:chart_id`, comma-separated for more than one). Set
-`MOENGAGE_WORKSPACE_ID`, `MOENGAGE_DATA_API_KEY`, and `MOENGAGE_DC` (the data center from your
-dashboard URL, `dashboard-0X.moengage.com` → `"0X"`) to connect.
+X's stats" query, only chart data for charts that already exist. Rather than maintaining a curated
+allowlist, `get_all_chart_snapshots()` pulls **every chart on every workspace dashboard**
+automatically (the real andSons workspace has 29 dashboards / ~138 charts) — fetched in parallel and
+cached for 15 minutes, since re-hitting ~170 endpoints on every single question would be slow and
+needless. Set `MOENGAGE_WORKSPACE_ID`, `MOENGAGE_DATA_API_KEY`, and `MOENGAGE_DC` (the data center
+from your dashboard URL, `dashboard-0X.moengage.com` → `"0X"`) to connect.
 
-Once connected, `agents/insight_agent.py` pulls every chart named in `MOENGAGE_CHARTS` and has an
-LLM summarize each one in plain English — explicitly instructed to describe only what's actually in
-that chart's real API response, never to invent a metric that isn't there. If a chart fails to load
-(bad ID, deleted), that's reported per-chart rather than silently dropped.
+At that scale, summarizing chart-by-chart would mean ~138 separate LLM calls per question — instead
+`agents/insight_agent.py` makes ONE summarization call over every chart's real data, told which
+business question it's investigating so it can pick out the charts that are actually relevant (this
+workspace covers multiple andSons programs — HL, ED, PE, Weight Loss — so most charts are irrelevant
+to any single question) and ignore the rest. It's explicitly instructed to describe only what's
+really in the data it uses, never to invent a metric or reference a chart it didn't actually use. A
+chart that fails to load (deleted, permission change) is reported and excluded, not silently dropped.
 
 ## Insight-driven emails (from a business signal, not a fixed flow)
 

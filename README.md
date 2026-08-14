@@ -57,6 +57,7 @@ backend/
   flows.py                  # canonical andSons Hair Loss lifecycle flows (real, not invented)
   text_sanitize.py           # shared cleanup: strips em-dashes/curly quotes/markdown from LLM output
   image_bank.py              # real approved hero photo bank (served from backend/static/hero_images/)
+  email_image_renderer.py    # renders a drafted email as a branded PNG (for Slack), Pillow-only
   file_context.py            # summarizes an uploaded CSV/Excel file into LLM-ready context
   moengage_client.py         # real MoEngage Analytics API connector, no mock fallback
   slack_integration.py       # Slack signature verification + Block Kit formatting for slash commands
@@ -373,6 +374,18 @@ subscribed to Slack's **Events API** (`app_mention`). Unlike slash commands, eve
 `response_url` — each app needs its own real **Bot Token** to reply via `chat.postMessage`, on top
 of its own **Signing Secret**.
 
+**Rendered email image:** the email bot posts each draft as an actual branded PNG (logo, hero
+photo, body copy, a numbered "what happens next" box, CTA button, trust line, footer), not Slack
+Block Kit text fragments — so it reads like a real HTML email, not a formatted message. Rendered
+server-side with Pillow (`backend/email_image_renderer.py`, no headless browser — keeps the Cloud
+Run image light) using the exact brand colors already defined in `frontend/src/index.css` (`--accent
+#963e21` etc.), so the Slack preview and the web demo's `EmailCard` match. The bundled font
+(`backend/static/fonts/Roboto-Variable.ttf`, Apache-2.0) avoids depending on whatever font happens
+to be on the deploy host. The image is uploaded directly to Slack via `files_upload_v2` (needs the
+`files:write` scope) rather than served from a URL this app hosts — Cloud Run instances are
+stateless, so a per-request generated file saved to local disk could 404 if a later request lands
+on a different instance; uploading the bytes straight to Slack sidesteps that.
+
 **Setup**, twice (once per bot):
 
 1. Go to `https://api.slack.com/apps` → **Create New App** → **From scratch** → pick your workspace
@@ -385,7 +398,9 @@ of its own **Signing Secret**.
    on Cloud Run first, or verification will fail).
 3. Still on **Event Subscriptions** → **Subscribe to bot events** → add `app_mention`.
 4. **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** → add `app_mentions:read`,
-   `chat:write`, and `files:read` (needed to download a CSV/Excel file someone attaches).
+   `chat:write`, `files:read` (needed to download a CSV/Excel file someone attaches), and
+   `files:write` (the email bot only - needed to upload the rendered email image; see
+   **Rendered email image** below).
 5. **Basic Information** → App Credentials → copy the **Signing Secret** → set
    `SLACK_EMAIL_SIGNING_SECRET` (or `SLACK_ANALYTICS_SIGNING_SECRET`) on Cloud Run (same
    `services update --update-env-vars` or `cloudrun-env.yaml` + `./deploy.sh` approach as above).

@@ -14,8 +14,18 @@ from typing import Tuple
 
 import pandas as pd
 
-MAX_SUMMARY_CHARS = 4000
-MAX_SAMPLE_ROWS = 10
+# Real exports (e.g. a MoEngage campaign report) can be 80-100+ columns wide,
+# several with long free-text/HTML blobs (segment filter descriptions,
+# subject lines) - the original 4000-char cap truncated mid-table on files
+# like that, silently dropping most of the sample rows. Raised to a size
+# that comfortably fits a realistic ~100-column report's stats + sample
+# without ballooning the prompt on genuinely huge files.
+MAX_SUMMARY_CHARS = 20000
+MAX_SAMPLE_ROWS = 8
+# Per-cell cap when rendering the sample table - without this, a single long
+# free-text column (segment filter descriptions, HTML) dominates the whole
+# table width and pushes every other column out of the truncation budget.
+MAX_CELL_CHARS = 80
 
 SUPPORTED_EXTENSIONS = (".csv", ".xlsx", ".xls")
 
@@ -58,8 +68,12 @@ def summarize_file(filename: str, content: bytes) -> str:
             )
         lines.append("")
 
-    sample = df.head(MAX_SAMPLE_ROWS)
-    lines.append(f"Sample rows (first {len(sample)} of {len(df)}):")
+    sample = df.head(MAX_SAMPLE_ROWS).copy()
+    for col in sample.select_dtypes(include="object").columns:
+        sample[col] = sample[col].apply(
+            lambda v: (v[:MAX_CELL_CHARS] + "...") if isinstance(v, str) and len(v) > MAX_CELL_CHARS else v
+        )
+    lines.append(f"Sample rows (first {len(sample)} of {len(df)}, long text cells truncated):")
     lines.append(sample.to_string(index=False))
 
     summary = "\n".join(lines)

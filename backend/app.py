@@ -15,6 +15,7 @@ from flask_cors import CORS
 from agents.analytics_agent import ask_analytics
 from agents.copywriter_agent import parse_email_request
 from agents.feedback_node import revise_with_feedback, run_email_pipeline, run_insight_email_pipeline
+from email_image_renderer import render_email_image
 from file_context import summarize_files
 from flows import VALID_FLOW_SLUGS
 from slack_integration import (
@@ -22,10 +23,12 @@ from slack_integration import (
     download_slack_file,
     format_analytics_blocks,
     format_email_blocks,
+    format_email_caption,
     get_analytics_history,
     get_email_session,
     is_retry,
     post_message,
+    post_rendered_email,
     post_result_to_slack,
     run_in_background,
     save_email_session,
@@ -301,12 +304,13 @@ def slack_events_email():
                         "feedback_history": result["feedback_history"],
                     },
                 )
-                blocks = format_email_blocks(
-                    {"email": result["email"], "passed": result["sweeper_pass"], "retries_used": None},
-                    session["flow_name"],
-                    session["first_name"],
+                revised_result = {"email": result["email"], "passed": result["sweeper_pass"], "retries_used": None}
+                image = render_email_image(result["email"], session["first_name"])
+                caption = format_email_caption(revised_result, session["flow_name"], session["first_name"])
+                post_rendered_email(
+                    bot_token, channel, thread_ts, image,
+                    f"{session['flow_name']}_{session['first_name']}_revised.png", caption,
                 )
-                post_message(bot_token, channel, thread_ts=thread_ts, text="Updated draft", blocks=blocks)
                 return
 
             # No text but a file was attached (e.g. "@andSonsEmail" + upload) -
@@ -349,8 +353,12 @@ def slack_events_email():
                         "feedback_history": [],
                     },
                 )
-                blocks = format_email_blocks(result, result["flow_name"], intent["first_name"])
-                post_message(bot_token, channel, thread_ts=thread_ts, text="Draft ready", blocks=blocks)
+                image = render_email_image(result["email"], intent["first_name"])
+                caption = format_email_caption(result, result["flow_name"], intent["first_name"])
+                post_rendered_email(
+                    bot_token, channel, thread_ts, image,
+                    f"{result['flow_name']}_{intent['first_name']}.png", caption,
+                )
                 return
 
             if not intent["flow_name"]:
@@ -373,8 +381,12 @@ def slack_events_email():
                     "feedback_history": [],
                 },
             )
-            blocks = format_email_blocks(result, intent["flow_name"], intent["first_name"])
-            post_message(bot_token, channel, thread_ts=thread_ts, text="Draft ready", blocks=blocks)
+            image = render_email_image(result["email"], intent["first_name"])
+            caption = format_email_caption(result, intent["flow_name"], intent["first_name"])
+            post_rendered_email(
+                bot_token, channel, thread_ts, image,
+                f"{intent['flow_name']}_{intent['first_name']}.png", caption,
+            )
         except Exception as exc:  # noqa: BLE001 — surfaced back to Slack
             post_message(bot_token, channel, thread_ts=thread_ts, text=f"Error generating email: {exc}")
 

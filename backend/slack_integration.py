@@ -16,6 +16,7 @@ Slack, for testing. Two interaction styles:
 Both styles ack within Slack's 3-second window and do the real work (LLM
 calls, which can take several seconds) in a background thread.
 """
+import io
 import logging
 import os
 import re
@@ -65,6 +66,31 @@ def post_message(bot_token: str, channel: str, thread_ts: str = None, text: str 
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text or " ", blocks=blocks)
     except Exception:
         logger.exception("Failed to post message via chat.postMessage.")
+
+
+def post_rendered_email(bot_token: str, channel: str, thread_ts: str, image, filename: str, comment: str) -> None:
+    """Upload a rendered email PNG (a PIL Image, from email_image_renderer.py)
+    directly to Slack via files_upload_v2, rather than serving it from a URL
+    this app hosts. Cloud Run instances are stateless/ephemeral with no
+    shared disk - a per-request generated file saved locally and referenced
+    by URL (like the static hero-image bank, which works because those files
+    are baked into the Docker image at build time) could easily 404 if a
+    later request lands on a different instance. Uploading the bytes
+    straight to Slack sidesteps that entirely - Slack hosts the image."""
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    buf.seek(0)
+    try:
+        client = WebClient(token=bot_token)
+        client.files_upload_v2(
+            channel=channel,
+            thread_ts=thread_ts,
+            file=buf,
+            filename=filename,
+            initial_comment=comment,
+        )
+    except Exception:
+        logger.exception("Failed to upload rendered email image to Slack.")
 
 
 def run_in_background(target, *args, **kwargs) -> None:
@@ -156,6 +182,26 @@ def _absolute_url(path: str) -> str:
         return path
     base = os.environ.get("PUBLIC_BASE_URL")
     return f"{base.rstrip('/')}{path}" if base else path
+
+
+def format_email_caption(result: dict, flow_name: str, first_name: str) -> str:
+    """Plain-text caption for the rendered email image upload (see
+    post_rendered_email) - files_upload_v2's initial_comment, not Block Kit,
+    so this stays a single mrkdwn string rather than a blocks list."""
+    lines = [f"*{flow_name} -> {first_name}*"]
+
+    insight = result.get("insight_brief")
+    if insight:
+        note = f"_Why this draft:_ {insight['bigquery_answer']}"
+        if not insight.get("bigquery_verified"):
+            note += " (directional - not fully verified)"
+        lines.append(note)
+
+    status = "Passed brand QA" if result.get("passed") else "Needs human review"
+    retries = result.get("retries_used")
+    lines.append(f"{status} - {retries} automatic revision(s)" if retries else status)
+    lines.append("Reply in this thread with feedback to revise this draft.")
+    return "\n".join(lines)
 
 
 def format_email_blocks(result: dict, flow_name: str, first_name: str) -> list:

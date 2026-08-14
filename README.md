@@ -416,6 +416,14 @@ The app runs as a single Cloud Run service, built directly from the repo's `Dock
 changes needed for the container itself, since `app.py` already binds to the `PORT` env var Cloud
 Run injects, the same way Render's did.
 
+**Important: the service must run with `--no-cpu-throttling`** (already in `deploy.sh`). The Slack
+webhook handlers ack fast and do the real work (LLM calls, image rendering, the actual Slack post)
+in a background thread afterward — Cloud Run's default (CPU allocated only while a request is being
+handled) can freeze that thread mid-work on a freshly cold-started instance with no other in-flight
+request keeping CPU allocated. Confirmed live: an event acked with 200, but the background thread
+produced zero further log output and the Slack message never arrived. If you ever deploy without
+`deploy.sh` (a raw `gcloud run deploy`/`services update`), always include `--no-cpu-throttling`.
+
 **One-time setup:**
 
 1. `gcloud config set project crm-mail-automation-dev` (or whichever GCP project you're deploying

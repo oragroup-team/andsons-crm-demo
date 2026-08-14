@@ -17,6 +17,15 @@ SERVICE_NAME="andsons-crm-demo"
 REGION="us-central1"
 SECRET_NAME="bigquery-service-account-key"
 
+# --no-cpu-throttling matters here specifically: the Slack webhook handlers
+# ack fast and do the real work (LLM calls, image rendering, the Slack post
+# itself) in a background thread AFTER the HTTP response is sent. Cloud
+# Run's default (CPU allocated only during request handling) can freeze
+# that background thread mid-work on a freshly cold-started instance with
+# no other in-flight requests keeping CPU allocated - confirmed live: one
+# event acked fine but the background thread produced zero further log
+# output and the Slack post never happened. Always-allocated CPU fixes it.
+
 if [ ! -f cloudrun-env.yaml ]; then
   echo "cloudrun-env.yaml not found — copy cloudrun-env.example.yaml and fill it in first."
   exit 1
@@ -29,7 +38,8 @@ gcloud run deploy "$SERVICE_NAME" \
   --env-vars-file=cloudrun-env.yaml \
   --set-secrets="/secrets/gcp-key.json=${SECRET_NAME}:latest" \
   --memory=1Gi \
-  --timeout=120
+  --timeout=120 \
+  --no-cpu-throttling
 
 echo ""
 echo "Deployed. If this was the first-ever deploy, grab the Service URL"

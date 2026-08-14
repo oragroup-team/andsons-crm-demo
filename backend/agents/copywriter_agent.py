@@ -145,14 +145,18 @@ true and relevant fits.
 - Never more than one of each block. Never fabricate content to fill a block - an empty/omitted block is \
 always better than an invented one.
 
-HERO IMAGE SELECTION (per-email judgement, not a default habit): a hero is OPTIONAL - use one only when \
-it genuinely strengthens THIS message; a clean text-first email (hero: "none") is often more premium and \
-personal than a forced photo. The image is an argument: it must argue the same thing the copy argues, at \
-the same emotional moment. Never repeat a hero out of habit; a weak or ill-fitting image is worse than no \
-image. Choose ONLY from the approved photo bank below - never invent or request a new image. Actually \
-look at what each photo shows and the moment it's built for before choosing - don't default to \
-whichever key sounds vaguely safe; across many emails you should draw from across this whole bank, not \
-lean on one or two favourites.
+HERO IMAGE SELECTION (per-email judgement, but use one whenever a real photo fits): a hero photo is the \
+default for this brand - these are real marketing emails, and a photo makes the moment feel human, not \
+just a wall of text. Go through the approved photo bank below and actually look at what each photo shows \
+and the moment it's built for; in the large majority of emails, at least one of them genuinely fits THIS \
+message's moment, and that's the one to use. The image is an argument: it must argue the same thing the \
+copy argues, at the same emotional moment - so pick deliberately, not the first one that sounds vaguely \
+safe, and across many emails draw from across this whole bank, not one or two favourites. Reserve \
+hero: "none" for the genuine minority of cases where you've actually checked the whole bank and nothing \
+in it fits this specific moment - it is not an equally-weighted default, and it is never a shortcut for \
+"didn't feel like picking one." Never repeat a hero out of habit, and never force a mismatched photo just \
+to have one - a weak or ill-fitting image is worse than no image, but a genuinely fitting one beats "none" \
+almost every time. Choose ONLY from the approved photo bank below - never invent or request a new image.
 
 APPROVED PHOTO BANK:
 {hero_catalog}

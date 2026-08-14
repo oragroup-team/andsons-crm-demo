@@ -38,10 +38,21 @@ COLOR_ACCENT = "#963e21"
 COLOR_STEPS_BG = "#faf7f2"
 COLOR_WHITE = "#ffffff"
 
-CANVAS_WIDTH = 600
-MARGIN = 36
+# Rendered at 2x a "standard" 600px email width, then left at that native
+# resolution (not downsampled) - Slack fits the display size to its message
+# pane regardless of source pixel count, so the extra real resolution shows
+# up as crisper text/photo detail on modern (retina/high-DPI) screens
+# instead of a soft, visibly-upscaled 1x render.
+SCALE = 2
+CANVAS_WIDTH = 600 * SCALE
+MARGIN = 36 * SCALE
 CONTENT_WIDTH = CANVAS_WIDTH - 2 * MARGIN
-HERO_HEIGHT = 320
+HERO_HEIGHT = 320 * SCALE
+
+
+def _s(px: int) -> int:
+    """Scale a logical (1x) pixel value up to the render's actual SCALE."""
+    return px * SCALE
 
 
 def _font(size: int, weight: str = "Regular") -> ImageFont.FreeTypeFont:
@@ -112,7 +123,7 @@ def _draw_hero(canvas: Image.Image, hero_key: str, hero_headline: Optional[str],
         # Bottom-up dark gradient (matches .hero-headline's CSS: linear-gradient
         # to top, rgba(0,0,0,0.6) -> transparent) so white overlay text stays
         # legible regardless of the photo underneath.
-        band_height = 130
+        band_height = _s(130)
         alpha = np.linspace(160, 0, band_height, dtype=np.uint8).reshape(-1, 1)
         gradient = np.tile(alpha, (1, CANVAS_WIDTH))
         overlay = Image.new("RGBA", (CANVAS_WIDTH, band_height), (0, 0, 0, 0))
@@ -120,8 +131,8 @@ def _draw_hero(canvas: Image.Image, hero_key: str, hero_headline: Optional[str],
         canvas.paste(overlay, (0, y + HERO_HEIGHT - band_height), overlay)
 
         draw = ImageDraw.Draw(canvas)
-        headline_font = _font(26, "Bold")
-        draw.text((MARGIN, y + HERO_HEIGHT - 54), hero_headline, font=headline_font, fill=COLOR_WHITE)
+        headline_font = _font(_s(26), "Bold")
+        draw.text((MARGIN, y + HERO_HEIGHT - _s(54)), hero_headline, font=headline_font, fill=COLOR_WHITE)
 
     return y + HERO_HEIGHT
 
@@ -133,70 +144,70 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     # Oversized canvas, cropped to actual content height at the end - the
     # simplest way to lay out genuinely variable-length email content
     # without a separate two-pass height-measurement engine.
-    canvas = Image.new("RGB", (CANVAS_WIDTH, 2400), COLOR_WHITE)
+    canvas = Image.new("RGB", (CANVAS_WIDTH, _s(2400)), COLOR_WHITE)
     draw = ImageDraw.Draw(canvas)
     y = 0
 
     # --- Logo header ("&sons" wordmark - the real andSons logotype; body
     # copy still always says "andSons", per brand rules) ---
-    logo_font = _font(28, "Bold")
-    draw.text((MARGIN, 24), "&sons", font=logo_font, fill=COLOR_TEXT)
-    y = 24 + 40
-    draw.line([(0, y), (CANVAS_WIDTH, y)], fill=COLOR_BORDER, width=1)
-    y += 1
+    logo_font = _font(_s(28), "Bold")
+    draw.text((MARGIN, _s(24)), "&sons", font=logo_font, fill=COLOR_TEXT)
+    y = _s(24) + _s(40)
+    draw.line([(0, y), (CANVAS_WIDTH, y)], fill=COLOR_BORDER, width=_s(1))
+    y += _s(1)
 
     # --- Hero (optional) ---
     hero_key = content.get("hero")
     if hero_key and hero_key != "none" and content.get("hero_image_url"):
         y = _draw_hero(canvas, hero_key, content.get("hero_headline"), y)
 
-    y += 28
+    y += _s(28)
     draw = ImageDraw.Draw(canvas)  # re-bind after any paste() calls above
 
     # --- Greeting + opening lines ---
-    body_font = _font(16, "Regular")
+    body_font = _font(_s(16), "Regular")
     draw.text((MARGIN, y), f"Hi {first_name},", font=body_font, fill=COLOR_TEXT)
-    y += int(16 * 1.45) + 10
+    y += int(_s(16) * 1.45) + _s(10)
 
     for line in content.get("opening_lines") or []:
         y = _draw_wrapped(draw, line.replace("[name]", first_name), MARGIN, y, body_font, CONTENT_WIDTH, COLOR_TEXT)
-        y += 10
+        y += _s(10)
 
     # --- What happens next (numbered circle badges instead of icons - on
     # brand, no icon asset library needed) ---
     steps = content.get("what_happens_next")
     if steps:
-        box_top = y + 6
-        box_padding = 20
-        badge_r = 12
-        step_font = _font(15, "Regular")
-        title_font = _font(13, "SemiBold")
-        num_font = _font(12, "Bold")
+        box_top = y + _s(6)
+        box_padding = _s(20)
+        badge_r = _s(12)
+        step_font = _font(_s(15), "Regular")
+        title_font = _font(_s(13), "SemiBold")
+        num_font = _font(_s(12), "Bold")
 
-        text_x = MARGIN + box_padding + badge_r * 2 + 14
-        text_width = CONTENT_WIDTH - 2 * box_padding - badge_r * 2 - 14
+        text_x = MARGIN + box_padding + badge_r * 2 + _s(14)
+        text_width = CONTENT_WIDTH - 2 * box_padding - badge_r * 2 - _s(14)
 
         # Pass 1: measure only (same wrap logic the actual draw uses below)
         # so the box background can be drawn BEFORE the content - drawing it
         # after would paint over the badges/text.
-        inner_y = box_top + box_padding + int(13 * 1.6) + 8
+        inner_y = box_top + box_padding + int(_s(13) * 1.6) + _s(8)
         for step in steps:
             step_lines = _wrap(draw, step, step_font, text_width)
             step_height = len(step_lines) * int(step_font.size * 1.45)
-            inner_y = max(inner_y + step_height, inner_y + badge_r * 2 + 6) + 10
-        box_bottom = inner_y + box_padding - 10
+            inner_y = max(inner_y + step_height, inner_y + badge_r * 2 + _s(6)) + _s(10)
+        box_bottom = inner_y + box_padding - _s(10)
 
         draw.rounded_rectangle(
-            [MARGIN, box_top, CANVAS_WIDTH - MARGIN, box_bottom], radius=10, fill=COLOR_STEPS_BG
+            [MARGIN, box_top, CANVAS_WIDTH - MARGIN, box_bottom], radius=_s(10), fill=COLOR_STEPS_BG
         )
 
         # Pass 2: actually draw title, badges, and step text on top of the box.
         inner_y = box_top + box_padding
         draw.text((MARGIN + box_padding, inner_y), "WHAT HAPPENS NEXT", font=title_font, fill=COLOR_MUTED)
-        inner_y += int(13 * 1.6) + 8
+        inner_y += int(_s(13) * 1.6) + _s(8)
 
         for i, step in enumerate(steps, start=1):
-            badge_cy = inner_y + 10
+            badge_cy = inner_y + _s(10)
             badge_cx = MARGIN + box_padding + badge_r
             draw.ellipse(
                 [badge_cx - badge_r, badge_cy - badge_r, badge_cx + badge_r, badge_cy + badge_r],
@@ -204,42 +215,42 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
             )
             num_text = str(i)
             num_w = draw.textlength(num_text, font=num_font)
-            draw.text((badge_cx - num_w / 2, badge_cy - 8), num_text, font=num_font, fill=COLOR_WHITE)
+            draw.text((badge_cx - num_w / 2, badge_cy - _s(8)), num_text, font=num_font, fill=COLOR_WHITE)
 
             step_bottom = _draw_wrapped(draw, step, text_x, inner_y, step_font, text_width, COLOR_TEXT)
-            inner_y = max(step_bottom, badge_cy + badge_r + 6) + 10
+            inner_y = max(step_bottom, badge_cy + badge_r + _s(6)) + _s(10)
 
-        y = box_bottom + 20
+        y = box_bottom + _s(20)
 
     # --- Gentle truth line ---
     if content.get("gentle_truth_line"):
         y = _draw_wrapped(draw, content["gentle_truth_line"], MARGIN, y, body_font, CONTENT_WIDTH, COLOR_TEXT)
-        y += 20
+        y += _s(20)
 
     # --- CTA button ---
     cta_text = content.get("cta_text", "")
-    cta_font = _font(15, "SemiBold")
-    btn_padding_x, btn_padding_y = 28, 14
+    cta_font = _font(_s(15), "SemiBold")
+    btn_padding_x, btn_padding_y = _s(28), _s(14)
     btn_w = draw.textlength(cta_text, font=cta_font) + 2 * btn_padding_x
     btn_h = cta_font.size + 2 * btn_padding_y
-    draw.rounded_rectangle([MARGIN, y, MARGIN + btn_w, y + btn_h], radius=6, fill=COLOR_ACCENT)
-    draw.text((MARGIN + btn_padding_x, y + btn_padding_y - 2), cta_text, font=cta_font, fill=COLOR_WHITE)
-    y += btn_h + 24
+    draw.rounded_rectangle([MARGIN, y, MARGIN + btn_w, y + btn_h], radius=_s(6), fill=COLOR_ACCENT)
+    draw.text((MARGIN + btn_padding_x, y + btn_padding_y - _s(2)), cta_text, font=cta_font, fill=COLOR_WHITE)
+    y += btn_h + _s(24)
 
     # --- Trust line ---
     if content.get("trust_line"):
-        trust_font = _font(13, "Regular")
+        trust_font = _font(_s(13), "Regular")
         draw.text((MARGIN, y), content["trust_line"], font=trust_font, fill=COLOR_MUTED)
-        y += int(13 * 1.6) + 20
+        y += int(_s(13) * 1.6) + _s(20)
 
     # --- Signature ---
     draw.text((MARGIN, y), "The andSons team", font=body_font, fill=COLOR_TEXT)
-    y += int(16 * 1.45) + 20
+    y += int(_s(16) * 1.45) + _s(20)
 
     # --- Footer ---
-    draw.line([(MARGIN, y), (CANVAS_WIDTH - MARGIN, y)], fill=COLOR_BORDER, width=1)
-    y += 16
-    footer_font = _font(12, "Regular")
+    draw.line([(MARGIN, y), (CANVAS_WIDTH - MARGIN, y)], fill=COLOR_BORDER, width=_s(1))
+    y += _s(16)
+    footer_font = _font(_s(12), "Regular")
     footer_lines = [
         "WhatsApp customer service",
         "andSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522",
@@ -248,7 +259,7 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     for line in footer_lines:
         fill = COLOR_ACCENT if line == "WhatsApp customer service" else COLOR_MUTED
         draw.text((MARGIN, y), line, font=footer_font, fill=fill)
-        y += int(12 * 1.6)
+        y += int(_s(12) * 1.6)
 
-    y += 24
+    y += _s(24)
     return canvas.crop((0, 0, CANVAS_WIDTH, y))

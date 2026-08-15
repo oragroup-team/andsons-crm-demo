@@ -105,6 +105,69 @@ def _draw_check(draw, x, y_top, size, color, width=None):
     return size
 
 
+def _draw_icon_document(draw, cx, cy, size, color):
+    """Plan/review icon: a small document outline with a few lines of text."""
+    w, h = size * 0.7, size * 0.9
+    x0, y0 = cx - w / 2, cy - h / 2
+    lw = max(1, int(size * 0.08))
+    draw.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=size * 0.08, outline=color, width=lw)
+    for frac in (0.32, 0.52, 0.72):
+        ly = y0 + h * frac
+        draw.line([(x0 + w * 0.18, ly), (x0 + w * 0.82, ly)], fill=color, width=lw)
+
+
+def _draw_icon_check_circle(draw, cx, cy, size, color):
+    """Confirm/payment icon: a circle outline with a checkmark inside."""
+    r = size * 0.45
+    lw = max(1, int(size * 0.08))
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=lw)
+    check_size = size * 0.5
+    _draw_check(draw, cx - check_size / 2, cy - check_size / 2, check_size, color, width=lw)
+
+
+def _draw_icon_box(draw, cx, cy, size, color):
+    """Shipping/delivery icon: a package body with an open flap on top and
+    a tape line down the middle - reads as an actual box, unlike a plain
+    cross-divided rectangle (which just looks like a 4-pane grid)."""
+    w, h = size * 0.7, size * 0.55
+    x0, y0 = cx - w / 2, cy - h / 2 + size * 0.1
+    lw = max(1, int(size * 0.08))
+    draw.rectangle([x0, y0, x0 + w, y0 + h], outline=color, width=lw)
+    flap_peak = (cx, y0 - size * 0.22)
+    draw.line([(x0, y0), flap_peak], fill=color, width=lw, joint="curve")
+    draw.line([(x0 + w, y0), flap_peak], fill=color, width=lw, joint="curve")
+    draw.line([(cx, y0), (cx, y0 + h)], fill=color, width=lw)
+
+
+# Keyword -> icon. Deliberately NOT a fixed "step 1/2/3 always gets icon
+# X" mapping - these three icons only make sense when a step is actually
+# ABOUT reviewing/confirming, paying, or shipping (true for e.g. P1's real
+# "review plan -> pay -> discreet delivery" steps, matching the real sent-
+# email template) - a flow like quiz_recovery has nothing to do with any
+# of these, so its steps correctly fall through to the numbered badge
+# instead of a wrong icon forced onto unrelated content.
+_ICON_KEYWORDS = [
+    # "payment" itself is compliance-banned in most flows' copy (see
+    # copywriter_agent.py's PAYMENT-FRAMING BAN), so the real generated
+    # text says "start/confirm your treatment", "takes a minute", etc.
+    # instead - matched here, not just the literal word "payment".
+    (_draw_icon_check_circle, (
+        "pay", "cost", "atome", "checkout", "confirm your treatment", "start your treatment",
+        "takes a minute", "get started", "complete your order", "confirm your cart",
+    )),
+    (_draw_icon_box, ("ship", "deliver", "arrive", "discreet", "packag", "post", "send it to you")),
+    (_draw_icon_document, ("review", "plan", "finalised", "finalized")),
+]
+
+
+def _pick_step_icon(step_text: str):
+    t = step_text.lower()
+    for icon_fn, keywords in _ICON_KEYWORDS:
+        if any(k in t for k in keywords):
+            return icon_fn
+    return None
+
+
 def _draw_rich_wrapped(draw, runs, x, y, font, max_width, line_height=None) -> int:
     """Like _draw_wrapped, but runs is a list of (text, color, underline)
     spans drawn inline with mixed styling (e.g. a sentence with one styled
@@ -277,13 +340,21 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
         for i, step in enumerate(steps, start=1):
             badge_cy = inner_y + _s(10)
             badge_cx = MARGIN + box_padding + badge_r
-            draw.ellipse(
-                [badge_cx - badge_r, badge_cy - badge_r, badge_cx + badge_r, badge_cy + badge_r],
-                fill=COLOR_ACCENT,
-            )
-            num_text = str(i)
-            num_w = draw.textlength(num_text, font=num_font)
-            draw.text((badge_cx - num_w / 2, badge_cy - _s(8)), num_text, font=num_font, fill=COLOR_WHITE)
+            icon_fn = _pick_step_icon(step)
+            if icon_fn:
+                # A content-appropriate icon (matches the real sent-email
+                # template's line-icon style) - no filled circle backdrop.
+                icon_fn(draw, badge_cx, badge_cy, badge_r * 1.9, COLOR_ACCENT)
+            else:
+                # No icon genuinely fits this step's content - fall back to
+                # a plain numbered badge rather than forcing a wrong icon.
+                draw.ellipse(
+                    [badge_cx - badge_r, badge_cy - badge_r, badge_cx + badge_r, badge_cy + badge_r],
+                    fill=COLOR_ACCENT,
+                )
+                num_text = str(i)
+                num_w = draw.textlength(num_text, font=num_font)
+                draw.text((badge_cx - num_w / 2, badge_cy - _s(8)), num_text, font=num_font, fill=COLOR_WHITE)
 
             step_bottom = _draw_wrapped(draw, step, text_x, inner_y, step_font, text_width, COLOR_TEXT)
             inner_y = max(step_bottom, badge_cy + badge_r + _s(6)) + _s(10)

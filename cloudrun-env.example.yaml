@@ -25,3 +25,7 @@ PUBLIC_BASE_URL: ""
 MOENGAGE_WORKSPACE_ID: ""
 MOENGAGE_DATA_API_KEY: ""
 MOENGAGE_DC: ""
+# Firestore project for the @-mention bots' session storage - defaults to
+# this deploy's own project (session_store.py) if left blank, which is
+# correct for a standard deploy; only needed if that ever changes.
+FIRESTORE_PROJECT_ID: ""

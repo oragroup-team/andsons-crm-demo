@@ -61,6 +61,7 @@ backend/
   file_context.py            # summarizes an uploaded CSV/Excel file into LLM-ready context
   moengage_client.py         # real MoEngage Analytics API connector, no mock fallback
   slack_integration.py       # Slack signature verification + Block Kit formatting for slash commands
+  session_store.py           # Firestore-backed session storage for the @-mention bots
   agents/
     llm_provider.py          # per-agent Groq/Anthropic provider factory
     copywriter_agent.py      # drafts the email (structured JSON), real brand voice + compliance
@@ -359,8 +360,9 @@ icon — can be @-mentioned directly in a channel and talked to in plain languag
   request — matches it against the real 11-flow catalog (`agents.copywriter_agent.parse_email_request`);
   if the first name is unclear, or a direct request doesn't map to a flow, it asks for clarification
   instead of guessing. Reply **in the same thread** with feedback (still @-mentioning the bot) and
-  it revises the draft in place — feedback is tracked per Slack thread, in-memory, so a different
-  thread always starts a fresh draft. Attach a CSV/Excel file to the mention (or to a feedback
+  it revises the draft in place — feedback is tracked per Slack thread in **Firestore** (see
+  **Session storage** below), so a different thread always starts a fresh draft. Attach a CSV/Excel
+  file to the mention (or to a feedback
   reply) and its contents are read and folded in as extra context — real numbers from the file are
   fair game for the strategy brief, but same as any other internal context, never quoted directly
   in the customer-facing copy.
@@ -385,6 +387,33 @@ to be on the deploy host. The image is uploaded directly to Slack via `files_upl
 `files:write` scope) rather than served from a URL this app hosts — Cloud Run instances are
 stateless, so a per-request generated file saved to local disk could 404 if a later request lands
 on a different instance; uploading the bytes straight to Slack sidesteps that.
+
+**Session storage:** email feedback threads and analytics conversation history (`backend/session_store.py`)
+are stored in **Firestore**, not an in-memory dict. An in-memory dict was the original implementation
+and it broke in a very real way: Cloud Run replaces the running instance(s) on every deploy (wiping any
+in-memory state instantly), and can run multiple concurrent instances (`maxScale=20` here) with no
+guarantee two requests in the same Slack thread land on the same one — confirmed live, feedback replies
+were being treated as brand-new requests with zero memory of the original draft. Firestore is shared
+across every instance and every deploy, which fixes this architecturally instead of papering over it
+(pinning to a single instance would still lose everything on every redeploy).
+
+One-time setup this required, beyond application code (already done for the deployed instance, listed
+here for anyone standing this up fresh):
+```sh
+gcloud services enable firestore.googleapis.com --project=<your-project>
+gcloud firestore databases create --location=<region> --type=firestore-native --project=<your-project>
+# The identity the app runs as needs read/write access - grant whichever service
+# account GOOGLE_APPLICATION_CREDENTIALS resolves to (it may be a different
+# project's service account, as here: BigQuery's key belongs to a different
+# project than this app's own Firestore database):
+gcloud projects add-iam-policy-binding <your-project> \
+  --member="serviceAccount:<the service account email>" \
+  --role="roles/datastore.user"
+```
+If that service account's own "home" project differs from the project your Firestore database lives
+in, set `FIRESTORE_PROJECT_ID` explicitly (see `.env.example`) — Application Default Credentials
+otherwise infers the project from the credential file itself, which pointed the client at the wrong
+project entirely when this was first wired up.
 
 **Setup**, twice (once per bot):
 

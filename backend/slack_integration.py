@@ -141,38 +141,18 @@ def is_retry(request) -> bool:
     return bool(request.headers.get("X-Slack-Retry-Num"))
 
 
-# --- In-memory per-thread session state (email feedback loops) -------------
-# Keyed by (channel, thread_ts). Resets on process restart - fine for a demo
-# on Cloud Run, which scales to zero on idle anyway.
+# --- Per-thread session state (email feedback loops, analytics history) ----
+# Backed by Firestore (session_store.py), not an in-memory dict - Cloud Run
+# runs multiple instances and redeploys often, and an in-memory dict is
+# invisible across both. Re-exported here so app.py's existing imports don't
+# need to change.
 
-_EMAIL_SESSIONS: dict = {}
-
-
-def get_email_session(channel: str, thread_ts: str) -> dict:
-    return _EMAIL_SESSIONS.get((channel, thread_ts))
-
-
-def save_email_session(channel: str, thread_ts: str, session: dict) -> None:
-    _EMAIL_SESSIONS[(channel, thread_ts)] = session
-
-
-# --- In-memory per-thread conversation history (analytics bot context) -----
-# Same tradeoff as above. Capped per-thread so a very long-running thread
-# doesn't grow the prompt unboundedly.
-
-_ANALYTICS_SESSIONS: dict = {}
-_ANALYTICS_HISTORY_LIMIT = 6
-
-
-def get_analytics_history(channel: str, thread_ts: str) -> list:
-    return _ANALYTICS_SESSIONS.get((channel, thread_ts), [])
-
-
-def append_analytics_exchange(channel: str, thread_ts: str, question: str, answer: str) -> None:
-    key = (channel, thread_ts)
-    history = _ANALYTICS_SESSIONS.get(key, [])
-    history.append({"question": question, "answer": answer})
-    _ANALYTICS_SESSIONS[key] = history[-_ANALYTICS_HISTORY_LIMIT:]
+from session_store import (  # noqa: E402
+    append_analytics_exchange,
+    get_analytics_history,
+    get_email_session,
+    save_email_session,
+)
 
 
 # --- Slack Block Kit formatting --------------------------------------------

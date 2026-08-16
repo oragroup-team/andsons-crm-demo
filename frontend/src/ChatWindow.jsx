@@ -33,6 +33,7 @@ export default function ChatWindow() {
           sqlQuery: data.sql_query,
           verified: data.verified,
           dataSource: data.data_source,
+          moengageUsed: data.moengage_used,
         },
       ]);
     } catch (err) {
@@ -75,7 +76,9 @@ export default function ChatWindow() {
                     {m.verified ? "✓ grounded in query result" : "⚠ unverified"}
                   </div>
                   {m.dataSource && (
-                    <div className="data-source-badge">Source: live BigQuery</div>
+                    <div className="data-source-badge">
+                      Source: live BigQuery{m.moengageUsed ? " + MoEngage" : ""}
+                    </div>
                   )}
                   {m.sqlQuery && (
                     <details className="sql-details">

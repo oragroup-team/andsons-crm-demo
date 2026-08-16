@@ -1,13 +1,20 @@
-"""Analytics chat agent - LangChain SQL agent over the live ORA BigQuery warehouse.
+"""Analytics chat agent - LangChain SQL agent over the live ORA BigQuery
+warehouse, plus real MoEngage campaign/engagement data when it's actually
+relevant to the question (moengage_summary.py, shared with the email bot's
+insight pipeline - same scan-then-summarize approach, same guardrails).
 
 The agent must NEVER state a number in its final answer that didn't come
-from an actual query result. Enforced with a system-prompt instruction PLUS
-a post-hoc check: every number in the final answer is confirmed to appear
-somewhere in this run's tool (query) results; if any number can't be traced,
-the answer is replaced with an explicit "I couldn't verify that figure".
+from an actual query result (or, for MoEngage, an actual chart value).
+Enforced with a system-prompt instruction PLUS a post-hoc check: every
+number in the final answer is confirmed to appear somewhere in this run's
+tool (query) results, uploaded file, or MoEngage context; if any number
+can't be traced, the answer is replaced with an explicit "I couldn't
+verify that figure".
 
 The SQL query actually executed is captured and returned alongside the
-answer so it can be shown in the demo.
+answer so it can be shown in the demo. `moengage_used` in the return value
+reports whether MoEngage context was actually pulled in for this answer
+(most questions won't need it - it's only fetched/folded in when relevant).
 """
 import functools
 import logging
@@ -19,6 +26,7 @@ from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 from langchain_community.utilities import SQLDatabase
 
+from moengage_summary import gather_moengage_context
 from text_sanitize import sanitize_text
 
 from .llm_provider import get_llm
@@ -84,7 +92,8 @@ searching for it or guessing; do not loop trying to find a table that doesn't ex
 SYSTEM_PREFIX_TEMPLATE = """You are the andSons analytics assistant. andSons is a men's health telehealth \
 brand (hair loss is the flagship vertical, alongside weight loss and other supplements); all prices are \
 in SGD. You answer questions about customers, orders, revenue, and marketing spend by querying the \
-database directly.
+database directly, plus real MoEngage campaign/engagement data (opens, clicks, delivery, funnel \
+drop-off by flow) when it's given to you below as relevant context for this question.
 
 {schema_notes}
 
@@ -132,8 +141,12 @@ NEVER mention the database itself - no "row(s)", "table(s)", "column(s)", "recor
 internal schema/column name or its literal stored value (e.g. never say "Category-Level", \
 "Classification", "Order_Type", "Brand = 'AndSons'" - translate every one of these into the plain \
 business term instead: "Category-Level" + Category "HL" becomes "hair-loss-specific marketing spend", \
-not a description of which rows matched). The reader should hear a business story told by someone who \
-knows the numbers cold, with zero trace that the answer came from a query at all.
+not a description of which rows matched). The same rule applies to any MoEngage context you're given: \
+never say "chart", "dashboard", or a raw MoEngage metric/field label - translate it into the plain \
+business term (e.g. a chart tracking step-1-to-step-2 dropoff on a winback flow becomes "winback \
+emails that get a response", not a description of the chart). The reader should hear a business story \
+told by someone who knows the numbers cold, with zero trace that the answer came from a query or a \
+chart at all.
 Write like a sharp analyst briefing a colleague, not like a system describing its own query: plain, \
 confident, specific sentences, no hedging, no filler ("this figure reflects...", "it is worth noting \
 that..."). Aim for 3 to 5 sentences for most questions, fewer for genuinely simple ones.
@@ -293,7 +306,7 @@ def ask_analytics(
     checks against BOTH the SQL tool results AND this file context, so a
     figure genuinely from the uploaded file still passes)."""
     if _contains_write_operation(question):
-        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": "bigquery"}
+        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": "bigquery", "moengage_used": False}
 
     try:
         db = _get_db_cached()
@@ -305,6 +318,7 @@ def ask_analytics(
             "sql_query": "",
             "verified": False,
             "data_source": "bigquery",
+            "moengage_used": False,
         }
 
     llm = get_llm("ANALYTICS")
@@ -340,6 +354,20 @@ def ask_analytics(
             "products, the database has revenue for them):\n---\n" + file_context + "\n---\n\n" + agent_input
         )
 
+    # MoEngage (campaign/engagement data) is a separate real data source from
+    # BigQuery (sales/order data) - gather_moengage_context does a cheap
+    # relevance pre-check first (most questions, e.g. "how many orders",
+    # have nothing to do with campaign data) before paying the ~40-50s cost
+    # of the full ~138-chart fetch+summarize. `relevant` is a real boolean
+    # from structured output, not a guess from the summary text's wording.
+    moengage_context, moengage_used = gather_moengage_context(question, llm)
+    if moengage_used:
+        agent_input = (
+            "Real MoEngage campaign/engagement data relevant to this question - safe to cite "
+            "directly if it answers the question, combined with the database when relevant:\n---\n"
+            + moengage_context + "\n---\n\n" + agent_input
+        )
+
     result = agent_executor.invoke({"input": agent_input})
     raw_output = result.get("output", "").strip()
     if raw_output.lower().startswith("agent stopped due to"):
@@ -366,13 +394,15 @@ def ask_analytics(
     sql_query = "\n\n".join(executed_queries)
 
     if _contains_write_operation(sql_query):
-        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery"}
+        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery", "moengage_used": moengage_used}
 
     if _contains_pii(raw_answer):
-        return {"answer": PII_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery"}
+        return {"answer": PII_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery", "moengage_used": moengage_used}
 
     if file_context:
         tool_results_text += "\n" + file_context
+    if moengage_used:
+        tool_results_text += "\n" + moengage_context
 
     verified = _verify_numbers(raw_answer, tool_results_text)
     if verified:
@@ -385,4 +415,5 @@ def ask_analytics(
         "sql_query": sql_query,
         "verified": verified,
         "data_source": "bigquery",
+        "moengage_used": moengage_used,
     }

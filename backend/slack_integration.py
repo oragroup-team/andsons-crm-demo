@@ -265,7 +265,7 @@ def format_email_blocks(result: dict, flow_name: str, first_name: str) -> list:
 
 def format_analytics_blocks(result: dict, question: str) -> list:
     verified_text = "grounded in query result" if result.get("verified") else "unverified"
-    source = "live BigQuery"
+    source = "live BigQuery + MoEngage" if result.get("moengage_used") else "live BigQuery"
 
     blocks = [
         {

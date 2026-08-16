@@ -471,7 +471,13 @@ class EmailIntent(BaseModel):
         "flow, e.g. 'write a P1 email for Marcus'. 'insight' if this describes a business problem/signal "
         "and asks for an email to address it, e.g. 'OTC serum sales are down, write something to fix "
         "it' or 'winback isn't converting, draft an email for Wei about it' - i.e. the flow should be "
-        "figured out FROM investigating the signal, not just matched from the wording."
+        "figured out FROM investigating the signal, not just matched from the wording. Also 'insight' "
+        "whenever the message explicitly asks for the email to be grounded in real/live data - e.g. "
+        "mentions MoEngage, BigQuery, a dashboard, 'live data', 'based on what's happening' - EVEN IF "
+        "it also names a specific flow/customer (e.g. 'based on the live MoEngage flows, write a cart "
+        "abandon email for Mark' is 'insight', not 'direct' - a flow name being present doesn't override "
+        "an explicit request to actually check real data first; skipping that investigation because a "
+        "flow was also named would silently ignore what was actually asked for)."
     )
     flow_name: Optional[Literal[tuple(VALID_FLOW_SLUGS)]] = Field(
         default=None,
@@ -512,7 +518,11 @@ def parse_email_request(text: str) -> dict:
         "First decide the mode (see field description): a plain 'write me the <flow> email for <name>' "
         "request is 'direct'. A request that describes a problem, a metric moving the wrong way, or asks "
         "the agent to figure out what to write based on what's happening is 'insight' - the flow isn't "
-        "picked from wording alone in that case, it's investigated. "
+        "picked from wording alone in that case, it's investigated. This includes requests that name a "
+        "specific flow/customer but ALSO explicitly ask for it to be grounded in real data (mentions "
+        "MoEngage, BigQuery, a dashboard, 'live data', 'right now') - naming a flow doesn't make it "
+        "'direct' if the message is also explicitly asking for a real data check first; that check would "
+        "be silently skipped otherwise, which ignores what was actually asked for. "
         "Extract the customer's first name if one is mentioned; leave it null if not. For 'direct' mode, "
         "leave flow_name null rather than guessing if it doesn't clearly map to one of these flows - do "
         "not default to the first flow in the list. For 'insight' mode, only fill flow_name if the "

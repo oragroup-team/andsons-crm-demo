@@ -5,6 +5,7 @@ correction instruction). Output: structured JSON grounded in the real
 andSons brand voice, compliance rules, and per-flow briefs (source:
 CRM_Email_Generation_Data/&SONS CRM Knowledge).
 """
+import logging
 import re
 from typing import List, Literal, Optional
 
@@ -16,6 +17,8 @@ from image_bank import HERO_BANK, HERO_KEYS
 from text_sanitize import sanitize_text
 
 from .llm_provider import get_llm
+
+logger = logging.getLogger("copywriter_agent")
 
 _LEADING_NUMBER_RE = re.compile(r"^\s*\d+[.)]\s*")
 _LEADING_GREETING_RE = re.compile(r"^\s*hi\s+[^\s,]+\s*,\s*", re.IGNORECASE)
@@ -517,7 +520,18 @@ def parse_email_request(text: str) -> dict:
     )
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", text)])
     chain = prompt | structured_llm
-    result: EmailIntent = chain.invoke({})
+    try:
+        result: EmailIntent = chain.invoke({})
+    except Exception:
+        # Real failure mode, not hypothetical: a message that isn't an email
+        # request at all (e.g. "tell me what flows are live") can make the
+        # underlying model try to answer in plain text instead of calling
+        # the required structured-output tool - the API then rejects that
+        # outright, and the raw error would otherwise leak straight into
+        # Slack. mode="unclear" lets the caller give a clean, on-brand
+        # clarification instead of an API error dump.
+        logger.warning("parse_email_request: model failed to return structured output for %r", text)
+        return {"mode": "unclear", "flow_name": None, "first_name": None, "signal_question": None}
     return {
         "mode": result.mode,
         "flow_name": result.flow_name,
@@ -557,5 +571,14 @@ def pick_flow_for_signal(question: str, brief_text: str) -> Optional[str]:
     human_text = f"Signal: {question}\n\nInvestigation findings:\n{brief_text}"
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
     chain = prompt | structured_llm
-    result: FlowPick = chain.invoke({})
+    try:
+        result: FlowPick = chain.invoke({})
+    except Exception:
+        # Same real failure mode as parse_email_request() - the underlying
+        # model can refuse structured output entirely on an odd input. The
+        # caller already treats a null flow_name as "ask a person which flow
+        # to use", so failing safe to None here (never raising up into the
+        # Slack handler as a raw API error) is the same graceful path.
+        logger.warning("pick_flow_for_signal: model failed to return structured output for %r", question)
+        return None
     return result.flow_name

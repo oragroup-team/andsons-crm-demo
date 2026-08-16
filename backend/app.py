@@ -1,5 +1,6 @@
 import _vendor_path  # noqa: F401  — must be first, see _vendor_path.py
 
+import logging
 import os
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ from slack_integration import (
     strip_mention,
     verify_slack_request,
 )
+
+logger = logging.getLogger("app")
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.abspath(os.path.join(BACKEND_DIR, "..", "frontend"))
@@ -321,6 +324,21 @@ def slack_events_email():
             else:
                 intent = parse_email_request(text)
 
+            if intent["mode"] == "unclear":
+                # Not a code failure - a real message that isn't an email
+                # request at all (e.g. "what flows are live in MoEngage")
+                # can make the classifier refuse structured output outright.
+                # Give a clean, on-brand redirect instead of leaking the raw
+                # API error into Slack.
+                post_message(
+                    bot_token, channel, thread_ts=thread_ts,
+                    text="I can draft an andSons email (e.g. \"write the winback email for Marcus\") or "
+                    "investigate a business signal and draft one (e.g. \"OTC sales are down, write "
+                    "something to fix it for Wei\"). For general questions about flows or performance, "
+                    "try @andSons Analytics instead.",
+                )
+                return
+
             if not intent["first_name"]:
                 post_message(
                     bot_token, channel, thread_ts=thread_ts,
@@ -387,8 +405,13 @@ def slack_events_email():
                 bot_token, channel, thread_ts, image,
                 f"{intent['flow_name']}_{intent['first_name']}.png", caption,
             )
-        except Exception as exc:  # noqa: BLE001 — surfaced back to Slack
-            post_message(bot_token, channel, thread_ts=thread_ts, text=f"Error generating email: {exc}")
+        except Exception as exc:  # noqa: BLE001 — logged in full, only a clean message goes to Slack
+            logger.exception("Error generating email for channel=%s thread_ts=%s", channel, thread_ts)
+            post_message(
+                bot_token, channel, thread_ts=thread_ts,
+                text=f"Something went wrong drafting that ({type(exc).__name__}) - try rephrasing, or "
+                "check the server logs if it keeps happening.",
+            )
 
     run_in_background(_work)
     return "", 200
@@ -435,8 +458,13 @@ def slack_events_analytics():
             append_analytics_exchange(channel, thread_ts, effective_question, result["answer"])
             blocks = format_analytics_blocks(result, effective_question)
             post_message(bot_token, channel, thread_ts=thread_ts, blocks=blocks)
-        except Exception as exc:  # noqa: BLE001 — surfaced back to Slack
-            post_message(bot_token, channel, thread_ts=thread_ts, text=f"Error answering question: {exc}")
+        except Exception as exc:  # noqa: BLE001 — logged in full, only a clean message goes to Slack
+            logger.exception("Error answering analytics question for channel=%s thread_ts=%s", channel, thread_ts)
+            post_message(
+                bot_token, channel, thread_ts=thread_ts,
+                text=f"Something went wrong answering that ({type(exc).__name__}) - try rephrasing, or "
+                "check the server logs if it keeps happening.",
+            )
 
     run_in_background(_work)
     return "", 200

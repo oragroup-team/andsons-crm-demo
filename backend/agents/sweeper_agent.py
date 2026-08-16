@@ -6,6 +6,7 @@ Enforces the real andSons compliance rulebook and golden-standard checks
 02-Compliance-Claims.md "Sweeper checklist" + the live Pre-Launch Sweeper
 agent prompt's golden-standard hard-fail checks).
 """
+import logging
 from typing import List, Literal, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,6 +17,8 @@ from image_bank import HERO_BANK
 
 from .copywriter_agent import GOLDEN_P1_REFERENCE
 from .llm_provider import get_llm
+
+logger = logging.getLogger("sweeper_agent")
 
 SYSTEM_PROMPT = """You are the Pre-Launch Sweeper for andSons - the last automated QA check before an \
 email is shown to a human reviewer. You review against THREE dimensions and are demanding; your job is \
@@ -168,7 +171,14 @@ def _hero_deterministic_issues(hero_info: Optional[dict]) -> List[str]:
 
 
 class SweeperResult(BaseModel):
-    pass_: bool = Field(alias="pass", description="True if the email passes brand QA")
+    # Literal["yes","no"] rather than a raw bool field: Groq's tool-calling
+    # can emit a bare boolean as the JSON STRING "false" instead of the JSON
+    # literal false, which fails Groq's own strict schema validation
+    # server-side (a Pydantic-level fix can't catch this - the request
+    # itself gets rejected before it reaches us). Found and fixed for the
+    # same reason in moengage_summary.py; the Sweeper runs on every single
+    # email generated, so this exposure matters more here, not less.
+    pass_: Literal["yes", "no"] = Field(alias="pass", description="'yes' if the email passes brand QA")
     reasons: List[str] = Field(default_factory=list, description="Specific reasons for any failure")
     severity: Literal["none", "minor", "major"] = Field(
         description="Overall severity of the issues found"
@@ -192,10 +202,27 @@ def sweep_email(email_text: str, flow_name: str = "p1_plan_not_purchased", hero_
         [("system", system_text), ("human", human_text)]
     )
     chain = prompt | structured_llm
-    result: SweeperResult = chain.invoke({})
+
+    # This is a compliance gate, not just a style check - if it can't run at
+    # all after a retry, fail CLOSED (treat as failed, force human review)
+    # rather than silently letting an unreviewed email through.
+    result = None
+    for attempt in range(2):
+        try:
+            result = chain.invoke({})
+            break
+        except Exception as exc:  # noqa: BLE001 - retried once, then fails closed below
+            logger.warning("Sweeper structured-output call failed (attempt %d): %s", attempt, exc)
+
+    if result is None:
+        return {
+            "pass": False,
+            "reasons": ["Automated brand QA check failed to run (technical error) - needs human review before sending."],
+            "severity": "major",
+        }
 
     reasons = list(result.reasons)
-    passed = result.pass_
+    passed = result.pass_ == "yes"
     severity = result.severity
 
     hero_issues = _hero_deterministic_issues(hero_info)

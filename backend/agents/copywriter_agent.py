@@ -443,7 +443,19 @@ def generate_email(
         [("system", system_text), ("human", human_text)]
     )
     chain = prompt | structured_llm
-    content: EmailContent = chain.invoke({})
+
+    content = None
+    last_exc = None
+    for attempt in range(2):
+        try:
+            content = chain.invoke({})
+            break
+        except Exception as exc:  # noqa: BLE001 - retried once, then raised as a clear error below
+            last_exc = exc
+            logger.warning("Copywriter structured-output call failed (attempt %d): %s", attempt, exc)
+    if content is None:
+        raise RuntimeError(f"Copywriter failed to produce a draft after retrying ({last_exc}).") from last_exc
+
     content = _sanitize_content(content)
 
     hero_info = resolve_hero(content)

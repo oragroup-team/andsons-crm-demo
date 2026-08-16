@@ -29,6 +29,7 @@ as "skip this data source and say so", never as "pretend it's empty".
 import base64
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -45,6 +46,13 @@ _MAX_RETRIES = 2
 _CACHE_TTL_SECONDS = 900  # 15 min - see module docstring
 
 _cache = {"snapshots": None, "fetched_at": 0.0}
+# Each Slack @-mention is handled on its own background thread (run_in_background
+# in slack_integration.py) - without a lock, two questions arriving close
+# together with an expired/cold cache would both kick off a full ~138-chart
+# fetch simultaneously (wasted duplicate work, not a correctness bug, but a
+# real inefficiency at real traffic). This serializes the fetch itself while
+# still serving already-cached data lock-free (the common case).
+_cache_lock = threading.Lock()
 
 
 def is_configured() -> bool:
@@ -162,23 +170,30 @@ def get_all_chart_snapshots(force_refresh: bool = False) -> list:
     if not force_refresh and _cache["snapshots"] is not None and (now - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
         return _cache["snapshots"]
 
-    refs = _list_all_chart_refs()
-    snapshots = []
+    with _cache_lock:
+        # Re-check inside the lock: another thread may have just finished
+        # populating the cache while this one was waiting on it.
+        now = time.time()
+        if not force_refresh and _cache["snapshots"] is not None and (now - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+            return _cache["snapshots"]
 
-    def _fetch(ref: dict) -> dict:
-        label = f"{ref['dashboard_name']} - {ref['chart_name']}"
-        try:
-            data = get_chart_data(ref["dashboard_id"], ref["chart_id"])
-            return {"label": label, "data": data.get("data"), "error": None}
-        except Exception as exc:  # noqa: BLE001 - reported per-chart, not raised
-            logger.warning("MoEngage chart %r failed: %s", label, exc)
-            return {"label": label, "data": None, "error": str(exc)}
+        refs = _list_all_chart_refs()
+        snapshots = []
 
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-        futures = [pool.submit(_fetch, ref) for ref in refs]
-        for future in as_completed(futures):
-            snapshots.append(future.result())
+        def _fetch(ref: dict) -> dict:
+            label = f"{ref['dashboard_name']} - {ref['chart_name']}"
+            try:
+                data = get_chart_data(ref["dashboard_id"], ref["chart_id"])
+                return {"label": label, "data": data.get("data"), "error": None}
+            except Exception as exc:  # noqa: BLE001 - reported per-chart, not raised
+                logger.warning("MoEngage chart %r failed: %s", label, exc)
+                return {"label": label, "data": None, "error": str(exc)}
 
-    _cache["snapshots"] = snapshots
-    _cache["fetched_at"] = now
-    return snapshots
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = [pool.submit(_fetch, ref) for ref in refs]
+            for future in as_completed(futures):
+                snapshots.append(future.result())
+
+        _cache["snapshots"] = snapshots
+        _cache["fetched_at"] = now
+        return snapshots

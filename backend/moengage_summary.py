@@ -80,7 +80,28 @@ Charts (label: raw data):
 _PER_CHART_CHAR_CAP = 800
 
 
+# Caught live: the LLM pre-check alone is genuinely non-deterministic - the
+# exact same question got "yes" and "no" seconds apart across repeated
+# calls, which is unacceptable for a binary "should we even look" gate (a
+# false negative here means silently answering from the wrong data source,
+# not just a style difference). A keyword match on unambiguous
+# MoEngage-only terms can't flake the way a model sample can, so it's
+# checked FIRST and short-circuits straight to "yes" - the LLM call is a
+# secondary catch-all for phrasing these keywords miss (e.g. "how well is
+# winback landing"), not the only line of defense for the obvious cases.
+_MOENGAGE_KEYWORDS = (
+    "open rate", "opens", "click rate", "click-through", "clickthrough", "ctr",
+    "delivery rate", "delivered rate", "deliver rate",
+    "engagement", "funnel", "drop-off", "dropoff", "drop off",
+    "moengage", "campaign performance", "email performance", "flow performance",
+)
+
+
 def _might_need_moengage(question: str, llm) -> bool:
+    q_lower = question.lower()
+    if any(keyword in q_lower for keyword in _MOENGAGE_KEYWORDS):
+        return True
+
     structured_llm = llm.with_structured_output(_NeedsMoEngage)
     prompt = ChatPromptTemplate.from_messages([("human", _PRECHECK_PROMPT)])
     chain = prompt | structured_llm
@@ -128,12 +149,24 @@ def gather_moengage_context(question: str, llm) -> tuple:
         return "MoEngage is connected but has no dashboards/charts yet.", False
 
     failed = [s for s in snapshots if s["error"]]
-    try:
-        result = _summarize_all_snapshots(question, snapshots, llm)
-    except Exception as exc:  # noqa: BLE001 - a summarization failure shouldn't kill the caller
-        logger.warning("Failed to summarize MoEngage snapshots: %s", exc)
-        return f"MoEngage is connected ({len(snapshots)} charts pulled) but the summary step failed.", False
+    # Up to 2 tries: caught live, this specific judgment ("is any chart
+    # actually relevant") is genuinely non-deterministic - the identical
+    # question got "yes" and "no" seconds apart across repeated real calls.
+    # We've already paid the full fetch cost by this point and the
+    # pre-check already decided this question plausibly needs MoEngage
+    # data, so one retry on a "no" is worth it before trusting it.
+    result = None
+    for attempt in range(2):
+        try:
+            result = _summarize_all_snapshots(question, snapshots, llm)
+        except Exception as exc:  # noqa: BLE001 - a summarization failure shouldn't kill the caller
+            logger.warning("Failed to summarize MoEngage snapshots (attempt %d): %s", attempt, exc)
+            continue
+        if result.relevant == "yes":
+            break
 
+    if result is None:
+        return f"MoEngage is connected ({len(snapshots)} charts pulled) but the summary step failed.", False
     if result.relevant != "yes":
         return f"Checked all {len(snapshots)} MoEngage charts - none are relevant to this question.", False
 

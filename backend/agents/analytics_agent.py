@@ -25,6 +25,8 @@ from typing import Optional
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 from langchain_community.utilities import SQLDatabase
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
 
 from moengage_summary import gather_moengage_context
 from text_sanitize import sanitize_text
@@ -289,6 +291,45 @@ def _verify_numbers(answer: str, tool_results_text: str) -> bool:
     return True
 
 
+class _ResolvedQuestion(BaseModel):
+    standalone_question: str = Field(
+        description="The follow-up question rewritten as a complete, standalone question that makes "
+        "sense with zero prior context - fill in whatever it's implicitly referring to from the "
+        "conversation. Critically: if the follow-up narrows/filters the previous question (by product, "
+        "category, channel, time period, etc.), keep the SAME metric/topic as before, just add the new "
+        "filter - e.g. after 'how are winback email open rates doing', a follow-up 'what about for hair "
+        "loss specifically' resolves to 'how are winback email open rates doing for hair loss "
+        "specifically', NOT a switch to an unrelated metric like revenue or order counts just because "
+        "'hair loss' also appears in other data. If the follow-up is already a complete standalone "
+        "question (doesn't reference prior context), return it unchanged."
+    )
+
+
+def _resolve_followup_question(question: str, conversation_history: list, llm) -> str:
+    """Rewrites a follow-up ('what about for hair loss specifically') into a
+    complete standalone question using conversation history - a standard
+    technique for conversational Q&A, and more reliable than asking one
+    single downstream prompt to juggle history-resolution, topic
+    continuity, SQL tool-calling, and MoEngage-vs-BigQuery source selection
+    all at once. Caught live: without this, follow-ups that narrowed a
+    metric by category silently swapped to a different, unrelated metric
+    instead of staying on-topic. Fails open (returns the question
+    unresolved) rather than blocking the whole answer on a rewrite failure."""
+    history_text = "\n\n".join(f"Q: {h['question']}\nA: {h['answer']}" for h in conversation_history)
+    structured_llm = llm.with_structured_output(_ResolvedQuestion)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "Conversation so far:\n---\n{history}\n---"),
+        ("human", "Follow-up: {question}"),
+    ])
+    chain = prompt | structured_llm
+    try:
+        result: _ResolvedQuestion = chain.invoke({"history": history_text, "question": question})
+        return result.standalone_question
+    except Exception as exc:  # noqa: BLE001 - fail open, the raw question still works on its own
+        logger.warning("Failed to resolve follow-up question %r against history: %s", question, exc)
+        return question
+
+
 def ask_analytics(
     question: str, conversation_history: Optional[list] = None, file_context: Optional[str] = None
 ) -> dict:
@@ -335,18 +376,23 @@ def ask_analytics(
         agent_executor_kwargs={"return_intermediate_steps": True},
     )
 
-    agent_input = question
+    # Resolve a follow-up ("what about for hair loss specifically") into a
+    # complete standalone question BEFORE anything else - this is what the
+    # MoEngage relevance check, the SQL agent, and number-verification all
+    # actually work from, so topic continuity is settled once up front
+    # rather than re-litigated (unreliably) inside one giant combined
+    # prompt. effective_question is used for processing; `question` (the
+    # human's literal text) is still what gets logged to history.
+    effective_question = question
     if conversation_history:
-        history_text = "\n\n".join(
-            f"Q: {h['question']}\nA: {h['answer']}" for h in conversation_history
-        )
-        agent_input = (
-            "Conversation so far in this thread, for CONTEXT ONLY - use it to resolve references like "
-            "\"the same\", \"that flow\", \"what about X instead\", but NEVER copy a number from it "
-            "directly into your new answer. Always compute the new answer with a fresh query, even if "
-            "it looks like something already answered above:\n---\n" + history_text + "\n---\n\n"
-            "New question: " + agent_input
-        )
+        effective_question = _resolve_followup_question(question, conversation_history, llm)
+        if effective_question != question:
+            logger.info("Resolved follow-up %r -> %r", question, effective_question)
+
+    agent_input = (
+        "Never copy a number from prior knowledge - always compute the answer with a fresh query:\n"
+        + effective_question
+    )
     if file_context:
         agent_input = (
             "A file was uploaded alongside this question - real data, safe to cite directly if it "
@@ -360,11 +406,17 @@ def ask_analytics(
     # have nothing to do with campaign data) before paying the ~40-50s cost
     # of the full ~138-chart fetch+summarize. `relevant` is a real boolean
     # from structured output, not a guess from the summary text's wording.
-    moengage_context, moengage_used = gather_moengage_context(question, llm)
+    moengage_context, moengage_used = gather_moengage_context(effective_question, llm)
     if moengage_used:
         agent_input = (
-            "Real MoEngage campaign/engagement data relevant to this question - safe to cite "
-            "directly if it answers the question, combined with the database when relevant:\n---\n"
+            "Real MoEngage campaign/engagement data relevant to this question, given to you directly "
+            "below - BigQuery has NO email open/click/delivery event data at all (see schema notes), so "
+            "for opens/clicks/delivery-rate/funnel-drop-off questions this is your ONLY real source. "
+            "USE IT: if it answers the question, cite it directly in your answer - do not say that data "
+            "isn't available, and do not run a SQL query as a substitute for a metric this doesn't cover "
+            "(e.g. don't answer an open-rate question with an order count instead just because SQL has "
+            "orders). Still run SQL for anything this data doesn't cover (revenue, order counts), and "
+            "combine both when the question genuinely needs both:\n---\n"
             + moengage_context + "\n---\n\n" + agent_input
         )
 

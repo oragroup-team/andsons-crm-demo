@@ -308,12 +308,17 @@ class EmailContent(BaseModel):
         "not urgency). Omit if nothing true and relevant fits this flow.",
     )
     cta_text: str = Field(description="The call-to-action button text, e.g. 'Start My Treatment'")
-    cta_alignment: Literal["left", "center"] = Field(
-        default="left",
-        description="Where the CTA button sits in the rendered email. 'left' (matching the golden "
-        "template) unless a human reviewer's feedback explicitly asks to move/centre it - a request "
-        "like 'put the button in the middle' means set this to 'center', not just repeat the same "
-        "layout with different wording.",
+    cta_position: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Actual horizontal position of the CTA button, as a fraction of the row from flush "
+        "left (0.0, matching the golden template default) to flush right (1.0), 0.5 being dead centre. "
+        "Read what a human reviewer's feedback actually asks for and set the number that genuinely "
+        "matches it - 'centre'/'middle' is 0.5, 'move it right'/'the right side' is around 0.8-1.0, "
+        "'all the way to the rightmost corner' is 1.0, 'just slightly right of centre' is around "
+        "0.6, and so on. Judge the real position being asked for rather than rounding to a fixed set "
+        "of positions - this is a continuous value, not a left/centre/right choice.",
     )
     trust_line: Optional[str] = Field(
         default=None,

@@ -448,11 +448,12 @@ def _touchpoint_content_summary(t: dict) -> str:
     if content is None:
         return "(failed to generate - nothing to reference)"
     if t["channel"] == "email":
-        alignment = content.get("cta_alignment", "left")
+        position = content.get("cta_position", 0.0) or 0.0
         return (
             f"subject {content['subject']!r}, hero {content.get('hero')}, has a real REPOSITIONABLE CTA "
-            f"BUTTON reading {content['cta_text']!r} currently {alignment}-aligned - the only channel "
-            f"where a request to move/align/reposition 'the button' is even possible"
+            f"BUTTON reading {content['cta_text']!r} currently sitting at horizontal position "
+            f"{position:.2f} (0.0=flush left, 0.5=centre, 1.0=flush right) - the only channel where a "
+            f"request to move/align/reposition 'the button' is even possible"
         )
     if t["channel"] == "whatsapp":
         return (

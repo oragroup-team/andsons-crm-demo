@@ -267,6 +267,13 @@ class EmailContent(BaseModel):
         "not urgency). Omit if nothing true and relevant fits this flow.",
     )
     cta_text: str = Field(description="The call-to-action button text, e.g. 'Start My Treatment'")
+    cta_alignment: Literal["left", "center"] = Field(
+        default="left",
+        description="Where the CTA button sits in the rendered email. 'left' (matching the golden "
+        "template) unless a human reviewer's feedback explicitly asks to move/centre it - a request "
+        "like 'put the button in the middle' means set this to 'center', not just repeat the same "
+        "layout with different wording.",
+    )
     trust_line: Optional[str] = Field(
         default=None,
         description="OPTIONAL: short centred trust line, plain text separated by ' · ', e.g. "

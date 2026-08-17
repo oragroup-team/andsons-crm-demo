@@ -366,14 +366,18 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
         y = _draw_wrapped(draw, content["gentle_truth_line"], MARGIN, y, body_font, CONTENT_WIDTH, COLOR_TEXT)
         y += _s(20)
 
-    # --- CTA button ---
+    # --- CTA button (left by default, matching the golden template - a
+    # human reviewer can ask to centre it via feedback, which the
+    # Copywriter records as content["cta_alignment"], not something this
+    # renderer decides on its own) ---
     cta_text = content.get("cta_text", "")
     cta_font = _font(_s(15), "SemiBold")
     btn_padding_x, btn_padding_y = _s(28), _s(14)
     btn_w = draw.textlength(cta_text, font=cta_font) + 2 * btn_padding_x
     btn_h = cta_font.size + 2 * btn_padding_y
-    draw.rounded_rectangle([MARGIN, y, MARGIN + btn_w, y + btn_h], radius=_s(6), fill=COLOR_ACCENT)
-    draw.text((MARGIN + btn_padding_x, y + btn_padding_y - _s(2)), cta_text, font=cta_font, fill=COLOR_WHITE)
+    btn_x = (CANVAS_WIDTH - btn_w) / 2 if content.get("cta_alignment") == "center" else MARGIN
+    draw.rounded_rectangle([btn_x, y, btn_x + btn_w, y + btn_h], radius=_s(6), fill=COLOR_ACCENT)
+    draw.text((btn_x + btn_padding_x, y + btn_padding_y - _s(2)), cta_text, font=cta_font, fill=COLOR_WHITE)
     y += btn_h + _s(24)
 
     # --- Trust line (checkmark-prefixed, centered - matches the real sent-

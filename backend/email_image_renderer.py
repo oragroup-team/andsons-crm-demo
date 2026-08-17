@@ -366,19 +366,14 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
         y = _draw_wrapped(draw, content["gentle_truth_line"], MARGIN, y, body_font, CONTENT_WIDTH, COLOR_TEXT)
         y += _s(20)
 
-    # --- CTA button (flush left by default, matching the golden template -
-    # a human reviewer can ask to reposition it via feedback; the
-    # Copywriter judges the actual position being asked for and records it
-    # as content["cta_position"], a 0.0 (left)-1.0 (right) fraction, rather
-    # than this renderer deciding between a fixed set of named positions) ---
+    # --- CTA button (flush left, matching the golden template - the real
+    # andSons Copywriter spec has no button-position field at all) ---
     cta_text = content.get("cta_text", "")
     cta_font = _font(_s(15), "SemiBold")
     btn_padding_x, btn_padding_y = _s(28), _s(14)
     btn_w = draw.textlength(cta_text, font=cta_font) + 2 * btn_padding_x
     btn_h = cta_font.size + 2 * btn_padding_y
-    cta_position = content.get("cta_position", 0.0) or 0.0
-    available_x = CANVAS_WIDTH - 2 * MARGIN - btn_w
-    btn_x = MARGIN + available_x * cta_position
+    btn_x = MARGIN
     draw.rounded_rectangle([btn_x, y, btn_x + btn_w, y + btn_h], radius=_s(6), fill=COLOR_ACCENT)
     draw.text((btn_x + btn_padding_x, y + btn_padding_y - _s(2)), cta_text, font=cta_font, fill=COLOR_WHITE)
     y += btn_h + _s(24)

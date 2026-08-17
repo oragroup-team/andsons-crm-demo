@@ -352,7 +352,13 @@ def format_human_feedback(
         "reflected in the new draft (a specific fact, phrase, name, or detail the feedback asks you to "
         "add or change must actually appear; don't approximate it, soften it, or address only part of "
         "it). Everything in the current draft that the feedback doesn't ask you to change should stay "
-        "the same. Don't introduce unrelated changes beyond what's needed to satisfy this feedback."
+        "the same. Don't introduce unrelated changes beyond what's needed to satisfy this feedback.\n\n"
+        "This feedback overrides prior creative choices but never overrides compliance, the language "
+        "rules, the flow's exact CTA label, or invent-nothing. If the feedback genuinely asks for "
+        "something one of those hard rules doesn't allow, don't just silently refuse and don't silently "
+        "reinterpret it into something smaller without saying so either — apply the closest compliant "
+        "interpretation of what they actually asked for, and set the note field to one short, plain "
+        "sentence naming the conflict: what they asked for, and why you couldn't do it literally."
     )
 
     return "\n\n".join(sections)
@@ -448,18 +454,14 @@ def _touchpoint_content_summary(t: dict) -> str:
     if content is None:
         return "(failed to generate - nothing to reference)"
     if t["channel"] == "email":
-        position = content.get("cta_position", 0.0) or 0.0
         return (
-            f"subject {content['subject']!r}, hero {content.get('hero')}, has a real REPOSITIONABLE CTA "
-            f"BUTTON reading {content['cta_text']!r} currently sitting at horizontal position "
-            f"{position:.2f} (0.0=flush left, 0.5=centre, 1.0=flush right) - the only channel where a "
-            f"request to move/align/reposition 'the button' is even possible"
+            f"subject {content['subject']!r}, hero {content.get('hero')}, CTA button reading "
+            f"{content['cta_text']!r}"
         )
     if t["channel"] == "whatsapp":
         return (
             f"opens {content['hook_line']!r}, CTA reading {content['cta_text']!r} rendered as a plain "
-            f"green underlined TEXT LINK, not a positionable button - a request to move/align a button "
-            f"does not apply here"
+            f"green underlined text link"
         )
     return (
         f"title {content['title']!r}, body {content['body']!r} - a phone notification with NO button or "

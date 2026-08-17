@@ -283,19 +283,6 @@ class EmailContent(BaseModel):
         "not urgency). Omit if nothing true and relevant fits this flow.",
     )
     cta_text: str = Field(description="The call-to-action button text, e.g. 'Start My Treatment'")
-    cta_position: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="Where the CTA button actually sits along the row, as a fraction of the space "
-        "between the two margins: 0.0 means its left edge sits flush against the left margin, 1.0 "
-        "means its right edge sits flush against the right margin - that is the entire meaning of the "
-        "number, a plain physical coordinate, nothing else. Default 0.0 (the golden template). When a "
-        "human reviewer gives feedback about where the button should sit, read what they actually "
-        "wrote, picture the real button actually moving on the real page you're looking at, and set "
-        "the number that puts it where a person reading their words would expect to see it land - "
-        "your own genuine read of their intent, not a memorised mapping from stock phrases to numbers.",
-    )
     trust_line: Optional[str] = Field(
         default=None,
         description="OPTIONAL: short centred trust line, plain text separated by ' · ', e.g. "
@@ -323,6 +310,14 @@ class EmailContent(BaseModel):
         "set back to true if a later round asks to add it back. The WhatsApp customer-service line and "
         "the Unsubscribe line are NEVER optional regardless of this field - only the address line toggles.",
     )
+    note: Optional[str] = Field(
+        default=None,
+        description="Leave null on a normal draft. Only set this when you were given a human reviewer's "
+        "feedback that asked for something a hard rule (compliance, language rules, the flow's exact CTA "
+        "label, invent-nothing) does not allow: apply the closest compliant interpretation of what they "
+        "asked for instead of just refusing, and use this field to say in one short, plain sentence what "
+        "they asked for and why you couldn't do it literally.",
+    )
 
 
 def _sanitize_content(content: EmailContent) -> EmailContent:
@@ -346,6 +341,7 @@ def _sanitize_content(content: EmailContent) -> EmailContent:
             "trust_line": sanitize_text(content.trust_line) if content.trust_line else None,
             "hero_headline": sanitize_text(content.hero_headline) if content.hero_headline else None,
             "hero_rationale": sanitize_text(content.hero_rationale) if content.hero_rationale else None,
+            "note": sanitize_text(content.note) if content.note else None,
         }
     )
 
@@ -606,6 +602,13 @@ class WhatsAppContent(BaseModel):
         description="The single action this message points to, in the same verb + My + noun convention "
         "as email CTAs, e.g. 'Complete My Order' - shown as the one button this WhatsApp message carries."
     )
+    note: Optional[str] = Field(
+        default=None,
+        description="Leave null on a normal draft. Only set this when a human reviewer's feedback asked "
+        "for something a hard rule does not allow: apply the closest compliant interpretation instead of "
+        "just refusing, and say in one short, plain sentence what they asked for and why you couldn't do "
+        "it literally.",
+    )
 
 
 def _sanitize_whatsapp(content: WhatsAppContent) -> WhatsAppContent:
@@ -615,6 +618,7 @@ def _sanitize_whatsapp(content: WhatsAppContent) -> WhatsAppContent:
             "hook_line": sanitize_text(content.hook_line),
             "body": sanitize_text(content.body),
             "cta_text": sanitize_text(content.cta_text),
+            "note": sanitize_text(content.note) if content.note else None,
         }
     )
 
@@ -677,6 +681,13 @@ class PushContent(BaseModel):
         description="The notification's body line - ONE short sentence, under about 90 characters, shown "
         "below the title. Can address NAME directly here if it reads naturally."
     )
+    note: Optional[str] = Field(
+        default=None,
+        description="Leave null on a normal draft. Only set this when a human reviewer's feedback asked "
+        "for something a hard rule does not allow: apply the closest compliant interpretation instead of "
+        "just refusing, and say in one short, plain sentence what they asked for and why you couldn't do "
+        "it literally.",
+    )
 
 
 def _sanitize_push(content: PushContent) -> PushContent:
@@ -684,6 +695,7 @@ def _sanitize_push(content: PushContent) -> PushContent:
         update={
             "title": sanitize_text(content.title),
             "body": sanitize_text(content.body),
+            "note": sanitize_text(content.note) if content.note else None,
         }
     )
 

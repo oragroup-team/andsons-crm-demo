@@ -233,6 +233,10 @@ def format_flow_touchpoint_caption(touchpoint: dict, total: int, visual_qa: Opti
     if visual_qa and visual_qa["reviewed"] and not visual_qa["looks_good"]:
         lines.append(f"Visual QA: {visual_qa['note']}")
 
+    content_note = (touchpoint.get("content") or {}).get("note")
+    if content_note:
+        lines.append(f"Note: {content_note}")
+
     if touchpoint["n"] == 1:
         lines.append("Reply with a step number and feedback (e.g. \"2: make this shorter\") to revise that touchpoint.")
     return "\n".join(lines)

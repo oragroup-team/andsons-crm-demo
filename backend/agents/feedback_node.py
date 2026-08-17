@@ -20,6 +20,7 @@ from .copywriter_agent import (
 )
 from .head_of_crm_agent import brief_campaign
 from .insight_agent import investigate
+from .learned_rules_agent import distill_and_save_rule, learned_rules_text
 from .sweeper_agent import sweep_email, sweep_push, sweep_whatsapp
 
 logger = logging.getLogger("feedback_node")
@@ -160,11 +161,29 @@ def run_insight_email_pipeline(
     return result
 
 
-def _sweep_touchpoint(touchpoint: dict, flow_name: str) -> dict:
+def _heroes_from_touchpoints(touchpoints: list, exclude_n: int) -> list:
+    """Real (non-null) heroes used by email touchpoints OTHER than
+    `exclude_n` in the same flow - feeds the Sweeper's Flow Fidelity hero-
+    uniqueness check (see sweeper_agent.sweep_email's `other_heroes`)."""
+    return [
+        t["content"]["hero"]
+        for t in touchpoints
+        if t["n"] != exclude_n
+        and t.get("channel") == "email"
+        and t.get("content")
+        and t["content"].get("hero")
+        and t["content"]["hero"] != "none"
+    ]
+
+
+def _sweep_touchpoint(touchpoint: dict, flow_name: str, other_heroes: Optional[list] = None) -> dict:
     """Single dispatch point for "sweep this touchpoint with whatever
     channel's rules apply" - mirrors copywriter_agent.generate_touchpoint()."""
     if touchpoint["channel"] == "email":
-        return sweep_email(touchpoint["rendered_text"], flow_name=flow_name, hero_info=touchpoint["content"])
+        return sweep_email(
+            touchpoint["rendered_text"], flow_name=flow_name, hero_info=touchpoint["content"],
+            other_heroes=other_heroes,
+        )
     if touchpoint["channel"] == "whatsapp":
         return sweep_whatsapp(touchpoint["rendered_text"], flow_name=flow_name)
     if touchpoint["channel"] == "push":
@@ -187,7 +206,7 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
     # turns whatever's known (the flow's real metadata, plus any live
     # signal that motivated this specific request) into one decisive
     # commercial brief the Copywriter executes against.
-    crm_brief = brief_campaign(flow_name, signal_context=insight_brief_text)
+    crm_brief = brief_campaign(flow_name, signal_context=insight_brief_text, learned_rules=learned_rules_text())
 
     brief_parts = [f"CAMPAIGN BRIEF (Head of CRM):\n{crm_brief['brief_text']}"]
     if file_context:
@@ -219,7 +238,8 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
             continue
 
         while True:
-            sweep = _sweep_touchpoint(touchpoint, flow_name)
+            other_heroes = _heroes_from_touchpoints(flow_result["touchpoints"], touchpoint["n"])
+            sweep = _sweep_touchpoint(touchpoint, flow_name, other_heroes=other_heroes)
 
             logger.info(
                 "Flow %s touchpoint %d (%s, %s) attempt %d: pass=%s severity=%s reasons=%s",
@@ -405,7 +425,8 @@ def revise_flow_touchpoint(
 
     try:
         new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction)
-        sweep = _sweep_touchpoint(new_touchpoint, flow_name)
+        other_heroes = _heroes_from_touchpoints(touchpoints, touchpoint_n)
+        sweep = _sweep_touchpoint(new_touchpoint, flow_name, other_heroes=other_heroes)
     except RuntimeError as exc:
         # Same real, if rare, exhausted-retry failure as generate_flow() -
         # a manual retry request itself failing must never crash back to a
@@ -433,6 +454,13 @@ def revise_flow_touchpoint(
         "Human feedback applied to flow=%s touchpoint=%d: %r | sweeper_pass=%s reasons=%s",
         flow_name, touchpoint_n, feedback, sweep["pass"], sweep["reasons"],
     )
+
+    # Skill Distiller: a real human correction just got successfully
+    # applied - turn it into a standing rule so the NEXT flow (any flow,
+    # not just this one) doesn't need the same correction given again.
+    # Best-effort, never blocks the response on it.
+    if sweep["pass"]:
+        distill_and_save_rule(feedback, new_touchpoint["rendered_text"] or "")
 
     updated_touchpoints = [new_touchpoint if t["n"] == touchpoint_n else t for t in touchpoints]
     return {

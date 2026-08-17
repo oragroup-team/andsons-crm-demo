@@ -15,13 +15,14 @@ from pydantic import BaseModel, Field
 from flows import FLOW_BY_SLUG
 from image_bank import HERO_BANK
 
-from .copywriter_agent import GOLDEN_P1_REFERENCE
+from .copywriter_agent import GOLDEN_P1_REFERENCE, _build_flow_brief
+from .learned_rules_agent import learned_rules_text
 from .llm_provider import get_llm, invoke_with_retry
 
 logger = logging.getLogger("sweeper_agent")
 
 SYSTEM_PROMPT = """You are the Pre-Launch Sweeper for andSons - the last automated QA check before an \
-email is shown to a human reviewer. You review against THREE dimensions and are demanding; your job is \
+email is shown to a human reviewer. You review against FIVE dimensions and are demanding; your job is \
 to have an eye for every detail so nothing has to be caught later.
 
 Golden template (P1 "mixed style" - the quality floor for restraint, register, and structure that every \
@@ -108,9 +109,27 @@ truth line are judgement calls the Copywriter makes per email. An email that omi
 NOT a failure by itself - only fail if a block IS present and is done wrong (more than 3 steps, more than \
 one hero, badge graphics, illustrated icons, duplicated blocks, etc).
 
+D) FLOW FIDELITY (judge against the FLOW SPEC below; hard-fail any):
+{flow_spec}
+
+- MIS-STAGING (the costliest error): any line contradicting the reader's actual state above - referencing \
+a doctor's plan, a consultation, a delivery, or a decision this reader has not actually made in this flow; \
+inventing a reason for the reader's behaviour (why they left, why they hesitated) instead of acknowledging \
+the moment without explaining it for them; revealing something the reader does not yet know in this flow.
+- CTA: the CTA text does not reasonably match the flow's suggested CTA above (a close, on-brand variant is \
+fine - e.g. a synonym that still reads as "verb + My + noun" for the same action; a CTA pointing at a \
+different action entirely is not).
+- HERO UNIQUENESS: this candidate's hero is already used by another touchpoint in this same flow, listed \
+here: {other_heroes}
+- NAME: any real-looking customer name in place of the literal NAME placeholder.
+
+E) LEARNED CHECKS (from past real human feedback - treat each as a standing requirement, same weight as \
+the rules above):
+{learned_rules}
+
 For each failure, write ONE short, specific reason describing what's actually wrong in the candidate (not \
 the rule text verbatim). Set severity to "none" if it passes, "minor" for small copy/polish issues, or \
-"major" for any compliance (A) failure or structural/brand-safety violation.
+"major" for any compliance (A), flow-fidelity (D), or learned-check (E) failure.
 """
 
 
@@ -160,9 +179,23 @@ C) REGISTER (hard-fail any):
 treatment, not paying) - UNLESS the flow is genuinely a billing flow (Replenishment/Dunning).
 - Any trace of an internal business/marketing metric leaking into the message.
 
+D) FLOW FIDELITY (judge against the FLOW SPEC below; hard-fail any):
+{flow_spec}
+
+- MIS-STAGING (the costliest error): any line contradicting the reader's actual state above - referencing \
+a doctor's plan, a consultation, a delivery, or a decision this reader has not actually made in this flow; \
+inventing a reason for the reader's behaviour instead of acknowledging the moment without explaining it \
+for them; revealing something the reader does not yet know in this flow.
+- CTA: the "[CTA label]" text does not reasonably match the flow's suggested CTA above.
+- NAME: any real-looking customer name in place of the literal NAME placeholder.
+
+E) LEARNED CHECKS (from past real human feedback - treat each as a standing requirement, same weight as \
+the rules above):
+{learned_rules}
+
 For each failure, write ONE short, specific reason describing what's actually wrong in the candidate. Set \
-severity to "none" if it passes, "minor" for small copy issues, or "major" for any compliance (A) or \
-shape (B) failure.
+severity to "none" if it passes, "minor" for small copy issues, or "major" for any compliance (A), shape \
+(B), flow-fidelity (D), or learned-check (E) failure.
 """
 
 
@@ -243,13 +276,25 @@ class SweeperResult(BaseModel):
         populate_by_name = True
 
 
-def sweep_email(email_text: str, flow_name: str = "p1_plan_not_purchased", hero_info: Optional[dict] = None) -> dict:
+def sweep_email(
+    email_text: str,
+    flow_name: str = "p1_plan_not_purchased",
+    hero_info: Optional[dict] = None,
+    other_heroes: Optional[List[str]] = None,
+) -> dict:
+    """`other_heroes`, when given (from feedback_node.py's flow-level sweep),
+    lists heroes already used by OTHER touchpoints in the same flow, so the
+    Flow Fidelity check can catch a repeated hero - see _build_flow_brief()
+    for reader_state/CTA context, the other half of that same check."""
     llm = get_llm("SWEEPER")
     structured_llm = llm.with_structured_output(SweeperResult)
 
     system_text = SYSTEM_PROMPT.format(
         golden_reference=GOLDEN_P1_REFERENCE,
         price_rule=_price_rule_text(flow_name),
+        learned_rules=learned_rules_text(),
+        flow_spec=_build_flow_brief(flow_name),
+        other_heroes=", ".join(other_heroes) if other_heroes else "(none - this is the only email touchpoint, or the first one)",
     )
     human_text = f"Flow: {flow_name}\n\nCandidate email:\n---\n{email_text}\n---"
 
@@ -297,7 +342,11 @@ def sweep_whatsapp(message_text: str, flow_name: str = "p1_plan_not_purchased") 
     llm = get_llm("SWEEPER")
     structured_llm = llm.with_structured_output(SweeperResult)
 
-    system_text = WHATSAPP_SYSTEM_PROMPT.format(price_rule=_price_rule_text(flow_name))
+    system_text = WHATSAPP_SYSTEM_PROMPT.format(
+        price_rule=_price_rule_text(flow_name),
+        learned_rules=learned_rules_text(),
+        flow_spec=_build_flow_brief(flow_name),
+    )
     human_text = f"Flow: {flow_name}\n\nCandidate WhatsApp message:\n---\n{message_text}\n---"
 
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
@@ -360,9 +409,13 @@ C) REGISTER (hard-fail any):
 flow (Replenishment/Dunning).
 - Any trace of an internal business/marketing metric leaking into the message.
 
+D) LEARNED CHECKS (from past real human feedback - treat each as a standing requirement, same weight as \
+the rules above):
+{learned_rules}
+
 For each failure, write ONE short, specific reason describing what's actually wrong in the candidate. Set \
-severity to "none" if it passes, "minor" for small copy issues, or "major" for any compliance (A) or \
-shape (B) failure.
+severity to "none" if it passes, "minor" for small copy issues, or "major" for any compliance (A), shape \
+(B), or learned-check (D) failure.
 """
 
 
@@ -373,7 +426,7 @@ def sweep_push(notification_text: str, flow_name: str = "p1_plan_not_purchased")
     llm = get_llm("SWEEPER")
     structured_llm = llm.with_structured_output(SweeperResult)
 
-    system_text = PUSH_SYSTEM_PROMPT.format(price_rule=_price_rule_text(flow_name))
+    system_text = PUSH_SYSTEM_PROMPT.format(price_rule=_price_rule_text(flow_name), learned_rules=learned_rules_text())
     human_text = f"Flow: {flow_name}\n\nCandidate push notification:\n---\n{notification_text}\n---"
 
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])

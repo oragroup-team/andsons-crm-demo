@@ -126,3 +126,35 @@ def clear_pending_email_request(channel: str, thread_ts: str) -> None:
         _get_client().collection("pending_email_requests").document(_doc_id(channel, thread_ts)).delete()
     except Exception:
         logger.exception("Failed to clear pending email request from Firestore (non-fatal - it'll just get overwritten next time).")
+
+
+# --- Learned rules ------------------------------------------------------
+# Real pipeline capability this mirrors: the n8n workflow's "Skill
+# Distiller" turns every piece of human feedback into a standing rule in
+# a sheet tab called Learned_Rules, which every agent's prompt reads on
+# every future run ("Compile Lessons"). This system had no equivalent at
+# all - every session started from zero, with no memory of any past
+# correction. One shared document (not one per thread) since a rule
+# learned from one flow's feedback should apply to every future flow,
+# same as the real system's single shared sheet.
+_LEARNED_RULES_DOC = "standing_rules"
+_MAX_LEARNED_RULES = 50  # oldest evicted first - keeps the prompt injection bounded
+
+
+def get_learned_rules() -> list:
+    try:
+        doc = _get_client().collection("learned_rules").document(_LEARNED_RULES_DOC).get()
+        return doc.to_dict().get("rules", []) if doc.exists else []
+    except Exception:
+        logger.exception("Failed to read learned rules from Firestore - treating as no standing rules yet.")
+        return []
+
+
+def add_learned_rule(rule: str) -> None:
+    try:
+        ref = _get_client().collection("learned_rules").document(_LEARNED_RULES_DOC)
+        rules = get_learned_rules()
+        rules.append(rule)
+        ref.set({"rules": rules[-_MAX_LEARNED_RULES:]})
+    except Exception:
+        logger.exception("Failed to save a learned rule to Firestore - this correction won't carry forward to future runs.")

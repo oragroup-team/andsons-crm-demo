@@ -17,6 +17,7 @@ from image_bank import HERO_BANK, HERO_KEYS
 from text_sanitize import sanitize_text
 
 from .creative_director_agent import direct_touchpoint
+from .learned_rules_agent import learned_rules_text
 from .llm_provider import get_llm, invoke_with_retry
 
 logger = logging.getLogger("copywriter_agent")
@@ -199,6 +200,10 @@ either ("the window worth protecting"). Sentence case, no dash.
 - If none of the bank photos genuinely fit this email's moment, choose "none" - a text-first email is \
 always a valid, often better choice than forcing a mismatched photo.
 - Always set hero_rationale to one short line: why this hero (or "none") fits this specific moment.
+
+LEARNED RULES (standing requirements distilled from real past human feedback on real drafts; apply every \
+one before the Sweeper has to catch it):
+{learned_rules}
 
 FLOW FOR THIS EMAIL: {flow_name}
 {flow_brief}
@@ -456,6 +461,7 @@ def generate_email(
         flow_brief=flow_brief,
         first_name=first_name,
         hero_catalog=_build_hero_catalog(),
+        learned_rules=learned_rules_text(),
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
@@ -538,6 +544,10 @@ counters, badges, deadlines. No cure/guarantee language, no shame, no fake urgen
 NO DEFENSIVE META-COMMENTARY: never narrate the message's intent or what it is NOT doing.
 PAYMENT-FRAMING BAN: never lead with money; the action is starting/continuing treatment, not paying.
 
+LEARNED RULES (standing requirements distilled from real past human feedback; apply every one before the \
+Sweeper has to catch it):
+{learned_rules}
+
 FLOW: {flow_name}
 {flow_brief}
 
@@ -616,6 +626,10 @@ cure/guarantee language, no shame, no fake urgency.
 {price_rule}
 
 NO DEFENSIVE META-COMMENTARY. PAYMENT-FRAMING BAN: never lead with money.
+
+LEARNED RULES (standing requirements distilled from real past human feedback; apply every one before the \
+Sweeper has to catch it):
+{learned_rules}
 
 FLOW: {flow_name}
 {flow_brief}
@@ -792,6 +806,7 @@ def generate_flow_email_touchpoint(
         flow_brief=flow_brief,
         first_name="NAME",
         hero_catalog=_build_hero_catalog(),
+        learned_rules=learned_rules_text(),
     )
     system_text += (
         f"\n\nTHIS TOUCHPOINT'S MOMENT IN THE FLOW (touchpoint {step['n']} of "
@@ -875,6 +890,7 @@ def generate_flow_whatsapp_touchpoint(
         intent=step["intent"],
         price_rule=price_rule,
         prior_context=_prior_touchpoints_context(prior_summaries),
+        learned_rules=learned_rules_text(),
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
@@ -927,6 +943,7 @@ def generate_flow_push_touchpoint(
         intent=step["intent"],
         price_rule=price_rule,
         prior_context=_prior_touchpoints_context(prior_summaries),
+        learned_rules=learned_rules_text(),
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)

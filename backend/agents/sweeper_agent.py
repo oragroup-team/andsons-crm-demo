@@ -296,11 +296,18 @@ def sweep_email(
     flow_name: str = "p1_plan_not_purchased",
     hero_info: Optional[dict] = None,
     other_heroes: Optional[List[str]] = None,
+    human_feedback: Optional[str] = None,
 ) -> dict:
     """`other_heroes`, when given (from feedback_node.py's flow-level sweep),
     lists heroes already used by OTHER touchpoints in the same flow, so the
     Flow Fidelity check can catch a repeated hero - see _build_flow_brief()
-    for reader_state/CTA context, the other half of that same check."""
+    for reader_state/CTA context, the other half of that same check.
+
+    `human_feedback`, when given (this candidate is a revision, not a first
+    draft), is the actual reviewer request that produced this candidate -
+    without it the Sweeper has no way to judge any "only when a reviewer
+    explicitly asks" LEARNED CHECK, since it otherwise only ever sees the
+    rendered output, never what was actually asked for."""
     llm = get_llm("SWEEPER")
     structured_llm = llm.with_structured_output(SweeperResult)
 
@@ -318,7 +325,15 @@ def sweep_email(
         if not include_address
         else "The address line is expected as normal in this candidate (no removal request on record)."
     )
-    human_text = f"Flow: {flow_name}\n{address_note}\n\nCandidate email:\n---\n{email_text}\n---"
+    feedback_note = (
+        f"THE ACTUAL REVIEWER REQUEST THAT PRODUCED THIS CANDIDATE: {human_feedback.strip()}\n"
+        "Use this to correctly judge any LEARNED CHECK below phrased as \"only when a reviewer explicitly "
+        "asks\" - if this request asks for that thing, it WAS explicitly asked for, for this candidate "
+        "only, so don't fail it on those grounds."
+        if human_feedback
+        else "This is a first draft, not a revision - no reviewer request produced it."
+    )
+    human_text = f"Flow: {flow_name}\n{address_note}\n{feedback_note}\n\nCandidate email:\n---\n{email_text}\n---"
 
     prompt = ChatPromptTemplate.from_messages(
         [("system", system_text), ("human", human_text)]
@@ -354,13 +369,15 @@ def sweep_email(
     }
 
 
-def sweep_whatsapp(message_text: str, flow_name: str = "p1_plan_not_purchased") -> dict:
+def sweep_whatsapp(message_text: str, flow_name: str = "p1_plan_not_purchased", human_feedback: Optional[str] = None) -> dict:
     """Same QA gate as sweep_email(), but with WhatsApp's own real shape
     rules (short plain-text chat message, one link, no HTML/hero/footer) -
     see WHATSAPP_SYSTEM_PROMPT. Real Sweeper rule this reuses (from the
     live n8n system prompt): 'A WhatsApp touchpoint must be a short
     plain-text chat message (2-4 lines, one link, no subject, no HTML, no
-    hero), not an email.'"""
+    hero), not an email.'
+
+    `human_feedback`: see sweep_email()'s docstring - same reasoning."""
     llm = get_llm("SWEEPER")
     structured_llm = llm.with_structured_output(SweeperResult)
 
@@ -369,7 +386,15 @@ def sweep_whatsapp(message_text: str, flow_name: str = "p1_plan_not_purchased") 
         learned_rules=learned_rules_text(),
         flow_spec=_build_flow_brief(flow_name),
     )
-    human_text = f"Flow: {flow_name}\n\nCandidate WhatsApp message:\n---\n{message_text}\n---"
+    feedback_note = (
+        f"THE ACTUAL REVIEWER REQUEST THAT PRODUCED THIS CANDIDATE: {human_feedback.strip()}\n"
+        "Use this to correctly judge any LEARNED CHECK below phrased as \"only when a reviewer explicitly "
+        "asks\" - if this request asks for that thing, it WAS explicitly asked for, for this candidate "
+        "only, so don't fail it on those grounds."
+        if human_feedback
+        else "This is a first draft, not a revision - no reviewer request produced it."
+    )
+    human_text = f"Flow: {flow_name}\n{feedback_note}\n\nCandidate WhatsApp message:\n---\n{message_text}\n---"
 
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
     chain = prompt | structured_llm
@@ -443,15 +468,25 @@ severity to "none" if it passes, "minor" for small copy issues, or "major" for a
 """
 
 
-def sweep_push(notification_text: str, flow_name: str = "p1_plan_not_purchased") -> dict:
+def sweep_push(notification_text: str, flow_name: str = "p1_plan_not_purchased", human_feedback: Optional[str] = None) -> dict:
     """Same QA gate as sweep_email()/sweep_whatsapp(), but with a push
     notification's own real shape rules (title + body only, no link, no
-    CTA, character-limited) - see PUSH_SYSTEM_PROMPT."""
+    CTA, character-limited) - see PUSH_SYSTEM_PROMPT.
+
+    `human_feedback`: see sweep_email()'s docstring - same reasoning."""
     llm = get_llm("SWEEPER")
     structured_llm = llm.with_structured_output(SweeperResult)
 
     system_text = PUSH_SYSTEM_PROMPT.format(price_rule=_price_rule_text(flow_name), learned_rules=learned_rules_text())
-    human_text = f"Flow: {flow_name}\n\nCandidate push notification:\n---\n{notification_text}\n---"
+    feedback_note = (
+        f"THE ACTUAL REVIEWER REQUEST THAT PRODUCED THIS CANDIDATE: {human_feedback.strip()}\n"
+        "Use this to correctly judge any LEARNED CHECK below phrased as \"only when a reviewer explicitly "
+        "asks\" - if this request asks for that thing, it WAS explicitly asked for, for this candidate "
+        "only, so don't fail it on those grounds."
+        if human_feedback
+        else "This is a first draft, not a revision - no reviewer request produced it."
+    )
+    human_text = f"Flow: {flow_name}\n{feedback_note}\n\nCandidate push notification:\n---\n{notification_text}\n---"
 
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
     chain = prompt | structured_llm

@@ -319,11 +319,14 @@ class EmailContent(BaseModel):
     )
     note: Optional[str] = Field(
         default=None,
-        description="Leave null on a normal draft. Only set this when you were given a human reviewer's "
-        "feedback that asked for something a hard rule (compliance, language rules, the flow's exact CTA "
-        "label, invent-nothing) does not allow: apply the closest compliant interpretation of what they "
-        "asked for instead of just refusing, and use this field to say in one short, plain sentence what "
-        "they asked for and why you couldn't do it literally.",
+        description="Leave null on a normal draft, and leave null unless the CURRENT, newest feedback you "
+        "were just given (not any earlier round already applied in a prior draft) asks for something a "
+        "hard rule (compliance, language rules, the flow's exact CTA label, invent-nothing) does not "
+        "allow, or names a capability that doesn't exist in this schema: apply the closest compliant "
+        "interpretation of what they actually asked for instead of just refusing, and use this field to "
+        "say in one short, plain sentence what they asked for and why you couldn't do it literally. Never "
+        "use this field to comment on, re-explain, or re-litigate a past feedback round - those are "
+        "already settled.",
     )
 
 
@@ -611,10 +614,12 @@ class WhatsAppContent(BaseModel):
     )
     note: Optional[str] = Field(
         default=None,
-        description="Leave null on a normal draft. Only set this when a human reviewer's feedback asked "
-        "for something a hard rule does not allow: apply the closest compliant interpretation instead of "
-        "just refusing, and say in one short, plain sentence what they asked for and why you couldn't do "
-        "it literally.",
+        description="Leave null on a normal draft, and leave null unless the CURRENT, newest feedback you "
+        "were just given (not any earlier round already applied in a prior draft) asks for something a "
+        "hard rule does not allow, or names a capability that doesn't exist in this schema: apply the "
+        "closest compliant interpretation instead of just refusing, and say in one short, plain sentence "
+        "what they asked for and why you couldn't do it literally. Never use this field to comment on, "
+        "re-explain, or re-litigate a past feedback round - those are already settled.",
     )
 
 
@@ -690,10 +695,12 @@ class PushContent(BaseModel):
     )
     note: Optional[str] = Field(
         default=None,
-        description="Leave null on a normal draft. Only set this when a human reviewer's feedback asked "
-        "for something a hard rule does not allow: apply the closest compliant interpretation instead of "
-        "just refusing, and say in one short, plain sentence what they asked for and why you couldn't do "
-        "it literally.",
+        description="Leave null on a normal draft, and leave null unless the CURRENT, newest feedback you "
+        "were just given (not any earlier round already applied in a prior draft) asks for something a "
+        "hard rule does not allow, or names a capability that doesn't exist in this schema: apply the "
+        "closest compliant interpretation instead of just refusing, and say in one short, plain sentence "
+        "what they asked for and why you couldn't do it literally. Never use this field to comment on, "
+        "re-explain, or re-litigate a past feedback round - those are already settled.",
     )
 
 

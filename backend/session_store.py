@@ -158,3 +158,14 @@ def add_learned_rule(rule: str) -> None:
         ref.set({"rules": rules[-_MAX_LEARNED_RULES:]})
     except Exception:
         logger.exception("Failed to save a learned rule to Firestore - this correction won't carry forward to future runs.")
+
+
+def set_learned_rules(rules: list) -> None:
+    """Bulk replace the whole standing-rules list - used for maintenance
+    (removing a bad/dead/duplicate rule) rather than the normal one-at-a-
+    time append add_learned_rule() does."""
+    try:
+        ref = _get_client().collection("learned_rules").document(_LEARNED_RULES_DOC)
+        ref.set({"rules": rules[-_MAX_LEARNED_RULES:]})
+    except Exception:
+        logger.exception("Failed to overwrite learned rules in Firestore.")

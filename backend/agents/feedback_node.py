@@ -180,18 +180,26 @@ def _heroes_from_touchpoints(touchpoints: list, exclude_n: int) -> list:
     ]
 
 
-def _sweep_touchpoint(touchpoint: dict, flow_name: str, other_heroes: Optional[list] = None) -> dict:
+def _sweep_touchpoint(
+    touchpoint: dict, flow_name: str, other_heroes: Optional[list] = None, human_feedback: Optional[str] = None
+) -> dict:
     """Single dispatch point for "sweep this touchpoint with whatever
-    channel's rules apply" - mirrors copywriter_agent.generate_touchpoint()."""
+    channel's rules apply" - mirrors copywriter_agent.generate_touchpoint().
+
+    `human_feedback`, when this touchpoint is a human-driven revision (not
+    the automatic first-draft pipeline), is the actual reviewer request
+    that produced this candidate - without it the Sweeper has no way to
+    judge a "only when a reviewer explicitly asks" LEARNED CHECK, since it
+    otherwise only ever sees the rendered output."""
     if touchpoint["channel"] == "email":
         return sweep_email(
             touchpoint["rendered_text"], flow_name=flow_name, hero_info=touchpoint["content"],
-            other_heroes=other_heroes,
+            other_heroes=other_heroes, human_feedback=human_feedback,
         )
     if touchpoint["channel"] == "whatsapp":
-        return sweep_whatsapp(touchpoint["rendered_text"], flow_name=flow_name)
+        return sweep_whatsapp(touchpoint["rendered_text"], flow_name=flow_name, human_feedback=human_feedback)
     if touchpoint["channel"] == "push":
-        return sweep_push(touchpoint["rendered_text"], flow_name=flow_name)
+        return sweep_push(touchpoint["rendered_text"], flow_name=flow_name, human_feedback=human_feedback)
     raise ValueError(f"Unknown channel: {touchpoint['channel']!r}")
 
 
@@ -348,17 +356,26 @@ def format_human_feedback(
     sections.append(
         "NEW feedback to apply now, on top of everything above:\n"
         f"{feedback.strip()}\n\n"
-        "Implement this new feedback exactly and completely — every specific instruction in it must be "
-        "reflected in the new draft (a specific fact, phrase, name, or detail the feedback asks you to "
-        "add or change must actually appear; don't approximate it, soften it, or address only part of "
-        "it). Everything in the current draft that the feedback doesn't ask you to change should stay "
-        "the same. Don't introduce unrelated changes beyond what's needed to satisfy this feedback.\n\n"
+        "Implement this new feedback exactly and completely — every specific REQUIREMENT in it must be "
+        "reflected in the new draft (a real fact, number, or detail the feedback asks you to add or "
+        "change must actually appear; don't approximate it, soften it, or address only part of it). "
+        "Separately: if the feedback illustrates what it wants with example wording (\"something like "
+        "'X'\", \"e.g. 'X'\"), that quoted text is there to show you the KIND of thing wanted, not a "
+        "script to copy — write it fresh, in your own words, in this email's actual voice, carrying over "
+        "only the real substance (the specific fact/number itself), never the example sentence verbatim. "
+        "Everything in the current draft that the feedback doesn't ask you to change should stay the "
+        "same. Don't introduce unrelated changes beyond what's needed to satisfy this feedback.\n\n"
         "This feedback overrides prior creative choices but never overrides compliance, the language "
         "rules, the flow's exact CTA label, or invent-nothing. If the feedback genuinely asks for "
         "something one of those hard rules doesn't allow, don't just silently refuse and don't silently "
         "reinterpret it into something smaller without saying so either — apply the closest compliant "
         "interpretation of what they actually asked for, and set the note field to one short, plain "
-        "sentence naming the conflict: what they asked for, and why you couldn't do it literally."
+        "sentence naming the conflict: what they asked for, and why you couldn't do it literally.\n\n"
+        "The note field is ONLY about this NEW feedback above, evaluated against the fields that actually "
+        "exist in this schema right now — never about an earlier round in the history above (those were "
+        "already resolved when they happened; don't re-litigate or re-explain them here), and never about "
+        "a capability this schema doesn't have. Leave note null unless THIS feedback itself hits a real "
+        "conflict right now."
     )
 
     return "\n\n".join(sections)
@@ -398,7 +415,7 @@ def revise_with_feedback(
 
         email = generate_email(flow_name, first_name, correction=correction)
         rendered = email["rendered_text"]
-        sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"])
+        sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"], human_feedback=feedback)
         logger.info(
             "Human feedback applied (flow=%s, round=%d, attempt=%d): %r | sweeper_pass=%s reasons=%s",
             flow_name,
@@ -552,7 +569,7 @@ def revise_flow_touchpoint(
 
         try:
             new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction)
-            sweep = _sweep_touchpoint(new_touchpoint, flow_name, other_heroes=other_heroes)
+            sweep = _sweep_touchpoint(new_touchpoint, flow_name, other_heroes=other_heroes, human_feedback=feedback)
         except RuntimeError as exc:
             # Same real, if rare, exhausted-retry failure as generate_flow() -
             # a manual retry request itself failing must never crash back to a

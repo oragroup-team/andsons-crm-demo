@@ -35,7 +35,15 @@ import time
 logger = logging.getLogger("llm_provider")
 
 DEFAULT_MODELS = {
-    "groq": "llama-3.3-70b-versatile",
+    # llama-3.3-70b-versatile (the previous default) is now genuinely
+    # deprecated on Groq - confirmed directly against the Groq API (a raw
+    # chat.completions.create call 404s every time, not just occasionally),
+    # not the transient routing issue this codebase otherwise retries
+    # around. openai/gpt-oss-120b is the model the deployed Cloud Run
+    # service has actually been running on (via COPYWRITER_GROQ_MODEL etc.
+    # in cloudrun-env.yaml) - confirmed working - so it's the safer default
+    # for any environment that doesn't set an explicit override.
+    "groq": "openai/gpt-oss-120b",
     "anthropic": "claude-opus-5",
 }
 

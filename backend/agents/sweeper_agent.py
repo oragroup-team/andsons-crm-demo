@@ -29,6 +29,9 @@ flow is measured against, not a literal script every flow must copy):
 ---
 {golden_reference}
 ---
+That real approved template predates this system's literal "NAME" placeholder - its "[name]" is the same \
+idea, not a different required token. NEVER fail a candidate for addressing the customer as "NAME" \
+instead of "[name]" - "NAME" is correct and expected everywhere in the live system.
 
 You will always be told the candidate's flow and its track (rx / otc / neutral) in the human message. \
 The price rule is PER-FLOW - read it carefully, it is the single most common mistake to get wrong:

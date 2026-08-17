@@ -17,6 +17,17 @@ SERVICE_NAME="andsons-crm-demo"
 REGION="us-central1"
 SECRET_NAME="bigquery-service-account-key"
 
+# The 4 Slack credentials live in Secret Manager, not cloudrun-env.yaml -
+# real incident this fixes: --env-vars-file (below) REPLACES the entire
+# environment on every deploy rather than merging into it, and an older/
+# incomplete local copy of cloudrun-env.yaml silently wiped these out from
+# the live service, taking both Slack bots down with zero visible error
+# until someone actually tried messaging them. --set-secrets is a separate
+# mechanism from --env-vars-file, so these 4 survive regardless of what
+# cloudrun-env.yaml does or doesn't contain. Secret names created via
+# `gcloud secrets create` - see README if any need rotating.
+SLACK_SECRETS="SLACK_EMAIL_SIGNING_SECRET=slack-email-signing-secret:latest,SLACK_EMAIL_BOT_TOKEN=slack-email-bot-token:latest,SLACK_ANALYTICS_SIGNING_SECRET=slack-analytics-signing-secret:latest,SLACK_ANALYTICS_BOT_TOKEN=slack-analytics-bot-token:latest"
+
 # --no-cpu-throttling matters here specifically: the Slack webhook handlers
 # ack fast and do the real work (LLM calls, image rendering, the Slack post
 # itself) in a background thread AFTER the HTTP response is sent. Cloud
@@ -36,7 +47,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --region="$REGION" \
   --allow-unauthenticated \
   --env-vars-file=cloudrun-env.yaml \
-  --set-secrets="/secrets/gcp-key.json=${SECRET_NAME}:latest" \
+  --set-secrets="/secrets/gcp-key.json=${SECRET_NAME}:latest,${SLACK_SECRETS}" \
   --memory=1Gi \
   --timeout=120 \
   --no-cpu-throttling

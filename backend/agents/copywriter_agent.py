@@ -88,6 +88,9 @@ different flow:
 ---
 {golden_reference}
 ---
+(Note: that real approved template predates this system using a literal "NAME" placeholder - its "[name]" \
+is the same idea, not a different, still-required token. Always address the customer as NAME, never write \
+"[name]" yourself.)
 
 LANGUAGE RULES (absolute, every flow):
 - British English spelling everywhere (personalised, customised, recognise, colour, programme) - never \
@@ -494,6 +497,8 @@ touchpoint):
 ---
 {golden_reference}
 ---
+(Note: that real approved template predates this system using a literal "NAME" placeholder - its "[name]" \
+is the same idea, not a different, still-required token. Always address the customer as NAME.)
 
 LANGUAGE RULES (absolute): British English spelling everywhere (personalised, customised, recognise, \
 colour, programme) - never American spelling. NEVER use em-dashes or long dashes as punctuation - use \

@@ -20,6 +20,19 @@ from .llm_provider import get_llm, invoke_with_retry
 
 logger = logging.getLogger("copywriter_agent")
 
+# get_llm() defaults to temperature=0.0 (right for classification calls
+# like parse_email_request/pick_flow_for_signal below, where the same
+# answer every time is correct). Actual copywriting is the opposite case -
+# confirmed live: at 0.0 the model converges hard toward reproducing the
+# golden reference almost verbatim (two separate runs of the same P1 email
+# came back as near-paraphrases of each other and of the golden example),
+# which is exactly what reads as "copying a template" instead of writing
+# fresh copy. 0.8 is used at every real content-generation call site below
+# (never the classification ones) - high enough for genuinely varied
+# writing, not so high it drifts off-brand or off-compliance (the Sweeper
+# still catches anything that does).
+_CREATIVE_TEMPERATURE = 0.8
+
 _LEADING_NUMBER_RE = re.compile(r"^\s*\d+[.)]\s*")
 _LEADING_GREETING_RE = re.compile(r"^\s*hi\s+[^\s,]+\s*,\s*", re.IGNORECASE)
 
@@ -81,9 +94,13 @@ brand in Singapore (licensed doctors, discreet delivery). You write in the Junip
 calm, direct, medically literate, reassuring, warm, personal, plainspoken. Short one-line paragraphs with \
 breathing room. Talks to ONE person, never a segment.
 
-Use this approved P1 golden template as your style and restraint reference (tone, sentence length, \
-warmth) even when writing for a different flow - match its register, never copy it verbatim for a \
-different flow:
+Use this approved P1 golden template ONLY as a register and restraint reference - tone, sentence length, \
+how much warmth, how much is left unsaid. It is NOT a script: never reuse its specific sentence shapes, \
+opening move, or phrases (e.g. "X has been finalised", "you've already taken the first step", "it only \
+takes a minute", "we'll ship it discreetly") even when writing this exact flow/touchpoint - a human \
+copywriter asked to write ten emails at this standard would find ten different real sentences, not ten \
+palette-swapped copies of one template. If your draft's opening line or structure would look like a \
+paraphrase of the golden example sitting next to it, rewrite it from a genuinely different angle instead:
 
 ---
 {golden_reference}
@@ -421,7 +438,7 @@ def generate_email(
     provided (from agents.insight_agent), it's included as internal strategy
     context only - see _INSIGHT_BRIEF_INSTRUCTION for the leak-prevention
     rules enforced around it."""
-    llm = get_llm("COPYWRITER")
+    llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
     structured_llm = llm.with_structured_output(EmailContent)
 
     flow_brief = _build_flow_brief(flow_name)
@@ -492,8 +509,8 @@ The message body itself stays plain text - no HTML, no markdown, no image pasted
 link-preview title and the one CTA button are the template's own structured fields, not something you \
 write inline in the message.
 
-Use this approved P1 style reference for register only (not content - that email is a different \
-touchpoint):
+Use this approved P1 style reference for register only (tone, warmth, restraint - not content, not \
+sentence shapes, not phrases - that email is a different touchpoint entirely):
 ---
 {golden_reference}
 ---
@@ -571,8 +588,14 @@ def _prior_touchpoints_context(prior: list) -> str:
     if not prior:
         return "This is the FIRST touchpoint in the flow - nothing has been sent yet."
     used_heroes = [p["hero"] for p in prior if p.get("hero") and p["hero"] != "none"]
-    lines = ["EARLIER TOUCHPOINTS ALREADY SENT in this same flow, so this one must feel like the next "
-             "step in one continuous conversation, never a repeat of an earlier angle or opening line:"]
+    lines = [
+        "EARLIER TOUCHPOINTS ALREADY SENT in this same flow, so this one must feel like the next step in "
+        "one continuous conversation, never a repeat of an earlier one. Read what's already been said "
+        "below and pick a genuinely different rhetorical entry point than every one of them - if an "
+        "earlier touchpoint opened by restating the plan/offer, this one should open somewhere else "
+        "entirely (a specific detail, a direct question, what happens after he acts, a different piece of "
+        "reassurance) - not the same idea in different words:"
+    ]
     for p in prior:
         lines.append(f"- Touchpoint {p['n']} ({p['channel']}, {p['timing']}): {p['summary']}")
     if used_heroes:
@@ -672,7 +695,7 @@ def generate_flow_email_touchpoint(
     retry stays aware of the rest of the sequence, not just its own text)."""
     flow = FLOW_BY_SLUG[flow_name]
     flow_brief = _build_flow_brief(flow_name)
-    llm = get_llm("COPYWRITER")
+    llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
     structured_llm = llm.with_structured_output(EmailContent)
     system_text = SYSTEM_PROMPT.format(
         golden_reference=GOLDEN_P1_REFERENCE,
@@ -737,7 +760,7 @@ def generate_flow_whatsapp_touchpoint(
         "" if flow["allow_price"] else
         "HARD CONSTRAINT: never mention a price, a dollar amount, or a discount code in this message."
     )
-    llm = get_llm("COPYWRITER")
+    llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
     structured_llm = llm.with_structured_output(WhatsAppContent)
     system_text = WHATSAPP_SYSTEM_PROMPT.format(
         golden_reference=GOLDEN_P1_REFERENCE,

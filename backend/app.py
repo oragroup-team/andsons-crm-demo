@@ -16,9 +16,10 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from agents.analytics_agent import ask_analytics
-from agents.copywriter_agent import parse_email_request, resolve_touchpoint_reference
+from agents.copywriter_agent import parse_email_request
 from agents.visual_qa_agent import review_image
 from agents.feedback_node import (
+    resolve_touchpoint_reference,
     revise_flow_touchpoint,
     revise_with_feedback,
     run_email_pipeline,
@@ -387,21 +388,30 @@ def slack_events_email():
                 if parsed is not None:
                     touchpoint_n, touchpoint_feedback = parsed
                 else:
-                    # No explicit "N: ..." prefix - try to work out which
-                    # step this is actually about from its real content
-                    # (and which step this thread was just discussing)
-                    # before falling back to asking. See
-                    # copywriter_agent.resolve_touchpoint_reference.
-                    touchpoint_n = resolve_touchpoint_reference(
-                        feedback_text, session["touchpoints"], last_touchpoint_n=session.get("last_touchpoint_n"),
-                    )
-                    touchpoint_feedback = feedback_text
-                    if touchpoint_n is None:
+                    # No explicit "N: ..." prefix - don't just bounce the
+                    # question back. Real bug this fixes: a reply like
+                    # "move the button to the right" already identifies
+                    # which touchpoint it's about via what it actually
+                    # says, once compared against each touchpoint's real
+                    # content - resolve that first, and only fall back to
+                    # asking when it genuinely can't be determined.
+                    ref = resolve_touchpoint_reference(feedback_text, session["touchpoints"])
+                    if ref["touchpoint_n"] is not None:
+                        touchpoint_n, touchpoint_feedback = ref["touchpoint_n"], feedback_text
+                    elif ref["candidate_ns"]:
+                        steps = ", ".join(str(n) for n in ref["candidate_ns"])
+                        post_message(
+                            bot_token, channel, thread_ts=thread_ts,
+                            text=f"Steps {steps} could all match that - which one did you mean? "
+                            f"(reply with the step number, e.g. \"{ref['candidate_ns'][0]}: {feedback_text}\")",
+                        )
+                        return
+                    else:
                         total = len(session["touchpoints"])
                         post_message(
                             bot_token, channel, thread_ts=thread_ts,
-                            text=f"Not sure which of the {total} step(s) that's about. Tell me which one, "
-                            "e.g. \"2: make this shorter\" or \"step 3: drop the price mention\".",
+                            text=f"This flow has {total} step(s) and I couldn't tell which one that's about. "
+                            "Tell me which one to revise, e.g. \"2: make this shorter\".",
                         )
                         return
 
@@ -420,7 +430,6 @@ def slack_events_email():
                         "flow_name": session["flow_name"],
                         "touchpoints": result["touchpoints"],
                         "feedback_history": result["feedback_history"],
-                        "last_touchpoint_n": touchpoint_n,
                     },
                 )
                 _post_flow_touchpoint(

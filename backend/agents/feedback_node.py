@@ -9,7 +9,10 @@ failure the pipeline returns needs_human_review=True instead of looping again.
 """
 import difflib
 import logging
-from typing import Optional
+from typing import List, Optional
+
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
 
 from .copywriter_agent import (
     _touchpoint_summary,
@@ -21,6 +24,7 @@ from .copywriter_agent import (
 from .head_of_crm_agent import brief_campaign
 from .insight_agent import investigate
 from .learned_rules_agent import distill_and_save_rule, learned_rules_text
+from .llm_provider import get_llm, invoke_with_retry
 from .sweeper_agent import sweep_email, sweep_push, sweep_whatsapp
 
 logger = logging.getLogger("feedback_node")
@@ -398,6 +402,78 @@ def revise_with_feedback(
         "sweeper_reasons": sweep["reasons"],
         "sweeper_severity": sweep["severity"],
     }
+
+
+class _TouchpointReference(BaseModel):
+    touchpoint_n: Optional[int] = Field(
+        default=None,
+        description="The step number this feedback is clearly about, confidently determined from the "
+        "real content of each touchpoint below (e.g. 'move the button to the right' matches whichever "
+        "touchpoint's real CTA text was actually mentioned or is the only plausible match). Null if it "
+        "doesn't confidently resolve to exactly one step.",
+    )
+    candidate_ns: List[int] = Field(
+        default_factory=list,
+        description="ONLY if touchpoint_n is null because the feedback genuinely matches two or more "
+        "touchpoints equally (e.g. several touchpoints share the same CTA text and nothing else in the "
+        "feedback narrows it down): list every one of those step numbers here, so the person can be asked "
+        "a specific question naming just those steps instead of a generic 'which one'. Leave empty if "
+        "touchpoint_n was resolved, or if the feedback matches nothing at all.",
+    )
+    reason: str = Field(description="One short line explaining the resolution (or why it's ambiguous/no match).")
+
+
+def _touchpoint_content_summary(t: dict) -> str:
+    content = t.get("content")
+    if content is None:
+        return "(failed to generate - nothing to reference)"
+    if t["channel"] == "email":
+        alignment = content.get("cta_alignment", "left")
+        return (
+            f"subject {content['subject']!r}, hero {content.get('hero')}, has a real REPOSITIONABLE CTA "
+            f"BUTTON reading {content['cta_text']!r} currently {alignment}-aligned - the only channel "
+            f"where a request to move/align/reposition 'the button' is even possible"
+        )
+    if t["channel"] == "whatsapp":
+        return (
+            f"opens {content['hook_line']!r}, CTA reading {content['cta_text']!r} rendered as a plain "
+            f"green underlined TEXT LINK, not a positionable button - a request to move/align a button "
+            f"does not apply here"
+        )
+    return (
+        f"title {content['title']!r}, body {content['body']!r} - a phone notification with NO button or "
+        f"link of any kind, tap-to-open only"
+    )  # push
+
+
+def resolve_touchpoint_reference(feedback_text: str, touchpoints: list) -> dict:
+    """A reply in a flow thread that doesn't start with an explicit step
+    number (e.g. 'move the button to the right') shouldn't just bounce
+    back asking for one when the actual touchpoint content already makes
+    it obvious - matches feedback against what each touchpoint's real
+    content actually says, the same 'resolve from context before asking'
+    principle as analytics_agent._resolve_followup_question(). Fails open
+    to no-match (touchpoint_n=None, candidate_ns=[]) on any error, so the
+    caller's existing generic clarifying question still works as a
+    fallback rather than the whole reply silently failing."""
+    lines = [f"- Step {t['n']} ({t['channel']}, {t['timing']}): {_touchpoint_content_summary(t)}" for t in touchpoints]
+    llm = get_llm("HEAD_OF_CRM", temperature=0.0)  # a resolution/classification task, not creative writing
+    structured_llm = llm.with_structured_output(_TouchpointReference)
+    system_text = "The real touchpoints in this flow, in order:\n" + "\n".join(lines)
+    # ChatPromptTemplate scans message strings for "{var}" patterns even
+    # when they were already fully built via an f-string - feedback_text
+    # is raw Slack user input, so a literal brace typed by a real person
+    # would otherwise crash this exact call the same way an unfilled
+    # template variable just did.
+    escaped_feedback = feedback_text.replace("{", "{{").replace("}", "}}")
+    human_text = f"A reviewer just said: {escaped_feedback}\n\nWhich step is this about?"
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+    result, last_exc = invoke_with_retry(chain, attempts=2, label="Touchpoint reference resolution call")
+    if result is None:
+        logger.warning("Touchpoint reference resolution failed (%s) - falling back to asking directly.", last_exc)
+        return {"touchpoint_n": None, "candidate_ns": [], "reason": "resolution unavailable"}
+    return result.model_dump()
 
 
 def revise_flow_touchpoint(

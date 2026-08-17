@@ -21,21 +21,32 @@ from file_context import summarize_files
 from flows import VALID_FLOW_SLUGS
 from slack_integration import (
     append_analytics_exchange,
+    clear_pending_email_request,
     download_slack_file,
     format_analytics_blocks,
     format_email_blocks,
     format_email_caption,
     get_analytics_history,
     get_email_session,
+    get_pending_email_request,
     is_retry,
     post_message,
     post_rendered_email,
     post_result_to_slack,
     run_in_background,
     save_email_session,
+    save_pending_email_request,
     strip_mention,
     verify_slack_request,
 )
+
+# Real customer names are never available to the Slack bots (there's no
+# customer context to look one up from) - NAME is a deliberate placeholder
+# token, the same idea as MoEngage's own %%FIRST_NAME%% merge tag, swapped
+# in by whatever system actually sends the email. Asking Slack users for a
+# name added a whole extra back-and-forth for information nobody there
+# actually has.
+NAME_PLACEHOLDER = "NAME"
 
 logger = logging.getLogger("app")
 
@@ -292,7 +303,7 @@ def slack_events_email():
                     )
                 result = revise_with_feedback(
                     session["flow_name"],
-                    session["first_name"],
+                    NAME_PLACEHOLDER,
                     feedback_text,
                     previous_rendered_text=session["rendered_text"],
                     feedback_history=session.get("feedback_history", []),
@@ -302,56 +313,58 @@ def slack_events_email():
                     thread_ts,
                     {
                         "flow_name": session["flow_name"],
-                        "first_name": session["first_name"],
                         "rendered_text": result["rendered_text"],
                         "feedback_history": result["feedback_history"],
                     },
                 )
                 revised_result = {"email": result["email"], "passed": result["sweeper_pass"], "retries_used": None}
-                image = render_email_image(result["email"], session["first_name"])
-                caption = format_email_caption(revised_result, session["flow_name"], session["first_name"])
+                image = render_email_image(result["email"], NAME_PLACEHOLDER)
+                caption = format_email_caption(revised_result, session["flow_name"], NAME_PLACEHOLDER)
                 post_rendered_email(
                     bot_token, channel, thread_ts, image,
-                    f"{session['flow_name']}_{session['first_name']}_revised.png", caption,
+                    f"{session['flow_name']}_revised.png", caption,
                 )
                 return
 
-            # No text but a file was attached (e.g. "@andSonsEmail" + upload) -
-            # skip intent classification on an empty string and go straight
-            # to investigating the file.
-            if not text and file_context:
-                intent = {"mode": "insight", "flow_name": None, "first_name": None, "signal_question": None}
+            # Merge with whatever this thread has ALREADY said, if a flow
+            # hasn't resolved yet - fixes a real bug: each reply used to be
+            # classified from ONLY its own text, so "write me a cart-abandon
+            # email" (flow unclear) -> "OTC cart abandon" (a reply with no
+            # other context of its own) reset to square one instead of
+            # completing the original request.
+            pending_texts = get_pending_email_request(channel, thread_ts)
+            combined_text = "\n".join(t for t in (pending_texts + [text]) if t)
+
+            if not combined_text and file_context:
+                intent = {"mode": "insight", "flow_name": None, "signal_question": None}
             else:
-                intent = parse_email_request(text)
+                intent = parse_email_request(combined_text)
 
             if intent["mode"] == "unclear":
                 # Not a code failure - a real message that isn't an email
                 # request at all (e.g. "what flows are live in MoEngage")
                 # can make the classifier refuse structured output outright.
                 # Give a clean, on-brand redirect instead of leaking the raw
-                # API error into Slack.
+                # API error into Slack. Clears pending context too, so it
+                # doesn't keep dragging an off-topic message into future
+                # classification attempts in this thread.
+                clear_pending_email_request(channel, thread_ts)
                 post_message(
                     bot_token, channel, thread_ts=thread_ts,
-                    text="I can draft an andSons email (e.g. \"write the winback email for Marcus\") or "
-                    "investigate a business signal and draft one (e.g. \"OTC sales are down, write "
-                    "something to fix it for Wei\"). For general questions about flows or performance, "
-                    "try @andSons Analytics instead.",
-                )
-                return
-
-            if not intent["first_name"]:
-                post_message(
-                    bot_token, channel, thread_ts=thread_ts,
-                    text="I need the customer's first name to draft this.",
+                    text="I can draft an andSons email (e.g. \"write the winback email\") or investigate "
+                    "a business signal and draft one (e.g. \"OTC sales are down, write something to fix "
+                    "it\"). For general questions about flows or performance, try @andSons Analytics "
+                    "instead.",
                 )
                 return
 
             if intent["mode"] == "insight":
-                question = intent["signal_question"] or text or "Review the attached data and identify what needs addressing."
+                question = intent["signal_question"] or combined_text or "Review the attached data and identify what needs addressing."
                 result = run_insight_email_pipeline(
-                    question, intent["first_name"], flow_name=intent["flow_name"], file_context=file_context
+                    question, NAME_PLACEHOLDER, flow_name=intent["flow_name"], file_context=file_context
                 )
                 if result["needs_flow_clarification"]:
+                    save_pending_email_request(channel, thread_ts, pending_texts + [text])
                     post_message(
                         bot_token, channel, thread_ts=thread_ts,
                         text=(
@@ -361,25 +374,26 @@ def slack_events_email():
                         ),
                     )
                     return
+                clear_pending_email_request(channel, thread_ts)
                 save_email_session(
                     channel,
                     thread_ts,
                     {
                         "flow_name": result["flow_name"],
-                        "first_name": intent["first_name"],
                         "rendered_text": result["rendered_text"],
                         "feedback_history": [],
                     },
                 )
-                image = render_email_image(result["email"], intent["first_name"])
-                caption = format_email_caption(result, result["flow_name"], intent["first_name"])
+                image = render_email_image(result["email"], NAME_PLACEHOLDER)
+                caption = format_email_caption(result, result["flow_name"], NAME_PLACEHOLDER)
                 post_rendered_email(
                     bot_token, channel, thread_ts, image,
-                    f"{result['flow_name']}_{intent['first_name']}.png", caption,
+                    f"{result['flow_name']}.png", caption,
                 )
                 return
 
             if not intent["flow_name"]:
+                save_pending_email_request(channel, thread_ts, pending_texts + [text])
                 post_message(
                     bot_token, channel, thread_ts=thread_ts,
                     text="I need to know which flow this is for (e.g. \"plan not purchased\", "
@@ -388,22 +402,22 @@ def slack_events_email():
                 )
                 return
 
-            result = run_email_pipeline(intent["flow_name"], intent["first_name"], file_context=file_context)
+            clear_pending_email_request(channel, thread_ts)
+            result = run_email_pipeline(intent["flow_name"], NAME_PLACEHOLDER, file_context=file_context)
             save_email_session(
                 channel,
                 thread_ts,
                 {
                     "flow_name": intent["flow_name"],
-                    "first_name": intent["first_name"],
                     "rendered_text": result["rendered_text"],
                     "feedback_history": [],
                 },
             )
-            image = render_email_image(result["email"], intent["first_name"])
-            caption = format_email_caption(result, intent["flow_name"], intent["first_name"])
+            image = render_email_image(result["email"], NAME_PLACEHOLDER)
+            caption = format_email_caption(result, intent["flow_name"], NAME_PLACEHOLDER)
             post_rendered_email(
                 bot_token, channel, thread_ts, image,
-                f"{intent['flow_name']}_{intent['first_name']}.png", caption,
+                f"{intent['flow_name']}.png", caption,
             )
         except Exception as exc:  # noqa: BLE001 — logged in full, only a clean message goes to Slack
             logger.exception("Error generating email for channel=%s thread_ts=%s", channel, thread_ts)

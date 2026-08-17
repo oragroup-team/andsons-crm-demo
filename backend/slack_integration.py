@@ -149,9 +149,12 @@ def is_retry(request) -> bool:
 
 from session_store import (  # noqa: E402
     append_analytics_exchange,
+    clear_pending_email_request,
     get_analytics_history,
     get_email_session,
+    get_pending_email_request,
     save_email_session,
+    save_pending_email_request,
 )
 
 

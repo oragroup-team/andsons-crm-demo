@@ -93,3 +93,36 @@ def append_analytics_exchange(channel: str, thread_ts: str, question: str, answe
         ref.set({"history": history[-_ANALYTICS_HISTORY_LIMIT:]})
     except Exception:
         logger.exception("Failed to save analytics exchange to Firestore - this thread's context will not persist.")
+
+
+# --- Pending (not-yet-resolved) email requests ------------------------------
+# Real bug this fixes: before a draft exists, each reply in a thread was
+# classified from ONLY its own text - "write me an abandon-cart email" ->
+# (missing flow) -> "plan not purchased" (a reply with no name/flow
+# reference of its own) -> re-classified alone, resolves nothing -> asks
+# again -> ping-pongs forever. This accumulates every message in the thread
+# so far (until a flow resolves into a real draft), so classification always
+# runs against the FULL conversation, not one isolated fragment of it.
+
+
+def get_pending_email_request(channel: str, thread_ts: str) -> list:
+    try:
+        doc = _get_client().collection("pending_email_requests").document(_doc_id(channel, thread_ts)).get()
+        return doc.to_dict().get("texts", []) if doc.exists else []
+    except Exception:
+        logger.exception("Failed to read pending email request from Firestore - treating as no prior context.")
+        return []
+
+
+def save_pending_email_request(channel: str, thread_ts: str, texts: list) -> None:
+    try:
+        _get_client().collection("pending_email_requests").document(_doc_id(channel, thread_ts)).set({"texts": texts})
+    except Exception:
+        logger.exception("Failed to save pending email request to Firestore - this thread may re-ask for info already given.")
+
+
+def clear_pending_email_request(channel: str, thread_ts: str) -> None:
+    try:
+        _get_client().collection("pending_email_requests").document(_doc_id(channel, thread_ts)).delete()
+    except Exception:
+        logger.exception("Failed to clear pending email request from Firestore (non-fatal - it'll just get overwritten next time).")

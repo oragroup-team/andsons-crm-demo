@@ -498,10 +498,6 @@ class EmailIntent(BaseModel):
         "name) - otherwise null, so the caller investigates first and picks the best-fitting flow. "
         "Null if it can't be confidently determined either way - do not guess.",
     )
-    first_name: Optional[str] = Field(
-        default=None,
-        description="The customer's first name mentioned in the request, or null if none was given.",
-    )
     signal_question: Optional[str] = Field(
         default=None,
         description="For mode='insight' only: the business signal/problem/question to investigate, "
@@ -527,18 +523,20 @@ def parse_email_request(text: str) -> dict:
     system_text = (
         "You classify a free-text CRM email request against this real andSons flow catalog "
         "(slug: label - who it's for):\n" + catalog + "\n\n"
-        "First decide the mode (see field description): a plain 'write me the <flow> email for <name>' "
-        "request is 'direct'. A request that describes a problem, a metric moving the wrong way, or asks "
-        "the agent to figure out what to write based on what's happening is 'insight' - the flow isn't "
-        "picked from wording alone in that case, it's investigated. This includes requests that name a "
-        "specific flow/customer but ALSO explicitly ask for it to be grounded in real data (mentions "
-        "MoEngage, BigQuery, a dashboard, 'live data', 'right now') - naming a flow doesn't make it "
-        "'direct' if the message is also explicitly asking for a real data check first; that check would "
-        "be silently skipped otherwise, which ignores what was actually asked for. "
-        "Extract the customer's first name if one is mentioned; leave it null if not. For 'direct' mode, "
-        "leave flow_name null rather than guessing if it doesn't clearly map to one of these flows - do "
-        "not default to the first flow in the list. For 'insight' mode, only fill flow_name if the "
-        "message itself names/clearly implies a specific flow; otherwise leave it null."
+        "First decide the mode (see field description): a plain 'write me the <flow> email' request is "
+        "'direct'. A request that describes a problem, a metric moving the wrong way, or asks the agent "
+        "to figure out what to write based on what's happening is 'insight' - the flow isn't picked from "
+        "wording alone in that case, it's investigated. This includes requests that name a specific flow "
+        "but ALSO explicitly ask for it to be grounded in real data (mentions MoEngage, BigQuery, a "
+        "dashboard, 'live data', 'right now') - naming a flow doesn't make it 'direct' if the message is "
+        "also explicitly asking for a real data check first; that check would be silently skipped "
+        "otherwise, which ignores what was actually asked for. "
+        "There is no real customer in this conversation - never look for or expect a customer name; "
+        "every draft always addresses a generic 'NAME' placeholder, so ignore names entirely when "
+        "classifying. For 'direct' mode, leave flow_name null rather than guessing if it doesn't clearly "
+        "map to one of these flows - do not default to the first flow in the list. For 'insight' mode, "
+        "only fill flow_name if the message itself names/clearly implies a specific flow; otherwise leave "
+        "it null."
     )
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", text)])
     chain = prompt | structured_llm
@@ -553,11 +551,10 @@ def parse_email_request(text: str) -> dict:
         # Slack. mode="unclear" lets the caller give a clean, on-brand
         # clarification instead of an API error dump.
         logger.warning("parse_email_request: model failed to return structured output for %r", text)
-        return {"mode": "unclear", "flow_name": None, "first_name": None, "signal_question": None}
+        return {"mode": "unclear", "flow_name": None, "signal_question": None}
     return {
         "mode": result.mode,
         "flow_name": result.flow_name,
-        "first_name": result.first_name,
         "signal_question": result.signal_question,
     }
 

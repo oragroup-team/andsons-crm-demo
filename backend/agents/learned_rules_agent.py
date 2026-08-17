@@ -23,12 +23,20 @@ from .llm_provider import get_llm, invoke_with_retry
 logger = logging.getLogger("learned_rules_agent")
 
 SYSTEM_PROMPT = """A human reviewer just gave real feedback on one specific andSons CRM touchpoint. Turn \
-it into ONE short, general, reusable standing rule future drafts should follow - not a record of this one \
-edit, a rule that would have prevented needing this feedback in the first place, phrased so it applies \
-beyond just this one touchpoint.
+it into ONE short, reusable standing rule future drafts should follow - not a record of this one edit.
 
-If the feedback is genuinely too specific to generalize (a one-off preference about this exact touchpoint, \
-not a repeatable pattern), say so plainly instead of forcing a fake general rule.
+BE CONSERVATIVE ABOUT SCOPE (the most common real mistake here): a request to CHANGE something away from \
+an established default (a layout choice, a design convention, an approved template's own structure) is \
+almost always a one-off preference for THIS touchpoint, not a new universal default - distil it as a \
+CONDITIONAL rule ("only do X when a reviewer explicitly asks for it"), never as an unconditional new \
+default ("always do X now"), unless the feedback itself says something is ALWAYS wrong (a genuine \
+compliance/register/factual mistake - those generalize unconditionally). When in doubt between a \
+conditional rule and an unconditional one, pick the conditional one - a future draft silently changing an \
+approved default because of one person's one-time request is worse than a rule that's phrased too \
+narrowly.
+
+If the feedback is genuinely too specific to generalize at all (nothing repeatable, not even as a \
+conditional), say so plainly instead of forcing a fake rule.
 
 THE FEEDBACK: {feedback}
 

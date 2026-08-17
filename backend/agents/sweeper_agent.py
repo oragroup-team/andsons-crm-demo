@@ -119,8 +119,12 @@ the moment without explaining it for them; revealing something the reader does n
 - CTA: the CTA text does not reasonably match the flow's suggested CTA above (a close, on-brand variant is \
 fine - e.g. a synonym that still reads as "verb + My + noun" for the same action; a CTA pointing at a \
 different action entirely is not).
-- HERO UNIQUENESS: this candidate's hero is already used by another touchpoint in this same flow, listed \
-here: {other_heroes}
+- HERO UNIQUENESS: heroes already used by OTHER touchpoints in this same flow are listed here: \
+{other_heroes}. Read the candidate's OWN "[HERO IMAGE: ...]" block (or its absence, for a text-first \
+email) and compare it word-for-word against that list. ONLY fail if the candidate's own hero key/photo is \
+an exact match to one of those names - a different hero, or "none", is never a violation regardless of \
+what's in that list. If the list says "(none...)" there is nothing to compare against, so this check \
+always passes.
 - NAME: any real-looking customer name in place of the literal NAME placeholder.
 
 E) LEARNED CHECKS (from past real human feedback - treat each as a standing requirement, same weight as \

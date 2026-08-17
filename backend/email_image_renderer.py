@@ -423,10 +423,13 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     footer_line_height = int(_s(12) * 1.6)
     y = _draw_rich_wrapped(draw, runs, MARGIN, y, footer_font, CONTENT_WIDTH, line_height=footer_line_height)
 
-    footer_lines = [
-        "andSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522",
-        "Unsubscribe",
-    ]
+    # The address line is the one part of the footer a human reviewer can
+    # toggle via feedback (EmailContent.include_address) - WhatsApp CS above
+    # and Unsubscribe below are never optional regardless of this flag.
+    footer_lines = []
+    if content.get("include_address", True):
+        footer_lines.append("andSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522")
+    footer_lines.append("Unsubscribe")
     for line in footer_lines:
         draw.text((MARGIN, y), line, font=footer_font, fill=COLOR_MUTED)
         y += int(_s(12) * 1.6)

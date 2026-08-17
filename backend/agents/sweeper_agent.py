@@ -51,9 +51,12 @@ the sentence "Individual results vary." Also fail any invented/unverifiable stat
 proof number - even with a footnote format, a number not grounded in the real approved claim is fabricated.
 6. A price, dollar amount, or discount code mentioned when the flow's track forbids it (see the per-flow \
 rule above).
-7. Missing a working footer: WhatsApp customer-service line, "andSons Pte. Ltd., 1 Fusionopolis Place, \
-#17-10, Galaxis, Singapore 138522", and an unsubscribe line must all be present. The footer must NOT \
-contain "Manage My Delivery Schedule" or "Cancel Anytime" links.
+7. Missing a working footer: the WhatsApp customer-service line and an unsubscribe line must ALWAYS be \
+present, no exception. The registered address line ("andSons Pte. Ltd., 1 Fusionopolis Place, #17-10, \
+Galaxis, Singapore 138522") is normally required too - EXCEPT the human message below will tell you \
+explicitly if a human reviewer deliberately asked to remove it for this candidate; only in that specific, \
+stated case is its absence correct, not a violation. Never assume an omission was deliberate without that \
+explicit statement. The footer must NOT contain "Manage My Delivery Schedule" or "Cancel Anytime" links.
 8. Cure/guarantee language ("cure baldness", "guaranteed regrowth", "100% works"), shame or fear-based \
 pressure, or fake urgency/countdown framing.
 
@@ -300,7 +303,14 @@ def sweep_email(
         flow_spec=_build_flow_brief(flow_name),
         other_heroes=", ".join(other_heroes) if other_heroes else "(none - this is the only email touchpoint, or the first one)",
     )
-    human_text = f"Flow: {flow_name}\n\nCandidate email:\n---\n{email_text}\n---"
+    include_address = hero_info.get("include_address", True) if hero_info else True
+    address_note = (
+        "A human reviewer explicitly asked to remove the address line from this candidate - its absence "
+        "below is correct, do NOT fail rule A7 for it."
+        if not include_address
+        else "The address line is expected as normal in this candidate (no removal request on record)."
+    )
+    human_text = f"Flow: {flow_name}\n{address_note}\n\nCandidate email:\n---\n{email_text}\n---"
 
     prompt = ChatPromptTemplate.from_messages(
         [("system", system_text), ("human", human_text)]

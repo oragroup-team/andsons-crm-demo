@@ -85,11 +85,20 @@ WhatsApp customer service: https://api.whatsapp.com/message/VX2SIFBLE7ECI1?autol
 andSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522
 Unsubscribe"""
 
-FOOTER_LINES = [
-    "WhatsApp customer service: https://api.whatsapp.com/message/VX2SIFBLE7ECI1?autoload=1&app_absent=0",
-    "andSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522",
-    "Unsubscribe",
-]
+# The WhatsApp CS line and Unsubscribe are never optional (Unsubscribe in
+# particular is close to universally a legal requirement). The address line
+# is the one human-toggleable exception - see EmailContent.include_address.
+_WHATSAPP_CS_LINE = "WhatsApp customer service: https://api.whatsapp.com/message/VX2SIFBLE7ECI1?autoload=1&app_absent=0"
+_ADDRESS_LINE = "andSons Pte. Ltd., 1 Fusionopolis Place, #17-10, Galaxis, Singapore 138522"
+_UNSUBSCRIBE_LINE = "Unsubscribe"
+
+
+def _footer_lines(include_address: bool = True) -> List[str]:
+    lines = [_WHATSAPP_CS_LINE]
+    if include_address:
+        lines.append(_ADDRESS_LINE)
+    lines.append(_UNSUBSCRIBE_LINE)
+    return lines
 
 SYSTEM_PROMPT = """You are the senior CRM copywriter for andSons, a 100% online men's health telehealth \
 brand in Singapore (licensed doctors, discreet delivery). You write in the Juniper/Eucalyptus register: \
@@ -118,7 +127,8 @@ American spelling.
 - No exclamation marks. Sentence case (not Title Case).
 - No app-speak: never "activate", "tap", "unlock". A plan is "confirmed" or "reviewed", never "activated".
 - Signature is always "The andSons team" with no dash before it. Do not write a footer, unsubscribe line, \
-or address - those are appended automatically after your copy.
+or address yourself - those are appended automatically after your copy, based on the separate \
+include_address field below (see its own description) for the address line specifically.
 - NO DEFENSIVE META-COMMENTARY: never narrate the email's intent or what it is NOT doing. Banned phrases: \
 "we're not selling you anything", "this isn't a sales pitch", "the only reason we're reaching out", "we \
 just wanted to". State the message plainly; confident brands never explain themselves.
@@ -298,6 +308,15 @@ class EmailContent(BaseModel):
         default=None,
         description="One short line: why this hero (or 'none') fits this specific email's moment.",
     )
+    include_address: bool = Field(
+        default=True,
+        description="Whether the footer includes the registered business address line (\"andSons Pte. "
+        "Ltd., 1 Fusionopolis Place...\"). This is very likely a legal requirement for commercial email "
+        "in most jurisdictions - default true, and do NOT set it false on your own initiative. Set to "
+        "false ONLY when a human reviewer's feedback explicitly asks to remove/drop/hide the address; "
+        "set back to true if a later round asks to add it back. The WhatsApp customer-service line and "
+        "the Unsubscribe line are NEVER optional regardless of this field - only the address line toggles.",
+    )
 
 
 def _sanitize_content(content: EmailContent) -> EmailContent:
@@ -420,7 +439,7 @@ def render_email(content: EmailContent, first_name: str, hero_info: Optional[dic
     if content.trust_line:
         parts += ["", content.trust_line]
 
-    parts += ["", "The andSons team", ""] + FOOTER_LINES
+    parts += ["", "The andSons team", ""] + _footer_lines(content.include_address)
     return "\n".join(parts).strip()
 
 

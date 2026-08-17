@@ -600,10 +600,38 @@ def generate_flow(flow_name: str, insight_brief: Optional[str] = None) -> dict:
     prior_summaries = []
 
     for step in flow["cadence"]:
-        if step["channel"] == "email":
-            touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
-        else:
-            touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
+        try:
+            if step["channel"] == "email":
+                touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
+            else:
+                touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
+        except RuntimeError as exc:
+            # Real failure mode, not hypothetical: even with a 5-attempt
+            # retry (invoke_with_retry), a single touchpoint can still
+            # exhaust it (caught live - a Groq forced-tool-call rejection,
+            # 3/3 at the time, since raised to 5). Before this, one bad
+            # touchpoint took the ENTIRE flow down with it - a 5-touchpoint
+            # flow that got 4 perfectly good touchpoints still surfaced as
+            # one hard failure to the Slack user, and there was no way to
+            # retry just the one that failed. A clearly-marked placeholder
+            # keeps the rest of the flow posting normally; the caller
+            # (feedback_node.run_flow_pipeline) skips the Sweeper for it,
+            # and app.py posts a plain "reply to retry" message instead of
+            # an image - reusing the same per-touchpoint revision path
+            # (revise_flow_touchpoint) already built for editing a
+            # touchpoint on request, so retrying this one is a normal
+            # reply, not a special case.
+            logger.error("Touchpoint %d (%s) failed to generate after retrying: %s", step["n"], step["channel"], exc)
+            touchpoint = {
+                "n": step["n"],
+                "channel": step["channel"],
+                "timing": step["timing"],
+                "intent": step["intent"],
+                "content": None,
+                "rendered_text": None,
+                "hero": None,
+                "generation_failed": True,
+            }
         touchpoints.append(touchpoint)
         prior_summaries.append(_touchpoint_summary(touchpoint))
 
@@ -611,6 +639,14 @@ def generate_flow(flow_name: str, insight_brief: Optional[str] = None) -> dict:
 
 
 def _touchpoint_summary(touchpoint: dict) -> dict:
+    if touchpoint.get("generation_failed"):
+        return {
+            "n": touchpoint["n"],
+            "channel": touchpoint["channel"],
+            "timing": touchpoint["timing"],
+            "hero": None,
+            "summary": "(this step failed to generate and needs a manual retry - nothing was actually sent)",
+        }
     if touchpoint["channel"] == "email":
         content = touchpoint["content"]
         summary = f"Subject '{content['subject']}' - {content['opening_lines'][0] if content.get('opening_lines') else ''}"

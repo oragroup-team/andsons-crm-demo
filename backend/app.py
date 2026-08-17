@@ -299,14 +299,34 @@ def _post_flow_result(bot_token: str, channel: str, thread_ts: str, flow_result:
         text=format_flow_intro(flow_result["flow_name"], len(touchpoints), insight=insight),
     )
     for touchpoint in touchpoints:
-        if touchpoint["channel"] == "email":
-            image = render_email_image(touchpoint["content"], NAME_PLACEHOLDER)
-            filename = f"{flow_result['flow_name']}_step{touchpoint['n']}_email.png"
-        else:
-            image = render_whatsapp_image(touchpoint["content"], timing=touchpoint["timing"])
-            filename = f"{flow_result['flow_name']}_step{touchpoint['n']}_whatsapp.png"
-        caption = format_flow_touchpoint_caption(touchpoint, len(touchpoints))
-        post_rendered_email(bot_token, channel, thread_ts, image, filename, caption)
+        _post_flow_touchpoint(bot_token, channel, thread_ts, flow_result["flow_name"], touchpoint, len(touchpoints))
+
+
+def _post_flow_touchpoint(bot_token: str, channel: str, thread_ts: str, flow_name: str, touchpoint: dict, total: int) -> None:
+    """Post one touchpoint - as a rendered image normally, or (if content
+    generation exhausted its retries - see copywriter_agent.generate_flow's
+    RuntimeError handling) as a plain text notice instead of crashing on a
+    None content/rendered_text, so the rest of the flow still posts fine
+    and this one step stays retryable with a normal reply."""
+    if touchpoint.get("content") is None:
+        post_message(
+            bot_token, channel, thread_ts=thread_ts,
+            text=(
+                f"*Step {touchpoint['n']}/{total} - {touchpoint['channel'].capitalize()} - "
+                f"{touchpoint['timing']}*\nCouldn't generate this one after retrying. Reply "
+                f"\"{touchpoint['n']}: try again\" in this thread to retry just this step."
+            ),
+        )
+        return
+
+    if touchpoint["channel"] == "email":
+        image = render_email_image(touchpoint["content"], NAME_PLACEHOLDER)
+        filename = f"{flow_name}_step{touchpoint['n']}_email.png"
+    else:
+        image = render_whatsapp_image(touchpoint["content"], timing=touchpoint["timing"])
+        filename = f"{flow_name}_step{touchpoint['n']}_whatsapp.png"
+    caption = format_flow_touchpoint_caption(touchpoint, total)
+    post_rendered_email(bot_token, channel, thread_ts, image, filename, caption)
 
 
 @app.route("/slack/events/email", methods=["POST"])
@@ -376,15 +396,9 @@ def slack_events_email():
                         "feedback_history": result["feedback_history"],
                     },
                 )
-                touchpoint = result["touchpoint"]
-                if touchpoint["channel"] == "email":
-                    image = render_email_image(touchpoint["content"], NAME_PLACEHOLDER)
-                    filename = f"{session['flow_name']}_step{touchpoint['n']}_email_revised.png"
-                else:
-                    image = render_whatsapp_image(touchpoint["content"], timing=touchpoint["timing"])
-                    filename = f"{session['flow_name']}_step{touchpoint['n']}_whatsapp_revised.png"
-                caption = format_flow_touchpoint_caption(touchpoint, len(result["touchpoints"]))
-                post_rendered_email(bot_token, channel, thread_ts, image, filename, caption)
+                _post_flow_touchpoint(
+                    bot_token, channel, thread_ts, session["flow_name"], result["touchpoint"], len(result["touchpoints"]),
+                )
                 return
 
             # Merge with whatever this thread has ALREADY said, if a flow

@@ -187,6 +187,19 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
         attempts = 0
         needs_human_review = False
 
+        # generate_flow() already turned an exhausted-retry failure into a
+        # placeholder (content/rendered_text = None) rather than raising -
+        # nothing to sweep here, and reusing revise_flow_touchpoint() is
+        # how a person retries it (see app.py's "reply to retry" message).
+        if touchpoint.get("generation_failed"):
+            touchpoint["passed"] = False
+            touchpoint["sweeper_reasons"] = ["Content generation failed after retrying - reply with this step's number to try again, e.g. \"2: try again\"."]
+            touchpoint["sweeper_severity"] = "major"
+            any_needs_review = True
+            final_touchpoints.append(touchpoint)
+            prior_summaries.append(_touchpoint_summary(touchpoint))
+            continue
+
         while True:
             if touchpoint["channel"] == "email":
                 sweep = sweep_email(touchpoint["rendered_text"], flow_name=flow_name, hero_info=touchpoint["content"])
@@ -208,10 +221,26 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
 
             correction = format_correction(sweep["reasons"])
             attempts += 1
-            if touchpoint["channel"] == "email":
-                touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
-            else:
-                touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
+            try:
+                if touchpoint["channel"] == "email":
+                    touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
+                else:
+                    touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
+            except RuntimeError as exc:
+                # Same real failure mode as generate_flow()'s own retry
+                # exhaustion, just hit during a Sweeper-triggered
+                # correction instead of the first draft - same placeholder
+                # fallback, not a crash.
+                logger.error("Touchpoint %d (%s) failed to regenerate after a correction: %s", step["n"], step["channel"], exc)
+                touchpoint = {
+                    "n": step["n"], "channel": step["channel"], "timing": step["timing"], "intent": step["intent"],
+                    "content": None, "rendered_text": None, "hero": None, "generation_failed": True,
+                    "passed": False,
+                    "sweeper_reasons": ["Content generation failed after retrying - reply with this step's number to try again, e.g. \"2: try again\"."],
+                    "sweeper_severity": "major",
+                }
+                needs_human_review = True
+                break
 
         any_needs_review = any_needs_review or needs_human_review
         final_touchpoints.append(touchpoint)
@@ -361,12 +390,32 @@ def revise_flow_touchpoint(
         feedback, previous_draft=target["rendered_text"], feedback_history=feedback_history
     )
 
-    if target["channel"] == "email":
-        new_touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction)
-        sweep = sweep_email(new_touchpoint["rendered_text"], flow_name=flow_name, hero_info=new_touchpoint["content"])
-    else:
-        new_touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction)
-        sweep = sweep_whatsapp(new_touchpoint["rendered_text"], flow_name=flow_name)
+    try:
+        if target["channel"] == "email":
+            new_touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction)
+            sweep = sweep_email(new_touchpoint["rendered_text"], flow_name=flow_name, hero_info=new_touchpoint["content"])
+        else:
+            new_touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction)
+            sweep = sweep_whatsapp(new_touchpoint["rendered_text"], flow_name=flow_name)
+    except RuntimeError as exc:
+        # Same real, if rare, exhausted-retry failure as generate_flow() -
+        # a manual retry request itself failing must never crash back to a
+        # raw error either; leaves the touchpoint retryable again.
+        logger.error("Retry of touchpoint %d failed to generate: %s", touchpoint_n, exc)
+        new_touchpoint = {
+            "n": step["n"], "channel": step["channel"], "timing": step["timing"], "intent": step["intent"],
+            "content": None, "rendered_text": None, "hero": None, "generation_failed": True,
+            "passed": False,
+            "sweeper_reasons": ["Content generation failed again - try replying with different wording, or try again in a moment."],
+            "sweeper_severity": "major",
+        }
+        updated_touchpoints = [new_touchpoint if t["n"] == touchpoint_n else t for t in touchpoints]
+        return {
+            "flow_name": flow_name,
+            "touchpoint": new_touchpoint,
+            "touchpoints": updated_touchpoints,
+            "feedback_history": feedback_history + [f"[step {touchpoint_n}] {feedback}"],
+        }
 
     new_touchpoint["passed"] = sweep["pass"]
     new_touchpoint["sweeper_reasons"] = sweep["reasons"]

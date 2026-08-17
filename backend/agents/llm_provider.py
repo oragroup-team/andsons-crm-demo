@@ -122,20 +122,29 @@ def get_llm(agent_name: str, temperature: float = 0.0):
     raise ValueError(f"Unknown provider '{provider}' for agent {agent_key}. Use 'groq' or 'anthropic'.")
 
 
-def invoke_with_retry(chain, attempts: int = 3, backoff_seconds: float = 1.5, label: str = "LLM call"):
+def invoke_with_retry(chain, attempts: int = 5, backoff_seconds: float = 1.5, label: str = "LLM call"):
     """Shared retry wrapper for a structured-output chain.invoke({}) call -
-    used by every Copywriter/Sweeper call site. Real, repeatedly-observed
-    failure mode this covers: Groq occasionally returns a transient 404
-    'model does not exist' for a model that demonstrably works seconds
-    before and after (confirmed live - not an actual deprecation), which
-    reads like a load-balancer routing a request to an unready shard. A
-    flow's multiple back-to-back Copywriter+Sweeper calls (up to ~15 for a
-    5-touchpoint flow with retries) hit this far more than a single email
-    ever did, so 2 attempts with no pause was no longer enough headroom -
-    3 attempts with a short backoff between them gives a bad route a moment
-    to clear instead of hitting it again immediately. Returns the result,
-    or (None, last_exception) if every attempt fails - the caller decides
-    how to fail (raise vs fail-closed)."""
+    used by every Copywriter/Sweeper call site. Two distinct real,
+    repeatedly-observed failure modes this covers:
+    1. Groq occasionally returns a transient 404 'model does not exist' for
+       a model that demonstrably works seconds before and after (confirmed
+       live - not an actual deprecation), which reads like a load-balancer
+       routing a request to an unready shard.
+    2. Groq's forced-tool-call mode ("Tool choice is required, but model
+       did not call a tool") - the model answers in plain conversational
+       text instead of the required structured format. Caught live on a
+       real WhatsApp touchpoint generation: 3 attempts in a row hit this
+       and exhausted the retry budget, surfacing as a hard failure to the
+       Slack user. Output is non-deterministic enough between attempts
+       (confirmed: 3 different plain-text answers across 3 failed
+       attempts) that more attempts meaningfully raises the odds of one
+       landing as a real tool call.
+    A flow's multiple back-to-back Copywriter+Sweeper calls (up to ~25 for
+    a 5-touchpoint flow with corrections) hit both of these far more than a
+    single email ever did, so more headroom than a plain single-email
+    retry needs is warranted here. Returns the result, or (None,
+    last_exception) if every attempt fails - the caller decides how to
+    fail (raise vs fail-closed)."""
     last_exc = None
     for attempt in range(attempts):
         try:

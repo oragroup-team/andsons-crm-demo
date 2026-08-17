@@ -1117,3 +1117,87 @@ def pick_flow_for_signal(question: str, brief_text: str) -> Optional[str]:
         logger.warning("pick_flow_for_signal: model failed to return structured output for %r", question)
         return None
     return result.flow_name
+
+
+class TouchpointReference(BaseModel):
+    # reasoning is REQUIRED (no default) specifically so the model always
+    # has something concrete to fill in - a schema where every field is
+    # optional (touchpoint_n alone was tried first) is exactly the shape
+    # that made Groq refuse to call the tool at all, 5/5 retries, every
+    # time (confirmed live: the correct answer came back as plain text
+    # instead of a tool call - not a transient/random failure, a
+    # structural one no amount of retrying fixes).
+    reasoning: str = Field(description="One short phrase: which step this is about and why, or why it's genuinely ambiguous between more than one.")
+    touchpoint_n: Optional[int] = Field(
+        default=None,
+        description="The step number this feedback is almost certainly about, or null if it could "
+        "genuinely apply to more than one step with no way to tell them apart.",
+    )
+
+
+def resolve_touchpoint_reference(
+    feedback_text: str, touchpoints: list, last_touchpoint_n: Optional[int] = None
+) -> Optional[int]:
+    """A Slack reply in a flow thread that doesn't start with an explicit
+    step number ('move the button to the right' instead of '4: move the
+    button to the right') shouldn't always have to be rejected back to the
+    user - read against each step's real content (and, as a tie-breaker,
+    which step the thread was just discussing) the way a human catching up
+    on the same thread would. Cheap deterministic shortcut when there's
+    only one step at all; genuinely ambiguous cases still return None so
+    the caller falls back to asking, same safety net as before - this
+    never guesses when it isn't confident."""
+    real_touchpoints = [t for t in touchpoints if not t.get("generation_failed")]
+    if len(real_touchpoints) == 1:
+        return real_touchpoints[0]["n"]
+    if not real_touchpoints:
+        return None
+
+    llm = get_llm("COPYWRITER")
+    structured_llm = llm.with_structured_output(TouchpointReference)
+
+    summaries = []
+    for t in real_touchpoints:
+        content = t.get("content") or {}
+        if t["channel"] == "email":
+            detail = f"subject \"{content.get('subject')}\", CTA button \"{content.get('cta_text')}\", hero \"{t.get('hero')}\""
+        elif t["channel"] == "whatsapp":
+            detail = f"hook \"{content.get('hook_line')}\", CTA \"{content.get('cta_text')}\""
+        else:
+            detail = f"title \"{content.get('title')}\""
+        summaries.append(f"Step {t['n']} ({t['channel']}, {t['timing']}): {detail}")
+
+    last_note = (
+        f"\n\nThe previous message in this thread was about step {last_touchpoint_n} - if this new "
+        "message reads as a continuation of the same topic (no new subject introduced), that's the "
+        "likely target."
+        if last_touchpoint_n is not None
+        else ""
+    )
+
+    system_text = (
+        "A human is giving feedback on ONE step of a multi-step andSons CRM flow, in a Slack thread, "
+        "without stating the step number explicitly. Given the real content of every step below, decide "
+        "which ONE step this feedback is almost certainly about - e.g. feedback about \"the button\" "
+        "matches whichever step's CTA text it's clearly describing; feedback that only makes sense for an "
+        "email (a hero photo, a subject line) can only be an email step.\n\n"
+        "STEPS:\n" + "\n".join(summaries) + last_note +
+        "\n\nOnly return a step number if you're genuinely confident. If the feedback could plausibly "
+        "apply to more than one step with no real way to tell them apart, return null instead of guessing."
+    )
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", feedback_text)])
+    chain = prompt | structured_llm
+    # A single all-optional-field schema is exactly the shape that
+    # triggers Groq's "Tool choice is required, but model did not call a
+    # tool" failure most often (see invoke_with_retry's docstring) - a
+    # bare chain.invoke({}) here failed 3/3 in testing. invoke_with_retry
+    # is the same fix already used everywhere else in this file.
+    result, _ = invoke_with_retry(chain, label="Touchpoint reference resolution call")
+    if result is None:
+        logger.warning("resolve_touchpoint_reference: model failed to return structured output for %r", feedback_text)
+        return None
+
+    valid_ns = {t["n"] for t in real_touchpoints}
+    if result.touchpoint_n not in valid_ns:
+        return None  # guard against a hallucinated/out-of-range step number
+    return result.touchpoint_n

@@ -16,7 +16,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from agents.analytics_agent import ask_analytics
-from agents.copywriter_agent import parse_email_request
+from agents.copywriter_agent import parse_email_request, resolve_touchpoint_reference
 from agents.visual_qa_agent import review_image
 from agents.feedback_node import (
     revise_flow_touchpoint,
@@ -384,15 +384,26 @@ def slack_events_email():
                     )
 
                 parsed = _parse_touchpoint_feedback(feedback_text)
-                if parsed is None:
-                    total = len(session["touchpoints"])
-                    post_message(
-                        bot_token, channel, thread_ts=thread_ts,
-                        text=f"This flow has {total} step(s). Tell me which one to revise and how, e.g. "
-                        "\"2: make this shorter\" or \"step 3: drop the price mention\".",
+                if parsed is not None:
+                    touchpoint_n, touchpoint_feedback = parsed
+                else:
+                    # No explicit "N: ..." prefix - try to work out which
+                    # step this is actually about from its real content
+                    # (and which step this thread was just discussing)
+                    # before falling back to asking. See
+                    # copywriter_agent.resolve_touchpoint_reference.
+                    touchpoint_n = resolve_touchpoint_reference(
+                        feedback_text, session["touchpoints"], last_touchpoint_n=session.get("last_touchpoint_n"),
                     )
-                    return
-                touchpoint_n, touchpoint_feedback = parsed
+                    touchpoint_feedback = feedback_text
+                    if touchpoint_n is None:
+                        total = len(session["touchpoints"])
+                        post_message(
+                            bot_token, channel, thread_ts=thread_ts,
+                            text=f"Not sure which of the {total} step(s) that's about. Tell me which one, "
+                            "e.g. \"2: make this shorter\" or \"step 3: drop the price mention\".",
+                        )
+                        return
 
                 try:
                     result = revise_flow_touchpoint(
@@ -409,6 +420,7 @@ def slack_events_email():
                         "flow_name": session["flow_name"],
                         "touchpoints": result["touchpoints"],
                         "feedback_history": result["feedback_history"],
+                        "last_touchpoint_n": touchpoint_n,
                     },
                 )
                 _post_flow_touchpoint(

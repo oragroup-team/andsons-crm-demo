@@ -459,17 +459,26 @@ def resolve_touchpoint_reference(feedback_text: str, touchpoints: list) -> dict:
     lines = [f"- Step {t['n']} ({t['channel']}, {t['timing']}): {_touchpoint_content_summary(t)}" for t in touchpoints]
     llm = get_llm("HEAD_OF_CRM", temperature=0.0)  # a resolution/classification task, not creative writing
     structured_llm = llm.with_structured_output(_TouchpointReference)
-    system_text = "The real touchpoints in this flow, in order:\n" + "\n".join(lines)
+    system_text = (
+        "Determine which of these real touchpoints a reviewer's feedback is about, using only their "
+        "actual content below:\n" + "\n".join(lines)
+    )
     # ChatPromptTemplate scans message strings for "{var}" patterns even
     # when they were already fully built via an f-string - feedback_text
     # is raw Slack user input, so a literal brace typed by a real person
     # would otherwise crash this exact call the same way an unfilled
     # template variable just did.
     escaped_feedback = feedback_text.replace("{", "{{").replace("}", "}}")
-    human_text = f"A reviewer just said: {escaped_feedback}\n\nWhich step is this about?"
+    # Real bug caught live: phrasing this as a literal question ("Which
+    # step is this about?") made the model answer it conversationally in
+    # plain text instead of calling the structured-output tool - same
+    # failure mode as the Head of CRM prompt fix (see that agent's
+    # module docstring). An instruction, not a question, fixed it there;
+    # same fix here.
+    human_text = f"Reviewer feedback: {escaped_feedback}"
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
     chain = prompt | structured_llm
-    result, last_exc = invoke_with_retry(chain, attempts=2, label="Touchpoint reference resolution call")
+    result, last_exc = invoke_with_retry(chain, label="Touchpoint reference resolution call")
     if result is None:
         logger.warning("Touchpoint reference resolution failed (%s) - falling back to asking directly.", last_exc)
         return {"touchpoint_n": None, "candidate_ns": [], "reason": "resolution unavailable"}

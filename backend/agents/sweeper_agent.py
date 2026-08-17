@@ -84,7 +84,9 @@ does NOT count against that limit - the approved golden template uses a numbered
 together, so having both is correct, not a violation. A trust row must be a thin plain-text line \
 separated by " · ", never described as badge graphics, icons, or star ratings.
 - The "what happens next" block (when present) has at most 3 short lines, not long paragraphs, and is \
-not duplicated.
+not duplicated. None of its steps may just restate the CTA button's own text (read what the CTA button \
+below it actually says) - the button already is the final action; listing it again as a numbered step \
+shows the same action to the reader twice and is always a fail.
 
 C) REGISTER & CREATIVE STRENGTH (hard-fail any):
 - SaaS/app language applied to medical care: "activate", "tap", "unlock", exclamation marks, cutesy \

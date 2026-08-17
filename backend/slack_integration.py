@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import threading
+from typing import Optional
 
 import requests
 from slack_sdk import WebClient
@@ -193,6 +194,36 @@ def format_email_caption(result: dict, flow_name: str, first_name: str) -> str:
     retries = result.get("retries_used")
     lines.append(f"{status} - {retries} automatic revision(s)" if retries else status)
     lines.append("Reply in this thread with feedback to revise this draft.")
+    return "\n".join(lines)
+
+
+def format_flow_intro(flow_name: str, total_touchpoints: int, insight: Optional[dict] = None) -> str:
+    """Posted once, before the touchpoint images, so the thread reads as
+    one coherent flow instead of N unexplained images landing in a row."""
+    lines = [f"*{flow_name}* - the full real sequence, {total_touchpoints} touchpoint(s):"]
+    if insight:
+        note = f"_Why this flow:_ {insight['bigquery_answer']}"
+        if not insight.get("bigquery_verified"):
+            note += " (directional - not fully verified)"
+        lines.append(note)
+    return "\n".join(lines)
+
+
+def format_flow_touchpoint_caption(touchpoint: dict, total: int) -> str:
+    """Plain-text caption for one touchpoint image in a multi-touchpoint
+    flow post (see post_rendered_email) - files_upload_v2's initial_comment."""
+    channel_label = "Email" if touchpoint["channel"] == "email" else "WhatsApp"
+    lines = [f"*Step {touchpoint['n']}/{total} - {channel_label} - {touchpoint['timing']}*"]
+    lines.append(touchpoint["intent"])
+
+    status = "Passed brand QA" if touchpoint.get("passed") else "Needs human review"
+    lines.append(status)
+    reasons = touchpoint.get("sweeper_reasons")
+    if reasons and not touchpoint.get("passed"):
+        lines.append("- " + "; ".join(reasons))
+
+    if touchpoint["n"] == 1:
+        lines.append("Reply with a step number and feedback (e.g. \"2: make this shorter\") to revise that touchpoint.")
     return "\n".join(lines)
 
 

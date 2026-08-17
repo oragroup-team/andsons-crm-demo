@@ -11,9 +11,16 @@ import difflib
 import logging
 from typing import Optional
 
-from .copywriter_agent import generate_email, pick_flow_for_signal
+from .copywriter_agent import (
+    _touchpoint_summary,
+    generate_email,
+    generate_flow,
+    generate_flow_email_touchpoint,
+    generate_flow_whatsapp_touchpoint,
+    pick_flow_for_signal,
+)
 from .insight_agent import investigate
-from .sweeper_agent import sweep_email
+from .sweeper_agent import sweep_email, sweep_whatsapp
 
 logger = logging.getLogger("feedback_node")
 logging.basicConfig(level=logging.INFO)
@@ -153,6 +160,95 @@ def run_insight_email_pipeline(
     return result
 
 
+def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text: Optional[str] = None) -> dict:
+    """Generate the WHOLE real flow - every Email + WhatsApp touchpoint in
+    its real MoEngage cadence (flows.py) - not just one email. Each
+    touchpoint goes through its own Sweeper QA gate; a touchpoint that
+    fails is regenerated (capped at MAX_RETRIES) in place, using the same
+    correction-loop principle as _run_pipeline_loop, without discarding or
+    re-generating the touchpoints around it (regenerating the whole
+    sequence over one failing WhatsApp line would also throw away good
+    passing emails, and would risk small wording drift between runs)."""
+    brief_parts = []
+    if insight_brief_text:
+        brief_parts.append(insight_brief_text)
+    if file_context:
+        brief_parts.append(f"DATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}")
+    brief = "\n\n".join(brief_parts) if brief_parts else None
+    flow_result = generate_flow(flow_name, insight_brief=brief)
+
+    prior_summaries = []
+    final_touchpoints = []
+    any_needs_review = False
+
+    for touchpoint in flow_result["touchpoints"]:
+        step = {"n": touchpoint["n"], "channel": touchpoint["channel"], "timing": touchpoint["timing"], "intent": touchpoint["intent"]}
+        correction = None
+        attempts = 0
+        needs_human_review = False
+
+        while True:
+            if touchpoint["channel"] == "email":
+                sweep = sweep_email(touchpoint["rendered_text"], flow_name=flow_name, hero_info=touchpoint["content"])
+            else:
+                sweep = sweep_whatsapp(touchpoint["rendered_text"], flow_name=flow_name)
+
+            logger.info(
+                "Flow %s touchpoint %d (%s, %s) attempt %d: pass=%s severity=%s reasons=%s",
+                flow_name, touchpoint["n"], touchpoint["channel"], touchpoint["timing"],
+                attempts + 1, sweep["pass"], sweep["severity"], sweep["reasons"],
+            )
+
+            if sweep["pass"] or attempts >= MAX_RETRIES:
+                needs_human_review = not sweep["pass"]
+                touchpoint["passed"] = sweep["pass"]
+                touchpoint["sweeper_reasons"] = sweep["reasons"]
+                touchpoint["sweeper_severity"] = sweep["severity"]
+                break
+
+            correction = format_correction(sweep["reasons"])
+            attempts += 1
+            if touchpoint["channel"] == "email":
+                touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
+            else:
+                touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
+
+        any_needs_review = any_needs_review or needs_human_review
+        final_touchpoints.append(touchpoint)
+        prior_summaries.append(_touchpoint_summary(touchpoint))
+
+    return {
+        "flow_name": flow_name,
+        "touchpoints": final_touchpoints,
+        "needs_human_review": any_needs_review,
+    }
+
+
+def run_insight_flow_pipeline(
+    question: str, flow_name: Optional[str] = None, file_context: str = ""
+) -> dict:
+    """Investigate a business signal, then generate the WHOLE flow (every
+    real touchpoint) addressing it - the flow-level counterpart to
+    run_insight_email_pipeline(). Same flow-picking logic; same
+    needs_flow_clarification escape hatch when nothing genuinely fits."""
+    brief = investigate(question, file_context=file_context)
+
+    if not flow_name:
+        flow_name = pick_flow_for_signal(question, brief["brief_text"])
+    if not flow_name:
+        return {
+            "needs_flow_clarification": True,
+            "brief": brief,
+            "question": question,
+        }
+
+    result = run_flow_pipeline(flow_name, insight_brief_text=brief["brief_text"])
+    result["needs_flow_clarification"] = False
+    result["insight_brief"] = brief
+    result["signal_question"] = question
+    return result
+
+
 def format_human_feedback(
     feedback: str,
     previous_draft: Optional[str] = None,
@@ -239,4 +335,51 @@ def revise_with_feedback(
         "sweeper_pass": sweep["pass"],
         "sweeper_reasons": sweep["reasons"],
         "sweeper_severity": sweep["severity"],
+    }
+
+
+def revise_flow_touchpoint(
+    flow_name: str,
+    touchpoints: list,
+    touchpoint_n: int,
+    feedback: str,
+    feedback_history: Optional[list] = None,
+) -> dict:
+    """Human-in-the-loop revision of ONE touchpoint in an already-generated
+    flow - same principle as revise_with_feedback(), but aware of its real
+    position in the sequence (touchpoints before it are passed as context,
+    same as during generation, so a revision can't accidentally contradict
+    what an earlier touchpoint already said)."""
+    feedback_history = feedback_history or []
+    target = next((t for t in touchpoints if t["n"] == touchpoint_n), None)
+    if target is None:
+        raise ValueError(f"No touchpoint {touchpoint_n} in this flow (has {[t['n'] for t in touchpoints]}).")
+
+    prior_summaries = [_touchpoint_summary(t) for t in touchpoints if t["n"] < touchpoint_n]
+    step = {"n": target["n"], "channel": target["channel"], "timing": target["timing"], "intent": target["intent"]}
+    correction = format_human_feedback(
+        feedback, previous_draft=target["rendered_text"], feedback_history=feedback_history
+    )
+
+    if target["channel"] == "email":
+        new_touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction)
+        sweep = sweep_email(new_touchpoint["rendered_text"], flow_name=flow_name, hero_info=new_touchpoint["content"])
+    else:
+        new_touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction)
+        sweep = sweep_whatsapp(new_touchpoint["rendered_text"], flow_name=flow_name)
+
+    new_touchpoint["passed"] = sweep["pass"]
+    new_touchpoint["sweeper_reasons"] = sweep["reasons"]
+    new_touchpoint["sweeper_severity"] = sweep["severity"]
+    logger.info(
+        "Human feedback applied to flow=%s touchpoint=%d: %r | sweeper_pass=%s reasons=%s",
+        flow_name, touchpoint_n, feedback, sweep["pass"], sweep["reasons"],
+    )
+
+    updated_touchpoints = [new_touchpoint if t["n"] == touchpoint_n else t for t in touchpoints]
+    return {
+        "flow_name": flow_name,
+        "touchpoint": new_touchpoint,
+        "touchpoints": updated_touchpoints,
+        "feedback_history": feedback_history + [f"[step {touchpoint_n}] {feedback}"],
     }

@@ -16,7 +16,7 @@ from flows import FLOW_BY_SLUG
 from image_bank import HERO_BANK
 
 from .copywriter_agent import GOLDEN_P1_REFERENCE
-from .llm_provider import get_llm
+from .llm_provider import get_llm, invoke_with_retry
 
 logger = logging.getLogger("sweeper_agent")
 
@@ -108,6 +108,58 @@ one hero, badge graphics, illustrated icons, duplicated blocks, etc).
 For each failure, write ONE short, specific reason describing what's actually wrong in the candidate (not \
 the rule text verbatim). Set severity to "none" if it passes, "minor" for small copy/polish issues, or \
 "major" for any compliance (A) failure or structural/brand-safety violation.
+"""
+
+
+WHATSAPP_SYSTEM_PROMPT = """You are the Pre-Launch Sweeper for andSons - the last automated QA check before \
+a WhatsApp touchpoint is shown to a human reviewer. This is a WhatsApp message, NOT an email - do not \
+apply any email-only structural rule (no subject/preheader/footer/hero/unsubscribe line is expected here).
+
+CANDIDATE FORMAT (read this first): the candidate text is "[LINK PREVIEW: title]", then a blank line, \
+then the message body (its first line is a short bold greeting/hook, e.g. "Hi NAME, still thinking it \
+over?"), then a blank line, then EXACTLY ONE "[CTA label]" line - e.g. "[Complete My Order]". This is the \
+real andSons WABA "Call-To-Action" template shape (link-preview title + message + one button) - the \
+"[LINK PREVIEW: ...]" line and the one "[CTA label]" line are this renderer's plain-text stand-ins for \
+that template's own structured fields. Both are REQUIRED and CORRECT, never a violation, never "HTML". \
+Only fail on CTA/link grounds if there are TWO OR MORE distinct "[...]" CTA lines, or the message body \
+itself pastes an actual URL or names a second, different action beyond the one CTA.
+
+The price rule is PER-FLOW:
+{price_rule}
+
+A) COMPLIANCE (hard-fail any of these):
+1. Any prescription medicine named anywhere - Rx treatment must only ever be "your doctor's plan" / \
+"treatment plan" / "prescription options" / "doctor-guided treatment".
+2. Treatment decisions not attributed to the doctor, or the brand speaking as if it prescribes.
+3. Any claim or implication the customer can contact/message the doctor directly.
+4. Rx-track copy implying the customer can self-stop or self-change prescribed treatment.
+5. A clinical stat or claim without both the source footnote (DOI: 10.1111/dth.12246) and "Individual \
+results vary." Also fail any invented/unverifiable statistic or social proof number.
+6. A price, dollar amount, or discount code mentioned when the flow's track forbids it (see the rule above).
+7. Cure/guarantee language, shame or fear-based pressure, or fake urgency/countdown framing.
+
+B) SHAPE (WhatsApp-specific, hard-fail any):
+8. The MESSAGE BODY (excluding the one "[CTA label]" line) is longer than 4 short lines, or reads like a \
+shrunk email (multiple paragraphs, a "what happens next" list, a formal sign-off) rather than a short \
+personal chat nudge.
+9. TWO OR MORE distinct "[...]" CTA lines, or a second link/action named separately from the one CTA line.
+10. Markdown formatting (bold/italic asterisks, headings) or an image reference inside the message body - \
+this channel is plain text only. The "[LINK PREVIEW: ...]" and "[CTA label]" lines themselves are NOT \
+markdown, see above.
+
+C) REGISTER (hard-fail any):
+- SaaS/app language applied to medical care: "activate", "tap", "unlock", exclamation marks.
+- Register cutesy/SaaS OR stiff-corporate instead of personal, warm, plainspoken.
+- Any em-dash or long dash used as punctuation.
+- American spelling anywhere (must be British).
+- Any defensive meta-commentary narrating the message's intent.
+- The word "payment" appearing anywhere, or payment-led framing (the action is starting/continuing \
+treatment, not paying) - UNLESS the flow is genuinely a billing flow (Replenishment/Dunning).
+- Any trace of an internal business/marketing metric leaking into the message.
+
+For each failure, write ONE short, specific reason describing what's actually wrong in the candidate. Set \
+severity to "none" if it passes, "minor" for small copy issues, or "major" for any compliance (A) or \
+shape (B) failure.
 """
 
 
@@ -204,15 +256,9 @@ def sweep_email(email_text: str, flow_name: str = "p1_plan_not_purchased", hero_
     chain = prompt | structured_llm
 
     # This is a compliance gate, not just a style check - if it can't run at
-    # all after a retry, fail CLOSED (treat as failed, force human review)
+    # all after retrying, fail CLOSED (treat as failed, force human review)
     # rather than silently letting an unreviewed email through.
-    result = None
-    for attempt in range(2):
-        try:
-            result = chain.invoke({})
-            break
-        except Exception as exc:  # noqa: BLE001 - retried once, then fails closed below
-            logger.warning("Sweeper structured-output call failed (attempt %d): %s", attempt, exc)
+    result, _ = invoke_with_retry(chain, label="Sweeper structured-output call")
 
     if result is None:
         return {
@@ -235,4 +281,36 @@ def sweep_email(email_text: str, flow_name: str = "p1_plan_not_purchased", hero_
         "pass": passed,
         "reasons": reasons,
         "severity": severity,
+    }
+
+
+def sweep_whatsapp(message_text: str, flow_name: str = "p1_plan_not_purchased") -> dict:
+    """Same QA gate as sweep_email(), but with WhatsApp's own real shape
+    rules (short plain-text chat message, one link, no HTML/hero/footer) -
+    see WHATSAPP_SYSTEM_PROMPT. Real Sweeper rule this reuses (from the
+    live n8n system prompt): 'A WhatsApp touchpoint must be a short
+    plain-text chat message (2-4 lines, one link, no subject, no HTML, no
+    hero), not an email.'"""
+    llm = get_llm("SWEEPER")
+    structured_llm = llm.with_structured_output(SweeperResult)
+
+    system_text = WHATSAPP_SYSTEM_PROMPT.format(price_rule=_price_rule_text(flow_name))
+    human_text = f"Flow: {flow_name}\n\nCandidate WhatsApp message:\n---\n{message_text}\n---"
+
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+
+    result, _ = invoke_with_retry(chain, label="WhatsApp Sweeper structured-output call")
+
+    if result is None:
+        return {
+            "pass": False,
+            "reasons": ["Automated brand QA check failed to run (technical error) - needs human review before sending."],
+            "severity": "major",
+        }
+
+    return {
+        "pass": result.pass_ == "yes",
+        "reasons": list(result.reasons),
+        "severity": result.severity,
     }

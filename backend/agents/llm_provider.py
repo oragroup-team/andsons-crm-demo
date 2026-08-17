@@ -112,3 +112,29 @@ def get_llm(agent_name: str, temperature: float = 0.0):
         return ChatAnthropic(model=model, temperature=temperature, api_key=api_key)
 
     raise ValueError(f"Unknown provider '{provider}' for agent {agent_key}. Use 'groq' or 'anthropic'.")
+
+
+def invoke_with_retry(chain, attempts: int = 3, backoff_seconds: float = 1.5, label: str = "LLM call"):
+    """Shared retry wrapper for a structured-output chain.invoke({}) call -
+    used by every Copywriter/Sweeper call site. Real, repeatedly-observed
+    failure mode this covers: Groq occasionally returns a transient 404
+    'model does not exist' for a model that demonstrably works seconds
+    before and after (confirmed live - not an actual deprecation), which
+    reads like a load-balancer routing a request to an unready shard. A
+    flow's multiple back-to-back Copywriter+Sweeper calls (up to ~15 for a
+    5-touchpoint flow with retries) hit this far more than a single email
+    ever did, so 2 attempts with no pause was no longer enough headroom -
+    3 attempts with a short backoff between them gives a bad route a moment
+    to clear instead of hitting it again immediately. Returns the result,
+    or (None, last_exception) if every attempt fails - the caller decides
+    how to fail (raise vs fail-closed)."""
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return chain.invoke({}), None
+        except Exception as exc:  # noqa: BLE001 - every attempt logged, caller decides final handling
+            last_exc = exc
+            logger.warning("%s failed (attempt %d/%d): %s", label, attempt + 1, attempts, exc)
+            if attempt < attempts - 1:
+                time.sleep(backoff_seconds)
+    return None, last_exc

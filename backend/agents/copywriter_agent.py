@@ -16,7 +16,7 @@ from flows import FLOW_BY_SLUG, VALID_FLOW_SLUGS
 from image_bank import HERO_BANK, HERO_KEYS
 from text_sanitize import sanitize_text
 
-from .llm_provider import get_llm
+from .llm_provider import get_llm, invoke_with_retry
 
 logger = logging.getLogger("copywriter_agent")
 
@@ -444,15 +444,7 @@ def generate_email(
     )
     chain = prompt | structured_llm
 
-    content = None
-    last_exc = None
-    for attempt in range(2):
-        try:
-            content = chain.invoke({})
-            break
-        except Exception as exc:  # noqa: BLE001 - retried once, then raised as a clear error below
-            last_exc = exc
-            logger.warning("Copywriter structured-output call failed (attempt %d): %s", attempt, exc)
+    content, last_exc = invoke_with_retry(chain, label="Copywriter structured-output call")
     if content is None:
         raise RuntimeError(f"Copywriter failed to produce a draft after retrying ({last_exc}).") from last_exc
 
@@ -474,6 +466,273 @@ def generate_email(
         "content": result_content,
         "rendered_text": rendered,
         "hero_notes": hero_info["hero_notes"],
+    }
+
+
+# --- Multi-touchpoint flow generation ---------------------------------------
+# Real andSons flows are not one email - they're a whole MoEngage journey of
+# several Email + WhatsApp touchpoints spaced over days/weeks (see flows.py's
+# "cadence" field, sourced from the real P1 Build Packet and the live n8n
+# Copywriter's own "author the ENTIRE flow" instruction in "Agent Prompts -
+# CRM Team.md"). This section generates every touchpoint in a flow's real
+# cadence, so a Slack request for "the P1 email" returns the whole sequence
+# in one go, not just touchpoint 1.
+
+WHATSAPP_SYSTEM_PROMPT = """You are the senior CRM copywriter for andSons, a 100% online men's health \
+telehealth brand in Singapore. You are writing ONE WhatsApp touchpoint in a real multi-step andSons \
+lifecycle flow - not an email. WhatsApp is a short, timely, personal nudge, never a shrunk-down email: \
+plain conversational text, 2-4 short lines, warm and direct, no subject line (it is a chat message, not \
+an email). It uses the real andSons WABA "Call-To-Action" template shape: a link-preview title above the \
+message, then the message body (its first line is a short bold greeting/hook), then exactly one button.
+
+The message body itself stays plain text - no HTML, no markdown, no image pasted into the body. The \
+link-preview title and the one CTA button are the template's own structured fields, not something you \
+write inline in the message.
+
+Use this approved P1 style reference for register only (not content - that email is a different \
+touchpoint):
+---
+{golden_reference}
+---
+
+LANGUAGE RULES (absolute): British English spelling everywhere (personalised, customised, recognise, \
+colour, programme) - never American spelling. NEVER use em-dashes or long dashes as punctuation - use \
+full stops or commas. No exclamation marks. Sentence case. No app-speak ("activate", "tap", "unlock").
+
+COMPLIANCE (hard rules): NEVER name a prescription medicine anywhere. Treatment decisions belong to the \
+doctor, never the brand. NEVER claim the customer can message the doctor directly - support is customer \
+service on WhatsApp. Brand name is exactly "andSons". Invent nothing: no fabricated stats, social proof, \
+counters, badges, deadlines. No cure/guarantee language, no shame, no fake urgency.
+{price_rule}
+
+NO DEFENSIVE META-COMMENTARY: never narrate the message's intent or what it is NOT doing.
+PAYMENT-FRAMING BAN: never lead with money; the action is starting/continuing treatment, not paying.
+
+FLOW: {flow_name}
+{flow_brief}
+
+THIS TOUCHPOINT'S MOMENT IN THE FLOW (timing: {timing}): {intent}
+
+{prior_context}
+
+Address the customer as NAME (a literal placeholder token, not a real name - never invent one).
+Write ONLY the message body text (2-4 short lines) - no link, no CTA button markup, that's handled \
+separately.
+"""
+
+
+class WhatsAppContent(BaseModel):
+    link_title: str = Field(
+        description="Short headline for the WhatsApp link-preview card that appears above the message "
+        "(the real andSons WABA template format - a rich link preview, like a page title, not a fabricated "
+        "claim) - e.g. 'Reimagining Men's Health by Teleconsultation with Doctor | andSons'. Plain, "
+        "on-brand, describes what andSons/the linked page is, never a specific unverifiable claim."
+    )
+    hook_line: str = Field(
+        description="ONE short, warm, direct greeting/hook sentence addressed to NAME - the first line "
+        "the customer sees, shown BOLD in the real template, e.g. 'Hi NAME, still thinking it over?'."
+    )
+    body: str = Field(
+        description="1-3 more short plain-text lines/sentences AFTER the hook line, shown in regular "
+        "weight - the rest of the message. Together with the hook line, 2-4 short lines total. No "
+        "signature, no link pasted into the text."
+    )
+    cta_text: str = Field(
+        description="The single action this message points to, in the same verb + My + noun convention "
+        "as email CTAs, e.g. 'Complete My Order' - shown as the one button this WhatsApp message carries."
+    )
+
+
+def _sanitize_whatsapp(content: WhatsAppContent) -> WhatsAppContent:
+    return content.model_copy(
+        update={
+            "link_title": sanitize_text(content.link_title),
+            "hook_line": sanitize_text(content.hook_line),
+            "body": sanitize_text(content.body),
+            "cta_text": sanitize_text(content.cta_text),
+        }
+    )
+
+
+def render_whatsapp(content: WhatsAppContent) -> str:
+    """Plain-text rendering of a WhatsApp touchpoint, in the same
+    Sweeper-readable shape as render_email() - the link-preview title, the
+    bold hook line, the rest of the message, then its one CTA button line,
+    never HTML."""
+    return f"[LINK PREVIEW: {content.link_title}]\n\n{content.hook_line}\n{content.body}\n\n[{content.cta_text}]"
+
+
+def _prior_touchpoints_context(prior: list) -> str:
+    if not prior:
+        return "This is the FIRST touchpoint in the flow - nothing has been sent yet."
+    used_heroes = [p["hero"] for p in prior if p.get("hero") and p["hero"] != "none"]
+    lines = ["EARLIER TOUCHPOINTS ALREADY SENT in this same flow, so this one must feel like the next "
+             "step in one continuous conversation, never a repeat of an earlier angle or opening line:"]
+    for p in prior:
+        lines.append(f"- Touchpoint {p['n']} ({p['channel']}, {p['timing']}): {p['summary']}")
+    if used_heroes:
+        lines.append(
+            f"Heroes already used in this flow: {', '.join(used_heroes)} - NEVER reuse any of these; "
+            "pick a different bank photo or 'none'."
+        )
+    return "\n".join(lines)
+
+
+def generate_flow(flow_name: str, insight_brief: Optional[str] = None) -> dict:
+    """Generate every real touchpoint in a flow's cadence (flows.py), in
+    order, each aware of what earlier touchpoints in the same flow already
+    said (so the sequence reads as one continuous journey, and no hero
+    image or opening line repeats). Always addresses the NAME placeholder -
+    there is no real customer in a Slack conversation to name. Returns
+    {"flow_name", "touchpoints": [...]} - each touchpoint has "channel",
+    "timing", "intent", "rendered_text", "content", and (email only) hero
+    fields, ready for the Sweeper and the image renderers."""
+    flow = FLOW_BY_SLUG.get(flow_name)
+    if flow is None:
+        raise ValueError(f"Unknown flow: {flow_name}")
+
+    touchpoints = []
+    prior_summaries = []
+
+    for step in flow["cadence"]:
+        if step["channel"] == "email":
+            touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
+        else:
+            touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
+        touchpoints.append(touchpoint)
+        prior_summaries.append(_touchpoint_summary(touchpoint))
+
+    return {"flow_name": flow_name, "touchpoints": touchpoints}
+
+
+def _touchpoint_summary(touchpoint: dict) -> dict:
+    if touchpoint["channel"] == "email":
+        content = touchpoint["content"]
+        summary = f"Subject '{content['subject']}' - {content['opening_lines'][0] if content.get('opening_lines') else ''}"
+    else:
+        summary = f"{touchpoint['content']['hook_line']} {touchpoint['content']['body']}"
+    return {
+        "n": touchpoint["n"],
+        "channel": touchpoint["channel"],
+        "timing": touchpoint["timing"],
+        "hero": touchpoint["hero"],
+        "summary": summary,
+    }
+
+
+def generate_flow_email_touchpoint(
+    flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
+    insight_brief: Optional[str] = None,
+) -> dict:
+    """Generate (or regenerate, with `correction`) ONE email touchpoint of a
+    flow's real cadence - shares the exact same prompt machinery as
+    generate_email(), plus this touchpoint's real timing/intent and what
+    earlier touchpoints in the same flow already said (so a Sweeper-driven
+    retry stays aware of the rest of the sequence, not just its own text)."""
+    flow = FLOW_BY_SLUG[flow_name]
+    flow_brief = _build_flow_brief(flow_name)
+    llm = get_llm("COPYWRITER")
+    structured_llm = llm.with_structured_output(EmailContent)
+    system_text = SYSTEM_PROMPT.format(
+        golden_reference=GOLDEN_P1_REFERENCE,
+        flow_name=flow_name,
+        flow_brief=flow_brief,
+        first_name="NAME",
+        hero_catalog=_build_hero_catalog(),
+    )
+    system_text += (
+        f"\n\nTHIS TOUCHPOINT'S MOMENT IN THE FLOW (touchpoint {step['n']} of "
+        f"{len(flow['cadence'])}, timing: {step['timing']}): {step['intent']}\n\n"
+        + _prior_touchpoints_context(prior_summaries)
+    )
+    if insight_brief:
+        system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
+    human_text = f"Write touchpoint {step['n']} ({step['timing']}) of the {flow_name} flow for NAME."
+    if correction:
+        human_text += (
+            "\n\nThis is a REVISION. The previous draft of this touchpoint failed brand review. Keep "
+            "every rule above in force and additionally apply this correction:\n" + correction
+        )
+
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+
+    content, last_exc = invoke_with_retry(chain, label="Copywriter flow touchpoint call")
+    if content is None:
+        raise RuntimeError(f"Copywriter failed to produce touchpoint {step['n']} ({last_exc}).") from last_exc
+
+    content = _sanitize_content(content)
+    hero_info = resolve_hero(content)
+    rendered = render_email(content, "NAME", hero_info=hero_info)
+    result_content = content.model_dump()
+    result_content.update(
+        {
+            "hero": hero_info["hero"],
+            "hero_image_url": hero_info["hero_image_url"],
+            "hero_headline": hero_info["hero_headline"],
+            "hero_source": hero_info["hero_source"],
+        }
+    )
+    return {
+        "n": step["n"],
+        "channel": "email",
+        "timing": step["timing"],
+        "intent": step["intent"],
+        "content": result_content,
+        "rendered_text": rendered,
+        "hero": hero_info["hero"],
+    }
+
+
+def generate_flow_whatsapp_touchpoint(
+    flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
+    insight_brief: Optional[str] = None,
+) -> dict:
+    """Generate (or regenerate, with `correction`) ONE WhatsApp touchpoint
+    of a flow's real cadence. See generate_flow_email_touchpoint()."""
+    flow = FLOW_BY_SLUG[flow_name]
+    flow_brief = _build_flow_brief(flow_name)
+    price_rule = (
+        "" if flow["allow_price"] else
+        "HARD CONSTRAINT: never mention a price, a dollar amount, or a discount code in this message."
+    )
+    llm = get_llm("COPYWRITER")
+    structured_llm = llm.with_structured_output(WhatsAppContent)
+    system_text = WHATSAPP_SYSTEM_PROMPT.format(
+        golden_reference=GOLDEN_P1_REFERENCE,
+        flow_name=flow_name,
+        flow_brief=flow_brief,
+        timing=step["timing"],
+        intent=step["intent"],
+        price_rule=price_rule,
+        prior_context=_prior_touchpoints_context(prior_summaries),
+    )
+    if insight_brief:
+        system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
+    human_text = f"Write touchpoint {step['n']} ({step['timing']}) of the {flow_name} flow, a WhatsApp message for NAME."
+    if correction:
+        human_text += (
+            "\n\nThis is a REVISION. The previous draft of this touchpoint failed brand review. Keep "
+            "every rule above in force and additionally apply this correction:\n" + correction
+        )
+
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+
+    content, last_exc = invoke_with_retry(chain, label="Copywriter WhatsApp touchpoint call")
+    if content is None:
+        raise RuntimeError(f"Copywriter failed to produce touchpoint {step['n']} ({last_exc}).") from last_exc
+
+    content = _sanitize_whatsapp(content)
+    rendered = render_whatsapp(content)
+    return {
+        "n": step["n"],
+        "channel": "whatsapp",
+        "timing": step["timing"],
+        "intent": step["intent"],
+        "content": content.model_dump(),
+        "rendered_text": rendered,
+        "hero": None,
     }
 
 

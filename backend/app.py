@@ -2,9 +2,11 @@ import _vendor_path  # noqa: F401  — must be first, see _vendor_path.py
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -15,17 +17,25 @@ from flask_cors import CORS
 
 from agents.analytics_agent import ask_analytics
 from agents.copywriter_agent import parse_email_request
-from agents.feedback_node import revise_with_feedback, run_email_pipeline, run_insight_email_pipeline
+from agents.feedback_node import (
+    revise_flow_touchpoint,
+    revise_with_feedback,
+    run_email_pipeline,
+    run_flow_pipeline,
+    run_insight_flow_pipeline,
+)
 from email_image_renderer import render_email_image
 from file_context import summarize_files
 from flows import VALID_FLOW_SLUGS
+from whatsapp_image_renderer import render_whatsapp_image
 from slack_integration import (
     append_analytics_exchange,
     clear_pending_email_request,
     download_slack_file,
     format_analytics_blocks,
     format_email_blocks,
-    format_email_caption,
+    format_flow_intro,
+    format_flow_touchpoint_caption,
     get_analytics_history,
     get_email_session,
     get_pending_email_request,
@@ -263,6 +273,42 @@ def _collect_uploaded_file_context(event: dict, bot_token: str) -> tuple:
     return summary, errors + parse_errors
 
 
+_TOUCHPOINT_FEEDBACK_RE = re.compile(r"^\s*(?:step\s*)?(\d+)\s*[:.\-]\s*(.+)$", re.IGNORECASE | re.DOTALL)
+
+
+def _parse_touchpoint_feedback(text: str) -> Optional[tuple]:
+    """A reply in a flow thread revises ONE touchpoint, so it must say
+    which one (e.g. "2: make this shorter" or "step 3: drop the price") -
+    unlike the old single-email flow, there's no single implicit target to
+    fall back to. Returns (touchpoint_n, feedback_text) or None if the
+    reply doesn't start with a step number."""
+    match = _TOUCHPOINT_FEEDBACK_RE.match(text or "")
+    if not match:
+        return None
+    return int(match.group(1)), match.group(2).strip()
+
+
+def _post_flow_result(bot_token: str, channel: str, thread_ts: str, flow_result: dict, insight: Optional[dict] = None) -> None:
+    """Post every real touchpoint of a generated flow into the thread, in
+    cadence order, each labelled with its step/channel/timing - this is
+    the actual fix for 'answer with all the emails and WhatsApp messages
+    in one go' instead of a single email."""
+    touchpoints = flow_result["touchpoints"]
+    post_message(
+        bot_token, channel, thread_ts=thread_ts,
+        text=format_flow_intro(flow_result["flow_name"], len(touchpoints), insight=insight),
+    )
+    for touchpoint in touchpoints:
+        if touchpoint["channel"] == "email":
+            image = render_email_image(touchpoint["content"], NAME_PLACEHOLDER)
+            filename = f"{flow_result['flow_name']}_step{touchpoint['n']}_email.png"
+        else:
+            image = render_whatsapp_image(touchpoint["content"], timing=touchpoint["timing"])
+            filename = f"{flow_result['flow_name']}_step{touchpoint['n']}_whatsapp.png"
+        caption = format_flow_touchpoint_caption(touchpoint, len(touchpoints))
+        post_rendered_email(bot_token, channel, thread_ts, image, filename, caption)
+
+
 @app.route("/slack/events/email", methods=["POST"])
 def slack_events_email():
     data = request.get_json(silent=True) or {}
@@ -301,29 +347,44 @@ def slack_events_email():
                     feedback_text = (text + "\n\n" if text else "") + (
                         "Also take this uploaded file into account:\n" + file_context
                     )
-                result = revise_with_feedback(
-                    session["flow_name"],
-                    NAME_PLACEHOLDER,
-                    feedback_text,
-                    previous_rendered_text=session["rendered_text"],
-                    feedback_history=session.get("feedback_history", []),
-                )
+
+                parsed = _parse_touchpoint_feedback(feedback_text)
+                if parsed is None:
+                    total = len(session["touchpoints"])
+                    post_message(
+                        bot_token, channel, thread_ts=thread_ts,
+                        text=f"This flow has {total} step(s). Tell me which one to revise and how, e.g. "
+                        "\"2: make this shorter\" or \"step 3: drop the price mention\".",
+                    )
+                    return
+                touchpoint_n, touchpoint_feedback = parsed
+
+                try:
+                    result = revise_flow_touchpoint(
+                        session["flow_name"], session["touchpoints"], touchpoint_n, touchpoint_feedback,
+                        feedback_history=session.get("feedback_history", []),
+                    )
+                except ValueError as exc:
+                    post_message(bot_token, channel, thread_ts=thread_ts, text=str(exc))
+                    return
+
                 save_email_session(
-                    channel,
-                    thread_ts,
+                    channel, thread_ts,
                     {
                         "flow_name": session["flow_name"],
-                        "rendered_text": result["rendered_text"],
+                        "touchpoints": result["touchpoints"],
                         "feedback_history": result["feedback_history"],
                     },
                 )
-                revised_result = {"email": result["email"], "passed": result["sweeper_pass"], "retries_used": None}
-                image = render_email_image(result["email"], NAME_PLACEHOLDER)
-                caption = format_email_caption(revised_result, session["flow_name"], NAME_PLACEHOLDER)
-                post_rendered_email(
-                    bot_token, channel, thread_ts, image,
-                    f"{session['flow_name']}_revised.png", caption,
-                )
+                touchpoint = result["touchpoint"]
+                if touchpoint["channel"] == "email":
+                    image = render_email_image(touchpoint["content"], NAME_PLACEHOLDER)
+                    filename = f"{session['flow_name']}_step{touchpoint['n']}_email_revised.png"
+                else:
+                    image = render_whatsapp_image(touchpoint["content"], timing=touchpoint["timing"])
+                    filename = f"{session['flow_name']}_step{touchpoint['n']}_whatsapp_revised.png"
+                caption = format_flow_touchpoint_caption(touchpoint, len(result["touchpoints"]))
+                post_rendered_email(bot_token, channel, thread_ts, image, filename, caption)
                 return
 
             # Merge with whatever this thread has ALREADY said, if a flow
@@ -351,18 +412,16 @@ def slack_events_email():
                 clear_pending_email_request(channel, thread_ts)
                 post_message(
                     bot_token, channel, thread_ts=thread_ts,
-                    text="I can draft an andSons email (e.g. \"write the winback email\") or investigate "
-                    "a business signal and draft one (e.g. \"OTC sales are down, write something to fix "
-                    "it\"). For general questions about flows or performance, try @andSons Analytics "
-                    "instead.",
+                    text="I can draft an andSons flow's real touchpoints (e.g. \"write the winback flow\") "
+                    "or investigate a business signal and draft one (e.g. \"OTC sales are down, write "
+                    "something to fix it\"). For general questions about flows or performance, try "
+                    "@andSons Analytics instead.",
                 )
                 return
 
             if intent["mode"] == "insight":
                 question = intent["signal_question"] or combined_text or "Review the attached data and identify what needs addressing."
-                result = run_insight_email_pipeline(
-                    question, NAME_PLACEHOLDER, flow_name=intent["flow_name"], file_context=file_context
-                )
+                result = run_insight_flow_pipeline(question, flow_name=intent["flow_name"], file_context=file_context)
                 if result["needs_flow_clarification"]:
                     save_pending_email_request(channel, thread_ts, pending_texts + [text])
                     post_message(
@@ -376,20 +435,14 @@ def slack_events_email():
                     return
                 clear_pending_email_request(channel, thread_ts)
                 save_email_session(
-                    channel,
-                    thread_ts,
+                    channel, thread_ts,
                     {
                         "flow_name": result["flow_name"],
-                        "rendered_text": result["rendered_text"],
+                        "touchpoints": result["touchpoints"],
                         "feedback_history": [],
                     },
                 )
-                image = render_email_image(result["email"], NAME_PLACEHOLDER)
-                caption = format_email_caption(result, result["flow_name"], NAME_PLACEHOLDER)
-                post_rendered_email(
-                    bot_token, channel, thread_ts, image,
-                    f"{result['flow_name']}.png", caption,
-                )
+                _post_flow_result(bot_token, channel, thread_ts, result, insight=result.get("insight_brief"))
                 return
 
             if not intent["flow_name"]:
@@ -403,22 +456,16 @@ def slack_events_email():
                 return
 
             clear_pending_email_request(channel, thread_ts)
-            result = run_email_pipeline(intent["flow_name"], NAME_PLACEHOLDER, file_context=file_context)
+            result = run_flow_pipeline(intent["flow_name"], file_context=file_context)
             save_email_session(
-                channel,
-                thread_ts,
+                channel, thread_ts,
                 {
                     "flow_name": intent["flow_name"],
-                    "rendered_text": result["rendered_text"],
+                    "touchpoints": result["touchpoints"],
                     "feedback_history": [],
                 },
             )
-            image = render_email_image(result["email"], NAME_PLACEHOLDER)
-            caption = format_email_caption(result, intent["flow_name"], NAME_PLACEHOLDER)
-            post_rendered_email(
-                bot_token, channel, thread_ts, image,
-                f"{intent['flow_name']}.png", caption,
-            )
+            _post_flow_result(bot_token, channel, thread_ts, result)
         except Exception as exc:  # noqa: BLE001 — logged in full, only a clean message goes to Slack
             logger.exception("Error generating email for channel=%s thread_ts=%s", channel, thread_ts)
             post_message(

@@ -17,6 +17,7 @@ from flask_cors import CORS
 
 from agents.analytics_agent import ask_analytics
 from agents.copywriter_agent import parse_email_request
+from agents.visual_qa_agent import review_image
 from agents.feedback_node import (
     revise_flow_touchpoint,
     revise_with_feedback,
@@ -331,7 +332,15 @@ def _post_flow_touchpoint(bot_token: str, channel: str, thread_ts: str, flow_nam
     else:  # push
         image = render_push_image(touchpoint["content"], timing=touchpoint["timing"])
         filename = f"{flow_name}_step{touchpoint['n']}_push.png"
-    caption = format_flow_touchpoint_caption(touchpoint, total)
+
+    # Visual QA: the one check in this pipeline that looks at the actual
+    # rendered image instead of text - catches things the Sweeper's
+    # text-only reasoning can't (cramped layout, a hero that doesn't
+    # actually sit right once rendered, broken spacing). Informational,
+    # like the real system - never blocks the send, just surfaces the note.
+    visual_qa = review_image(image, channel=touchpoint["channel"])
+
+    caption = format_flow_touchpoint_caption(touchpoint, total, visual_qa=visual_qa)
     post_rendered_email(bot_token, channel, thread_ts, image, filename, caption)
 
 

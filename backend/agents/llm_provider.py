@@ -51,7 +51,14 @@ DEFAULT_PROVIDERS = {
     "HEAD_OF_CRM": "groq",
     "COPYWRITER": "groq",
     "CREATIVE_DIRECTOR": "groq",
-    "VISUAL_QA": "groq",
+    # Real constraint, not a preference: Groq has no vision-capable model
+    # in this account (confirmed live - a direct probe call rejects any
+    # multi-part/image message content outright), so Visual QA can only
+    # ever run for real on Anthropic. visual_qa_agent.py checks
+    # anthropic_available() itself before attempting a call, and skips
+    # cleanly (never a hard failure) rather than sending an image to a
+    # model that will just reject the request shape.
+    "VISUAL_QA": "anthropic",
     "SWEEPER": "anthropic",
     "ANALYTICS": "anthropic",
 }
@@ -85,6 +92,15 @@ def _anthropic_available() -> bool:
         logger.warning("Anthropic unavailable (%s) - falling back to Groq until the next recheck.", exc)
         _anthropic_health.update(ok=False, checked_at=now)
         return False
+
+
+def anthropic_available() -> bool:
+    """Public wrapper - lets a caller (visual_qa_agent.py) check ahead of
+    time whether a vision-capable model is actually reachable right now,
+    since Groq has no vision model in this account at all (confirmed live)
+    and get_llm()'s own fallback would otherwise silently hand back a
+    text-only model for a call that needs to send an image."""
+    return _anthropic_available()
 
 
 def get_llm(agent_name: str, temperature: float = 0.0):

@@ -217,7 +217,7 @@ def format_flow_intro(
     return "\n".join(lines)
 
 
-def format_flow_touchpoint_caption(touchpoint: dict, total: int) -> str:
+def format_flow_touchpoint_caption(touchpoint: dict, total: int, visual_qa: Optional[dict] = None) -> str:
     """Plain-text caption for one touchpoint image in a multi-touchpoint
     flow post (see post_rendered_email) - files_upload_v2's initial_comment."""
     channel_label = {"email": "Email", "whatsapp": "WhatsApp", "push": "Push"}.get(touchpoint["channel"], touchpoint["channel"].capitalize())
@@ -229,6 +229,9 @@ def format_flow_touchpoint_caption(touchpoint: dict, total: int) -> str:
     reasons = touchpoint.get("sweeper_reasons")
     if reasons and not touchpoint.get("passed"):
         lines.append("- " + "; ".join(reasons))
+
+    if visual_qa and visual_qa["reviewed"] and not visual_qa["looks_good"]:
+        lines.append(f"Visual QA: {visual_qa['note']}")
 
     if touchpoint["n"] == 1:
         lines.append("Reply with a step number and feedback (e.g. \"2: make this shorter\") to revise that touchpoint.")

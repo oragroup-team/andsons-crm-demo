@@ -197,7 +197,9 @@ def format_email_caption(result: dict, flow_name: str, first_name: str) -> str:
     return "\n".join(lines)
 
 
-def format_flow_intro(flow_name: str, total_touchpoints: int, insight: Optional[dict] = None) -> str:
+def format_flow_intro(
+    flow_name: str, total_touchpoints: int, insight: Optional[dict] = None, crm_brief: Optional[dict] = None,
+) -> str:
     """Posted once, before the touchpoint images, so the thread reads as
     one coherent flow instead of N unexplained images landing in a row."""
     lines = [f"*{flow_name}* - the full real sequence, {total_touchpoints} touchpoint(s):"]
@@ -206,6 +208,12 @@ def format_flow_intro(flow_name: str, total_touchpoints: int, insight: Optional[
         if not insight.get("bigquery_verified"):
             note += " (directional - not fully verified)"
         lines.append(note)
+    if crm_brief:
+        s = crm_brief["structured"]
+        lines.append(
+            f"_Head of CRM brief:_ {s['objective']}\n"
+            f"KPI: {s['kpi']} · Segment: {s['segment']} · Angle: {s['offer_angle']}"
+        )
     return "\n".join(lines)
 
 

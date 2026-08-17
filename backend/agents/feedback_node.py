@@ -18,6 +18,7 @@ from .copywriter_agent import (
     generate_touchpoint,
     pick_flow_for_signal,
 )
+from .head_of_crm_agent import brief_campaign
 from .insight_agent import investigate
 from .sweeper_agent import sweep_email, sweep_push, sweep_whatsapp
 
@@ -180,12 +181,18 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
     re-generating the touchpoints around it (regenerating the whole
     sequence over one failing WhatsApp line would also throw away good
     passing emails, and would risk small wording drift between runs)."""
-    brief_parts = []
-    if insight_brief_text:
-        brief_parts.append(insight_brief_text)
+    # Head of CRM runs FIRST, unconditionally, on every flow build - not
+    # only ones explicitly framed as a business signal (matching the real
+    # pipeline: Head of CRM -> Copywriter is fixed, never skipped). It
+    # turns whatever's known (the flow's real metadata, plus any live
+    # signal that motivated this specific request) into one decisive
+    # commercial brief the Copywriter executes against.
+    crm_brief = brief_campaign(flow_name, signal_context=insight_brief_text)
+
+    brief_parts = [f"CAMPAIGN BRIEF (Head of CRM):\n{crm_brief['brief_text']}"]
     if file_context:
         brief_parts.append(f"DATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}")
-    brief = "\n\n".join(brief_parts) if brief_parts else None
+    brief = "\n\n".join(brief_parts)
     flow_result = generate_flow(flow_name, insight_brief=brief)
 
     prior_summaries = []
@@ -255,6 +262,7 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
         "flow_name": flow_name,
         "touchpoints": final_touchpoints,
         "needs_human_review": any_needs_review,
+        "crm_brief": crm_brief,
     }
 
 

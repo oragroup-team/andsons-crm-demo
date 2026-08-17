@@ -48,7 +48,10 @@ DEFAULT_MODELS = {
 }
 
 DEFAULT_PROVIDERS = {
+    "HEAD_OF_CRM": "groq",
     "COPYWRITER": "groq",
+    "CREATIVE_DIRECTOR": "groq",
+    "VISUAL_QA": "groq",
     "SWEEPER": "anthropic",
     "ANALYTICS": "anthropic",
 }

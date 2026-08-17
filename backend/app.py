@@ -297,7 +297,9 @@ def _post_flow_result(bot_token: str, channel: str, thread_ts: str, flow_result:
     touchpoints = flow_result["touchpoints"]
     post_message(
         bot_token, channel, thread_ts=thread_ts,
-        text=format_flow_intro(flow_result["flow_name"], len(touchpoints), insight=insight),
+        text=format_flow_intro(
+            flow_result["flow_name"], len(touchpoints), insight=insight, crm_brief=flow_result.get("crm_brief"),
+        ),
     )
     for touchpoint in touchpoints:
         _post_flow_touchpoint(bot_token, channel, thread_ts, flow_result["flow_name"], touchpoint, len(touchpoints))

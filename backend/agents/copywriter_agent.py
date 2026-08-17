@@ -52,6 +52,31 @@ def _strip_leading_greeting(line: str) -> str:
     return _LEADING_GREETING_RE.sub("", line).strip()
 
 
+_TRAILING_PUNCT_RE = re.compile(r"[.!?\s]+$")
+
+
+def _normalize_for_dupe_check(text: str) -> str:
+    return _TRAILING_PUNCT_RE.sub("", text.strip().lower())
+
+
+def _drop_cta_duplicate_steps(steps: List[str], cta_text: str) -> Optional[List[str]]:
+    """Defensively drop any what_happens_next step that just repeats the CTA
+    button's own text as an extra numbered step (a real observed failure:
+    the model adding e.g. 'Start My Treatment' as step 4 of what_happens_next
+    on top of the actual CTA button underneath, so the same action is shown
+    twice - a numbered step AND a separate button). Never raises - a step
+    that legitimately mentions similar words ('Confirm your treatment
+    below') but isn't an exact match to the CTA text is left alone."""
+    cta_normalized = _normalize_for_dupe_check(cta_text)
+    kept = [step for step in steps if _normalize_for_dupe_check(step) != cta_normalized]
+    if len(kept) != len(steps):
+        logger.warning(
+            "Dropped a what_happens_next step that duplicated the CTA text %r (had %d steps, now %d).",
+            cta_text, len(steps), len(kept),
+        )
+    return kept or None
+
+
 # The real "P1 Email 1 - Approved Golden Template (mixed style)" doc,
 # Thalia-approved 2026-07-07 - the P1 quality floor and style reference for
 # every flow's tone/restraint. Footer is the real WhatsApp CS link + the
@@ -329,7 +354,10 @@ def _sanitize_content(content: EmailContent) -> EmailContent:
             "preheader": sanitize_text(content.preheader),
             "opening_lines": [sanitize_text(line) for line in content.opening_lines],
             "what_happens_next": (
-                [_strip_leading_number(sanitize_text(step)) for step in content.what_happens_next]
+                _drop_cta_duplicate_steps(
+                    [_strip_leading_number(sanitize_text(step)) for step in content.what_happens_next],
+                    content.cta_text,
+                )
                 if content.what_happens_next
                 else content.what_happens_next
             ),

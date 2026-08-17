@@ -370,26 +370,46 @@ def revise_with_feedback(
     thread, and the new feedback (never the new feedback alone) — same
     principle as the automatic Sweeper feedback loop, but driven by a person
     instead of the Sweeper, and with memory of everything asked for so far.
-    This runs exactly one revision per call (not a retry loop): the human
-    decides when to revise again. The Sweeper still checks the result once,
-    purely for visibility."""
+
+    Retries up to MAX_RETRIES when the Sweeper fails the result, same
+    correction-loop principle as revise_flow_touchpoint()/run_flow_pipeline -
+    this used to ship a Sweeper-failing draft after exactly one attempt,
+    which meant a real, catchable defect went straight to a human instead of
+    a normal automatic retry fixing it first."""
     feedback_history = feedback_history or []
 
-    correction = format_human_feedback(
-        feedback, previous_draft=previous_rendered_text, feedback_history=feedback_history
-    )
-    email = generate_email(flow_name, first_name, correction=correction)
-    rendered = email["rendered_text"]
+    previous_draft = previous_rendered_text
+    sweeper_correction = None
+    email = None
+    sweep = None
 
-    sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"])
-    logger.info(
-        "Human feedback applied (flow=%s, round=%d): %r | sweeper_pass=%s reasons=%s",
-        flow_name,
-        len(feedback_history) + 1,
-        feedback,
-        sweep["pass"],
-        sweep["reasons"],
-    )
+    for attempt_num in range(MAX_RETRIES + 1):  # attempt 0 = the human's ask, 1 and 2 = Sweeper-driven retries
+        correction = format_human_feedback(
+            feedback, previous_draft=previous_draft, feedback_history=feedback_history
+        )
+        if sweeper_correction:
+            correction = correction + "\n\n" + sweeper_correction
+
+        email = generate_email(flow_name, first_name, correction=correction)
+        rendered = email["rendered_text"]
+        sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"])
+        logger.info(
+            "Human feedback applied (flow=%s, round=%d, attempt=%d): %r | sweeper_pass=%s reasons=%s",
+            flow_name,
+            len(feedback_history) + 1,
+            attempt_num + 1,
+            feedback,
+            sweep["pass"],
+            sweep["reasons"],
+        )
+
+        if sweep["pass"] or attempt_num == MAX_RETRIES:
+            break
+
+        previous_draft = rendered
+        sweeper_correction = format_correction(sweep["reasons"])
+
+    rendered = email["rendered_text"]
 
     return {
         "email": email["content"],
@@ -496,7 +516,16 @@ def revise_flow_touchpoint(
     flow - same principle as revise_with_feedback(), but aware of its real
     position in the sequence (touchpoints before it are passed as context,
     same as during generation, so a revision can't accidentally contradict
-    what an earlier touchpoint already said)."""
+    what an earlier touchpoint already said).
+
+    Retries up to MAX_RETRIES when the Sweeper fails the result (same
+    correction-loop principle as run_flow_pipeline/_run_pipeline_loop) -
+    this used to be a single shot that shipped a Sweeper-failing draft
+    straight to Slack labelled "needs review" even when a normal automatic
+    retry would have fixed it. Each retry keeps the human's original
+    feedback in force (grounded on the draft that just came out of the
+    previous attempt) while also handing the Copywriter the Sweeper's exact
+    reasons to fix, same wording generate_flow's own retry loop uses."""
     feedback_history = feedback_history or []
     target = next((t for t in touchpoints if t["n"] == touchpoint_n), None)
     if target is None:
@@ -504,41 +533,57 @@ def revise_flow_touchpoint(
 
     prior_summaries = [_touchpoint_summary(t) for t in touchpoints if t["n"] < touchpoint_n]
     step = {"n": target["n"], "channel": target["channel"], "timing": target["timing"], "intent": target["intent"]}
-    correction = format_human_feedback(
-        feedback, previous_draft=target["rendered_text"], feedback_history=feedback_history
-    )
+    other_heroes = _heroes_from_touchpoints(touchpoints, touchpoint_n)
 
-    try:
-        new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction)
-        other_heroes = _heroes_from_touchpoints(touchpoints, touchpoint_n)
-        sweep = _sweep_touchpoint(new_touchpoint, flow_name, other_heroes=other_heroes)
-    except RuntimeError as exc:
-        # Same real, if rare, exhausted-retry failure as generate_flow() -
-        # a manual retry request itself failing must never crash back to a
-        # raw error either; leaves the touchpoint retryable again.
-        logger.error("Retry of touchpoint %d failed to generate: %s", touchpoint_n, exc)
-        new_touchpoint = {
-            "n": step["n"], "channel": step["channel"], "timing": step["timing"], "intent": step["intent"],
-            "content": None, "rendered_text": None, "hero": None, "generation_failed": True,
-            "passed": False,
-            "sweeper_reasons": ["Content generation failed again - try replying with different wording, or try again in a moment."],
-            "sweeper_severity": "major",
-        }
-        updated_touchpoints = [new_touchpoint if t["n"] == touchpoint_n else t for t in touchpoints]
-        return {
-            "flow_name": flow_name,
-            "touchpoint": new_touchpoint,
-            "touchpoints": updated_touchpoints,
-            "feedback_history": feedback_history + [f"[step {touchpoint_n}] {feedback}"],
-        }
+    previous_draft = target["rendered_text"]
+    sweeper_correction = None
+    new_touchpoint = None
+    sweep = None
+
+    for attempt_num in range(MAX_RETRIES + 1):  # attempt 0 = the human's ask, 1 and 2 = Sweeper-driven retries
+        correction = format_human_feedback(
+            feedback, previous_draft=previous_draft, feedback_history=feedback_history
+        )
+        if sweeper_correction:
+            correction = correction + "\n\n" + sweeper_correction
+
+        try:
+            new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction)
+            sweep = _sweep_touchpoint(new_touchpoint, flow_name, other_heroes=other_heroes)
+        except RuntimeError as exc:
+            # Same real, if rare, exhausted-retry failure as generate_flow() -
+            # a manual retry request itself failing must never crash back to a
+            # raw error either; leaves the touchpoint retryable again.
+            logger.error("Retry of touchpoint %d failed to generate: %s", touchpoint_n, exc)
+            new_touchpoint = {
+                "n": step["n"], "channel": step["channel"], "timing": step["timing"], "intent": step["intent"],
+                "content": None, "rendered_text": None, "hero": None, "generation_failed": True,
+                "passed": False,
+                "sweeper_reasons": ["Content generation failed again - try replying with different wording, or try again in a moment."],
+                "sweeper_severity": "major",
+            }
+            updated_touchpoints = [new_touchpoint if t["n"] == touchpoint_n else t for t in touchpoints]
+            return {
+                "flow_name": flow_name,
+                "touchpoint": new_touchpoint,
+                "touchpoints": updated_touchpoints,
+                "feedback_history": feedback_history + [f"[step {touchpoint_n}] {feedback}"],
+            }
+
+        logger.info(
+            "Human feedback applied to flow=%s touchpoint=%d attempt=%d: %r | sweeper_pass=%s reasons=%s",
+            flow_name, touchpoint_n, attempt_num + 1, feedback, sweep["pass"], sweep["reasons"],
+        )
+
+        if sweep["pass"] or attempt_num == MAX_RETRIES:
+            break
+
+        previous_draft = new_touchpoint["rendered_text"]
+        sweeper_correction = format_correction(sweep["reasons"])
 
     new_touchpoint["passed"] = sweep["pass"]
     new_touchpoint["sweeper_reasons"] = sweep["reasons"]
     new_touchpoint["sweeper_severity"] = sweep["severity"]
-    logger.info(
-        "Human feedback applied to flow=%s touchpoint=%d: %r | sweeper_pass=%s reasons=%s",
-        flow_name, touchpoint_n, feedback, sweep["pass"], sweep["reasons"],
-    )
 
     # Skill Distiller: a real human correction just got successfully
     # applied - turn it into a standing rule so the NEXT flow (any flow,

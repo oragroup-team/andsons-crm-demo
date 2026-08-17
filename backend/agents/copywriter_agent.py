@@ -312,13 +312,14 @@ class EmailContent(BaseModel):
         default=0.0,
         ge=0.0,
         le=1.0,
-        description="Actual horizontal position of the CTA button, as a fraction of the row from flush "
-        "left (0.0, matching the golden template default) to flush right (1.0), 0.5 being dead centre. "
-        "Read what a human reviewer's feedback actually asks for and set the number that genuinely "
-        "matches it - 'centre'/'middle' is 0.5, 'move it right'/'the right side' is around 0.8-1.0, "
-        "'all the way to the rightmost corner' is 1.0, 'just slightly right of centre' is around "
-        "0.6, and so on. Judge the real position being asked for rather than rounding to a fixed set "
-        "of positions - this is a continuous value, not a left/centre/right choice.",
+        description="Where the CTA button actually sits along the row, as a fraction of the space "
+        "between the two margins: 0.0 means its left edge sits flush against the left margin, 1.0 "
+        "means its right edge sits flush against the right margin - that is the entire meaning of the "
+        "number, a plain physical coordinate, nothing else. Default 0.0 (the golden template). When a "
+        "human reviewer gives feedback about where the button should sit, read what they actually "
+        "wrote, picture the real button actually moving on the real page you're looking at, and set "
+        "the number that puts it where a person reading their words would expect to see it land - "
+        "your own genuine read of their intent, not a memorised mapping from stock phrases to numbers.",
     )
     trust_line: Optional[str] = Field(
         default=None,

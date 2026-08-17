@@ -46,9 +46,13 @@ treatment".
 3. Any claim or implication the customer can contact/message the doctor directly - support is customer \
 service via WhatsApp only.
 4. Rx-track copy implying the customer can self-stop or self-change prescribed treatment.
-5. A clinical stat, percentage, or claim without BOTH the source footnote (DOI: 10.1111/dth.12246) AND \
-the sentence "Individual results vary." Also fail any invented/unverifiable statistic, rating, or social \
-proof number - even with a footnote format, a number not grounded in the real approved claim is fabricated.
+5. ANY specific number, percentage, or clinical statistic about hair loss prevalence, treatment efficacy, \
+or outcomes (e.g. "40% of men", "affects 1 in 3") - hard-fail this on sight, with or without a DOI \
+footnote or "Individual results vary." attached. There is no verified figure documented anywhere in this \
+system for the Copywriter to draw from, so any such number in a candidate was invented; a citation-shaped \
+footnote sitting next to a made-up number does not make it real, and is itself worth calling out by name \
+in your reason - do not let a plausible-sounding number with the right footnote format pass just because \
+the format is technically correct.
 6. A price, dollar amount, or discount code mentioned when the flow's track forbids it (see the per-flow \
 rule above).
 7. Missing a working footer: the WhatsApp customer-service line and an unsubscribe line must ALWAYS be \
@@ -164,8 +168,10 @@ A) COMPLIANCE (hard-fail any of these):
 2. Treatment decisions not attributed to the doctor, or the brand speaking as if it prescribes.
 3. Any claim or implication the customer can contact/message the doctor directly.
 4. Rx-track copy implying the customer can self-stop or self-change prescribed treatment.
-5. A clinical stat or claim without both the source footnote (DOI: 10.1111/dth.12246) and "Individual \
-results vary." Also fail any invented/unverifiable statistic or social proof number.
+5. ANY specific number, percentage, or clinical statistic about hair loss prevalence, treatment efficacy, \
+or outcomes - hard-fail this on sight, with or without a DOI footnote attached. There is no verified figure \
+documented anywhere in this system, so any such number in a candidate was invented; a citation-shaped \
+footnote next to a made-up number does not make it real.
 6. A price, dollar amount, or discount code mentioned when the flow's track forbids it (see the rule above).
 7. Cure/guarantee language, shame or fear-based pressure, or fake urgency/countdown framing.
 
@@ -401,8 +407,10 @@ A) COMPLIANCE (hard-fail any of these):
 2. Treatment decisions not attributed to the doctor, or the brand speaking as if it prescribes.
 3. Any claim or implication the customer can contact/message the doctor directly.
 4. Rx-track copy implying the customer can self-stop or self-change prescribed treatment.
-5. A clinical stat or claim without both the source footnote (DOI: 10.1111/dth.12246) and "Individual \
-results vary." Also fail any invented/unverifiable statistic or social proof number.
+5. ANY specific number, percentage, or clinical statistic about hair loss prevalence, treatment efficacy, \
+or outcomes - hard-fail this on sight, with or without a DOI footnote attached. There is no verified figure \
+documented anywhere in this system, so any such number in a candidate was invented; a citation-shaped \
+footnote next to a made-up number does not make it real.
 6. A price, dollar amount, or discount code mentioned when the flow's track forbids it (see the rule above).
 7. Cure/guarantee language, shame or fear-based pressure, or fake urgency/countdown framing.
 

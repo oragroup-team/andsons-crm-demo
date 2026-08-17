@@ -156,8 +156,15 @@ treatment is only ever "your doctor's plan" / "your treatment plan" / "prescript
 support routes through customer service (WhatsApp), never the doctor.
 - Brand name is exactly "andSons" - never "&Sons".
 - Invent nothing: no fabricated statistics, social proof, testimonials, ratings, step counters, badges, \
-seals, deadlines, or features. If a clinical stat is used, it MUST carry a source footnote (DOI: \
-10.1111/dth.12246) plus the sentence "Individual results vary." - never state a stat without both.
+seals, deadlines, or features. NEVER state a specific number, percentage, or clinical statistic about hair \
+loss prevalence, treatment efficacy, or outcomes anywhere in the copy (e.g. "X% of men", "affects 1 in Y") \
+- there is no verified figure available to you in this system, so any such number you write would be \
+invented, regardless of how plausible it sounds or what citation you attach to it. The DOI footnote (DOI: \
+10.1111/dth.12246) and "Individual results vary." exist ONLY to accompany a specific approved statistic \
+handed to you explicitly elsewhere in this prompt (e.g. in the Head of CRM brief) - never write that \
+footnote, or any DOI-shaped citation, on a number you came up with yourself. When you want to make the \
+same point without a real number, say it as a plain, ungraded truth instead (e.g. "hair loss tends to \
+progress over time" rather than "affects 84% of men").
 - No cure/guarantee language ("cure baldness", "guaranteed regrowth", "100% works"). No shame or \
 fear-based pressure. No fake urgency or countdown framing - the only legitimate motivator is the real, \
 calmly-stated fact that hair loss is progressive so starting early protects more of what he still has.
@@ -454,7 +461,7 @@ email exists because of an internal metric.
 - Use it only to decide which real, already-approved benefit or reassurance to lead with, and how much \
 urgency (still never fake urgency) the moment genuinely calls for.
 - Every compliance rule above still applies in full - this context does not unlock a new stat, price, or \
-claim; a clinical stat still needs its DOI footnote regardless of anything mentioned here.
+claim; the ban on inventing a hair-loss percentage/statistic above applies regardless of anything in here.
 
 {brief}
 """

@@ -16,6 +16,7 @@ from flows import FLOW_BY_SLUG, VALID_FLOW_SLUGS
 from image_bank import HERO_BANK, HERO_KEYS
 from text_sanitize import sanitize_text
 
+from .creative_director_agent import direct_touchpoint
 from .llm_provider import get_llm, invoke_with_retry
 
 logger = logging.getLogger("copywriter_agent")
@@ -814,6 +815,20 @@ def generate_flow_email_touchpoint(
         raise RuntimeError(f"Copywriter failed to produce touchpoint {step['n']} ({last_exc}).") from last_exc
 
     content = _sanitize_content(content)
+
+    # Email Creative Director: a genuine second, independent pass that
+    # reviews (and can override) the Copywriter's own hero proposal -
+    # never rewrites the copy itself. Real pipeline step (see
+    # creative_director_agent.py's module docstring); its hero-uniqueness
+    # check is a real second opinion, not just trusting the Copywriter's
+    # own self-restraint against reusing a hero already used elsewhere in
+    # this flow.
+    direction = direct_touchpoint(content.model_dump(), prior_summaries)
+    content = content.model_copy(update={
+        "hero": direction["hero"],
+        "hero_headline": direction["hero_headline"],
+    })
+
     hero_info = resolve_hero(content)
     rendered = render_email(content, "NAME", hero_info=hero_info)
     result_content = content.model_dump()
@@ -823,6 +838,8 @@ def generate_flow_email_touchpoint(
             "hero_image_url": hero_info["hero_image_url"],
             "hero_headline": hero_info["hero_headline"],
             "hero_source": hero_info["hero_source"],
+            "headline": direction.get("headline"),
+            "art_rationale": direction.get("art_rationale"),
         }
     )
     return {

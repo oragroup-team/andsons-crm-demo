@@ -584,6 +584,70 @@ def render_whatsapp(content: WhatsAppContent) -> str:
     return f"[LINK PREVIEW: {content.link_title}]\n\n{content.hook_line}\n{content.body}\n\n[{content.cta_text}]"
 
 
+PUSH_SYSTEM_PROMPT = """You are the senior CRM copywriter for andSons, a 100% online men's health telehealth \
+brand in Singapore. You are writing ONE push notification touchpoint in a real multi-step andSons \
+lifecycle flow - not an email, not a WhatsApp message. A push notification is the shortest touchpoint \
+that exists: it appears on the customer's phone lock screen/notification shade as a title line and a body \
+line, nothing else. No greeting, no signature, no HTML, no link pasted into the text, no CTA button - \
+tapping the notification itself is the only action, so there is nothing else to write.
+
+Use this approved P1 style reference for register only (tone, warmth, restraint - never content, never \
+sentence shapes, never phrases - a push notification looks nothing like this email):
+---
+{golden_reference}
+---
+
+LANGUAGE RULES (absolute): British English spelling everywhere (personalised, customised, recognise, \
+colour, programme) - never American spelling. NEVER use em-dashes or long dashes as punctuation - use \
+full stops or commas. No exclamation marks. Sentence case. No app-speak ("activate", "tap", "unlock").
+
+COMPLIANCE (hard rules): NEVER name a prescription medicine anywhere. Treatment decisions belong to the \
+doctor, never the brand. NEVER claim the customer can message the doctor directly. Brand name is exactly \
+"andSons". Invent nothing: no fabricated stats, social proof, counters, badges, deadlines. No \
+cure/guarantee language, no shame, no fake urgency.
+{price_rule}
+
+NO DEFENSIVE META-COMMENTARY. PAYMENT-FRAMING BAN: never lead with money.
+
+FLOW: {flow_name}
+{flow_brief}
+
+THIS TOUCHPOINT'S MOMENT IN THE FLOW (timing: {timing}): {intent}
+
+{prior_context}
+
+Address the customer as NAME where it's natural to name him at all - a push notification is short enough \
+that many good ones don't need to.
+"""
+
+
+class PushContent(BaseModel):
+    title: str = Field(
+        description="The notification's title line - short and punchy, under about 40 characters so it "
+        "is not cut off on a phone lock screen. A headline, not a greeting - never starts with 'Hi NAME'."
+    )
+    body: str = Field(
+        description="The notification's body line - ONE short sentence, under about 90 characters, shown "
+        "below the title. Can address NAME directly here if it reads naturally."
+    )
+
+
+def _sanitize_push(content: PushContent) -> PushContent:
+    return content.model_copy(
+        update={
+            "title": sanitize_text(content.title),
+            "body": sanitize_text(content.body),
+        }
+    )
+
+
+def render_push(content: PushContent) -> str:
+    """Plain-text rendering of a push touchpoint, in the same
+    Sweeper-readable shape as render_email()/render_whatsapp() - title
+    then body, nothing else (no CTA/link - a push notification has none)."""
+    return f"{content.title}\n{content.body}"
+
+
 def _prior_touchpoints_context(prior: list) -> str:
     if not prior:
         return "This is the FIRST touchpoint in the flow - nothing has been sent yet."
@@ -606,6 +670,24 @@ def _prior_touchpoints_context(prior: list) -> str:
     return "\n".join(lines)
 
 
+def generate_touchpoint(
+    flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
+    insight_brief: Optional[str] = None,
+) -> dict:
+    """Single dispatch point for "generate one touchpoint of whatever
+    channel this step is" - used by generate_flow() below and by
+    feedback_node.py's Sweeper-correction loop and revise_flow_touchpoint(),
+    so all three stay in sync as channels are added instead of each
+    hand-rolling its own if/elif channel dispatch."""
+    if step["channel"] == "email":
+        return generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief)
+    if step["channel"] == "whatsapp":
+        return generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief)
+    if step["channel"] == "push":
+        return generate_flow_push_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief)
+    raise ValueError(f"Unknown channel: {step['channel']!r}")
+
+
 def generate_flow(flow_name: str, insight_brief: Optional[str] = None) -> dict:
     """Generate every real touchpoint in a flow's cadence (flows.py), in
     order, each aware of what earlier touchpoints in the same flow already
@@ -624,10 +706,7 @@ def generate_flow(flow_name: str, insight_brief: Optional[str] = None) -> dict:
 
     for step in flow["cadence"]:
         try:
-            if step["channel"] == "email":
-                touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
-            else:
-                touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
+            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
         except RuntimeError as exc:
             # Real failure mode, not hypothetical: even with a 5-attempt
             # retry (invoke_with_retry), a single touchpoint can still
@@ -670,11 +749,13 @@ def _touchpoint_summary(touchpoint: dict) -> dict:
             "hero": None,
             "summary": "(this step failed to generate and needs a manual retry - nothing was actually sent)",
         }
+    content = touchpoint["content"]
     if touchpoint["channel"] == "email":
-        content = touchpoint["content"]
         summary = f"Subject '{content['subject']}' - {content['opening_lines'][0] if content.get('opening_lines') else ''}"
-    else:
-        summary = f"{touchpoint['content']['hook_line']} {touchpoint['content']['body']}"
+    elif touchpoint["channel"] == "whatsapp":
+        summary = f"{content['hook_line']} {content['body']}"
+    else:  # push
+        summary = f"{content['title']} - {content['body']}"
     return {
         "n": touchpoint["n"],
         "channel": touchpoint["channel"],
@@ -792,6 +873,58 @@ def generate_flow_whatsapp_touchpoint(
     return {
         "n": step["n"],
         "channel": "whatsapp",
+        "timing": step["timing"],
+        "intent": step["intent"],
+        "content": content.model_dump(),
+        "rendered_text": rendered,
+        "hero": None,
+    }
+
+
+def generate_flow_push_touchpoint(
+    flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
+    insight_brief: Optional[str] = None,
+) -> dict:
+    """Generate (or regenerate, with `correction`) ONE push-notification
+    touchpoint of a flow's real cadence. See generate_flow_email_touchpoint()."""
+    flow = FLOW_BY_SLUG[flow_name]
+    flow_brief = _build_flow_brief(flow_name)
+    price_rule = (
+        "" if flow["allow_price"] else
+        "HARD CONSTRAINT: never mention a price, a dollar amount, or a discount code in this notification."
+    )
+    llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
+    structured_llm = llm.with_structured_output(PushContent)
+    system_text = PUSH_SYSTEM_PROMPT.format(
+        golden_reference=GOLDEN_P1_REFERENCE,
+        flow_name=flow_name,
+        flow_brief=flow_brief,
+        timing=step["timing"],
+        intent=step["intent"],
+        price_rule=price_rule,
+        prior_context=_prior_touchpoints_context(prior_summaries),
+    )
+    if insight_brief:
+        system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
+    human_text = f"Write touchpoint {step['n']} ({step['timing']}) of the {flow_name} flow, a push notification for NAME."
+    if correction:
+        human_text += (
+            "\n\nThis is a REVISION. The previous draft of this touchpoint failed brand review. Keep "
+            "every rule above in force and additionally apply this correction:\n" + correction
+        )
+
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+
+    content, last_exc = invoke_with_retry(chain, label="Copywriter push touchpoint call")
+    if content is None:
+        raise RuntimeError(f"Copywriter failed to produce touchpoint {step['n']} ({last_exc}).") from last_exc
+
+    content = _sanitize_push(content)
+    rendered = render_push(content)
+    return {
+        "n": step["n"],
+        "channel": "push",
         "timing": step["timing"],
         "intent": step["intent"],
         "content": content.model_dump(),

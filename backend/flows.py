@@ -17,28 +17,39 @@ Quiz Recovery.
 
 `cadence`: each flow is a real multi-touchpoint MoEngage journey, not one
 email - this is the actual sequence (channel + timing + intent) MoEngage
-Ops builds. Two real sources feed it:
-  - P1's cadence is the exact, fully-specified sequence from the real
-    "MoEngage Setup - P1 Build Packet" (5 touchpoints, timings 0/12h/2d/7d/21d).
-  - The other 9 original flows' cadences come from 03-Segments-Lifecycle.md's
-    real cadence table, which still lists "Push" as a channel from an
-    earlier planning pass. "Agent Prompts - CRM Team.md" (one day newer,
-    and the live n8n system prompt every agent actually runs on) corrects
-    this explicitly and repeatedly: andSons has no app, so push notifications
-    and SMS do not exist - only Email and WhatsApp are real channels. Every
-    "Push" step below is mapped to WhatsApp (the real replacement channel
-    for a short, timely nudge) for that reason - never invented, just
-    reconciled against the more authoritative, more recent source.
-  - P2 (Consult No-Show) has a documented trigger/exit but no separately
-    designed cadence anywhere in the knowledge base - the P1 build packet
-    explicitly says to "reuse this structure" for the other priority flows.
-    Its cadence here is a shorter adaptation of that same real template
-    (immediate email, a WhatsApp nudge, a follow-up email), not a
-    fabrication of numbers that don't exist.
-  - Replenishment/Dunning and Win-back are event-branched in the real docs
-    (different touchpoints fire depending on which sub-event happens, not
-    one fixed timeline) - their cadence lists represent that branching
-    honestly, each step's timing naming which case it belongs to.
+Ops builds.
+
+IMPORTANT CORRECTION (live-audited): the internal knowledge-base docs
+(03-Segments-Lifecycle.md, "Agent Prompts - CRM Team.md") were the only
+source for these cadences until a live audit against the real MoEngage
+Campaigns Search API (core-services/v1/campaigns/search,
+include_child_campaigns=true) became possible. That audit pulled all 600
+real campaigns in the workspace and found: WhatsApp does not exist as a
+channel ANYWHERE in the live account - every real campaign is EMAIL or
+PUSH, contradicting "Agent Prompts - CRM Team.md"'s claim that no push
+channel exists. So:
+  - P1 keeps its WhatsApp touchpoints - that design comes from much more
+    specific real evidence (an actual MoEngage build packet with exact
+    triggers/timings/WABA template spec, plus a real screenshot of a live
+    WhatsApp business message) that reads as a planned redesign not yet
+    published (drafts sit unpublished until MoEngage Ops approves them,
+    per the same build packet), not something contradicted by its absence
+    from currently-live campaigns.
+  - Every other flow's "WhatsApp" step (originally inferred from the now-
+    contradicted "no push" claim, with no flow-specific evidence) is
+    corrected to "push" - the channel real data actually shows.
+  - p3_otc_cart_abandon, p2_consult_no_show, and winback have DIRECT real
+    matches in the live audit (real flow_name, real touchpoint count, real
+    channels - see each flow's own comment below) and are corrected to
+    match exactly, not just channel-swapped.
+  - The real API has no delay/timing data at all (confirmed - the
+    campaigns/search response has no per-step schedule beyond top-level
+    scheduling_details) - every timing value below is still the original
+    knowledge-base estimate, not independently verified.
+  - Flows with no direct real match (the_valley, consult_booking,
+    replenishment_dunning, aov_growth, results_milestone, quiz_recovery)
+    keep their original knowledge-base-derived structure, channel-corrected
+    to push only.
 """
 
 FLOWS = [
@@ -72,10 +83,11 @@ FLOWS = [
         "cta": "Rebook My Consultation",
         "allow_price": False,
         "allow_stat": False,
+        # Real live match: MoEngage flow "No show consultation" - exactly
+        # ONE real campaign ("PN #1: No show nudge", channel PUSH). Matched
+        # exactly rather than kept as an invented multi-step sequence.
         "cadence": [
-            {"n": 1, "channel": "email", "timing": "immediate", "intent": "No judgement, life happens - here's your rebooking link."},
-            {"n": 2, "channel": "whatsapp", "timing": "+24h", "intent": "Short nudge if he hasn't rebooked yet, doctor is ready when he is."},
-            {"n": 3, "channel": "email", "timing": "+4 days", "intent": "Final low-pressure reminder, then exit the flow."},
+            {"n": 1, "channel": "push", "timing": "immediate", "intent": "No judgement, life happens - a short nudge that the doctor is ready when he is."},
         ],
     },
     {
@@ -89,9 +101,12 @@ FLOWS = [
         "cta": "Complete My Order",
         "allow_price": True,
         "allow_stat": True,
+        # Real live match: MoEngage flow "Abandon Cart DC_HL" - exactly TWO
+        # real campaigns, both EMAIL ("HL_Abandon Cart DC_Email1",
+        # "HL_Abandon Cart DC_Email2"). No second channel at all in reality.
         "cadence": [
             {"n": 1, "channel": "email", "timing": "+1h", "intent": "Recover the sale quickly - the product is exactly where he left it."},
-            {"n": 2, "channel": "whatsapp", "timing": "+24h", "intent": "Short reminder nudge if the cart is still sitting there."},
+            {"n": 2, "channel": "email", "timing": "+24h", "intent": "Short reminder nudge if the cart is still sitting there."},
         ],
     },
     {
@@ -107,7 +122,7 @@ FLOWS = [
         "allow_stat": True,
         "cadence": [
             {"n": 1, "channel": "email", "timing": "Day 30", "intent": "Normalise shedding and no visible change yet, reinforce consistency."},
-            {"n": 2, "channel": "whatsapp", "timing": "Day 45", "intent": "Short check-in nudge, still early, keep going."},
+            {"n": 2, "channel": "push", "timing": "Day 45", "intent": "Short check-in nudge, still early, keep going."},
             {"n": 3, "channel": "email", "timing": "Day 55", "intent": "Reinforce the real results timeline, first changes often around Month 3."},
             {"n": 4, "channel": "email", "timing": "Day 75", "intent": "Closing encouragement as he nears the results window."},
         ],
@@ -125,7 +140,7 @@ FLOWS = [
         "allow_stat": False,
         "cadence": [
             {"n": 1, "channel": "email", "timing": "+1h", "intent": "De-stigmatise the consult - private, free, 10-15 minutes with a licensed doctor."},
-            {"n": 2, "channel": "whatsapp", "timing": "+24h", "intent": "Short nudge if he hasn't booked yet."},
+            {"n": 2, "channel": "push", "timing": "+24h", "intent": "Short nudge if he hasn't booked yet."},
             {"n": 3, "channel": "email", "timing": "+2 days", "intent": "Final reminder, then exit the flow."},
         ],
     },
@@ -144,7 +159,7 @@ FLOWS = [
         # different touchpoints fire depending on which sub-event happens.
         "cadence": [
             {"n": 1, "channel": "email", "timing": "-3 days before dispatch (renewal reminder)", "intent": "Calm heads-up that the next delivery is coming, nothing to do unless he wants to change something."},
-            {"n": 2, "channel": "whatsapp", "timing": "on payment failure", "intent": "Practical, judgement-free nudge that a payment didn't go through."},
+            {"n": 2, "channel": "push", "timing": "on payment failure", "intent": "Practical, judgement-free nudge that a payment didn't go through."},
             {"n": 3, "channel": "email", "timing": "on payment failure", "intent": "Same payment-fail case, fuller detail and a clear fix-it link."},
             {"n": 4, "channel": "email", "timing": "on pause or skip", "intent": "Acknowledge the pause/skip plainly, no guilt, door open to resume."},
         ],
@@ -181,7 +196,7 @@ FLOWS = [
         # sequence is visible, labelled with its real trigger condition.
         "cadence": [
             {"n": 1, "channel": "email", "timing": "on trigger (30+ days adherent)", "intent": "Suggest building around the serum with the Trio or Kit as a natural next step, never a hard upsell."},
-            {"n": 2, "channel": "whatsapp", "timing": "if he browsed the Trio/Kit without buying", "intent": "Short, light nudge back to what he was already looking at."},
+            {"n": 2, "channel": "push", "timing": "if he browsed the Trio/Kit without buying", "intent": "Short, light nudge back to what he was already looking at."},
         ],
     },
     {
@@ -197,11 +212,14 @@ FLOWS = [
         "allow_stat": True,
         # Segmented by churn-reason bucket (03-Segments-Lifecycle.md), not
         # one linear timeline - each bucket gets its own single touchpoint
-        # speaking to that specific reason for leaving.
+        # speaking to that specific reason for leaving. Real live match:
+        # "Winback_Subscription_HL_3M_v2" - 3 real campaigns, all EMAIL (a
+        # retry variant + 2 sequential emails) - no WhatsApp/push channel
+        # in reality, so bucket 3 corrected from whatsapp to email.
         "cadence": [
             {"n": 1, "channel": "email", "timing": "bucket: did not see results", "intent": "Reframe the results timeline - first changes often start around Month 3."},
             {"n": 2, "channel": "email", "timing": "bucket: too expensive", "intent": "A clearer, flexible way back - no pricing figures until finance verifies them."},
-            {"n": 3, "channel": "whatsapp", "timing": "bucket: forgot / lapsed", "intent": "Resume in one tap - light, low-effort nudge."},
+            {"n": 3, "channel": "email", "timing": "bucket: forgot / lapsed", "intent": "Resume in one tap - light, low-effort nudge."},
         ],
     },
     {
@@ -217,7 +235,7 @@ FLOWS = [
         "allow_stat": True,
         "cadence": [
             {"n": 1, "channel": "email", "timing": "Month 4", "intent": "Reinforce real progress, proud tone, invite him to share it."},
-            {"n": 2, "channel": "whatsapp", "timing": "Month 4", "intent": "Short warm congratulations nudge."},
+            {"n": 2, "channel": "push", "timing": "Month 4", "intent": "Short warm congratulations nudge."},
             {"n": 3, "channel": "email", "timing": "Month 5", "intent": "Continue the momentum, light UGC/referral invite."},
         ],
     },
@@ -234,7 +252,7 @@ FLOWS = [
         "allow_stat": False,
         "cadence": [
             {"n": 1, "channel": "email", "timing": "+1h", "intent": "Recover the intent gently - answers are saved, finishing takes about two minutes."},
-            {"n": 2, "channel": "whatsapp", "timing": "+24h", "intent": "Short nudge if the quiz is still unfinished."},
+            {"n": 2, "channel": "push", "timing": "+24h", "intent": "Short nudge if the quiz is still unfinished."},
             {"n": 3, "channel": "email", "timing": "+3 days", "intent": "Final low-pressure reminder, then exit the flow."},
         ],
     },

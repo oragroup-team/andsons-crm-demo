@@ -15,12 +15,11 @@ from .copywriter_agent import (
     _touchpoint_summary,
     generate_email,
     generate_flow,
-    generate_flow_email_touchpoint,
-    generate_flow_whatsapp_touchpoint,
+    generate_touchpoint,
     pick_flow_for_signal,
 )
 from .insight_agent import investigate
-from .sweeper_agent import sweep_email, sweep_whatsapp
+from .sweeper_agent import sweep_email, sweep_push, sweep_whatsapp
 
 logger = logging.getLogger("feedback_node")
 logging.basicConfig(level=logging.INFO)
@@ -160,6 +159,18 @@ def run_insight_email_pipeline(
     return result
 
 
+def _sweep_touchpoint(touchpoint: dict, flow_name: str) -> dict:
+    """Single dispatch point for "sweep this touchpoint with whatever
+    channel's rules apply" - mirrors copywriter_agent.generate_touchpoint()."""
+    if touchpoint["channel"] == "email":
+        return sweep_email(touchpoint["rendered_text"], flow_name=flow_name, hero_info=touchpoint["content"])
+    if touchpoint["channel"] == "whatsapp":
+        return sweep_whatsapp(touchpoint["rendered_text"], flow_name=flow_name)
+    if touchpoint["channel"] == "push":
+        return sweep_push(touchpoint["rendered_text"], flow_name=flow_name)
+    raise ValueError(f"Unknown channel: {touchpoint['channel']!r}")
+
+
 def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text: Optional[str] = None) -> dict:
     """Generate the WHOLE real flow - every Email + WhatsApp touchpoint in
     its real MoEngage cadence (flows.py) - not just one email. Each
@@ -201,10 +212,7 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
             continue
 
         while True:
-            if touchpoint["channel"] == "email":
-                sweep = sweep_email(touchpoint["rendered_text"], flow_name=flow_name, hero_info=touchpoint["content"])
-            else:
-                sweep = sweep_whatsapp(touchpoint["rendered_text"], flow_name=flow_name)
+            sweep = _sweep_touchpoint(touchpoint, flow_name)
 
             logger.info(
                 "Flow %s touchpoint %d (%s, %s) attempt %d: pass=%s severity=%s reasons=%s",
@@ -222,10 +230,7 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
             correction = format_correction(sweep["reasons"])
             attempts += 1
             try:
-                if touchpoint["channel"] == "email":
-                    touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
-                else:
-                    touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
+                touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
             except RuntimeError as exc:
                 # Same real failure mode as generate_flow()'s own retry
                 # exhaustion, just hit during a Sweeper-triggered
@@ -391,12 +396,8 @@ def revise_flow_touchpoint(
     )
 
     try:
-        if target["channel"] == "email":
-            new_touchpoint = generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction)
-            sweep = sweep_email(new_touchpoint["rendered_text"], flow_name=flow_name, hero_info=new_touchpoint["content"])
-        else:
-            new_touchpoint = generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction)
-            sweep = sweep_whatsapp(new_touchpoint["rendered_text"], flow_name=flow_name)
+        new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction)
+        sweep = _sweep_touchpoint(new_touchpoint, flow_name)
     except RuntimeError as exc:
         # Same real, if rare, exhausted-retry failure as generate_flow() -
         # a manual retry request itself failing must never crash back to a

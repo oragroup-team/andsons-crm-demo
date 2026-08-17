@@ -212,7 +212,7 @@ def format_flow_intro(flow_name: str, total_touchpoints: int, insight: Optional[
 def format_flow_touchpoint_caption(touchpoint: dict, total: int) -> str:
     """Plain-text caption for one touchpoint image in a multi-touchpoint
     flow post (see post_rendered_email) - files_upload_v2's initial_comment."""
-    channel_label = "Email" if touchpoint["channel"] == "email" else "WhatsApp"
+    channel_label = {"email": "Email", "whatsapp": "WhatsApp", "push": "Push"}.get(touchpoint["channel"], touchpoint["channel"].capitalize())
     lines = [f"*Step {touchpoint['n']}/{total} - {channel_label} - {touchpoint['timing']}*"]
     lines.append(touchpoint["intent"])
 

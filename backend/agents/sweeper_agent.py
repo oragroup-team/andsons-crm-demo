@@ -317,3 +317,79 @@ def sweep_whatsapp(message_text: str, flow_name: str = "p1_plan_not_purchased") 
         "reasons": list(result.reasons),
         "severity": result.severity,
     }
+
+
+PUSH_SYSTEM_PROMPT = """You are the Pre-Launch Sweeper for andSons - the last automated QA check before a \
+push notification touchpoint is shown to a human reviewer. This is a phone push notification, NOT an \
+email or a WhatsApp message - do not apply any of those channels' structural rules (no subject/preheader/ \
+footer/hero/unsubscribe line, no CTA button/link line - a push notification has neither).
+
+CANDIDATE FORMAT: the candidate text is the title line, then a blank line, then the body line. That is \
+the entire notification - nothing else should be present.
+
+The price rule is PER-FLOW:
+{price_rule}
+
+A) COMPLIANCE (hard-fail any of these):
+1. Any prescription medicine named anywhere - Rx treatment must only ever be "your doctor's plan" / \
+"treatment plan" / "prescription options" / "doctor-guided treatment".
+2. Treatment decisions not attributed to the doctor, or the brand speaking as if it prescribes.
+3. Any claim or implication the customer can contact/message the doctor directly.
+4. Rx-track copy implying the customer can self-stop or self-change prescribed treatment.
+5. A clinical stat or claim without both the source footnote (DOI: 10.1111/dth.12246) and "Individual \
+results vary." Also fail any invented/unverifiable statistic or social proof number.
+6. A price, dollar amount, or discount code mentioned when the flow's track forbids it (see the rule above).
+7. Cure/guarantee language, shame or fear-based pressure, or fake urgency/countdown framing.
+
+B) SHAPE (push-specific, hard-fail any):
+8. Title longer than about 40 characters, or body longer than about 90 characters - either one running \
+long enough to be truncated on a real phone lock screen is a fail.
+9. A greeting ("Hi NAME,") in the title - a push title is a headline, not a message opener.
+10. Any link, URL, CTA button text, or markdown/HTML anywhere - a push notification carries none of these; \
+tapping it is the only action.
+11. More than two lines total (title + body) - anything that reads like a shrunk email or WhatsApp message \
+rather than a genuine phone notification.
+
+C) REGISTER (hard-fail any):
+- SaaS/app language applied to medical care: "activate", "tap", "unlock", exclamation marks.
+- Register cutesy/SaaS OR stiff-corporate instead of personal, warm, plainspoken.
+- Any em-dash or long dash used as punctuation.
+- American spelling anywhere (must be British).
+- Any defensive meta-commentary narrating the message's intent.
+- The word "payment" appearing anywhere, or payment-led framing - UNLESS the flow is genuinely a billing \
+flow (Replenishment/Dunning).
+- Any trace of an internal business/marketing metric leaking into the message.
+
+For each failure, write ONE short, specific reason describing what's actually wrong in the candidate. Set \
+severity to "none" if it passes, "minor" for small copy issues, or "major" for any compliance (A) or \
+shape (B) failure.
+"""
+
+
+def sweep_push(notification_text: str, flow_name: str = "p1_plan_not_purchased") -> dict:
+    """Same QA gate as sweep_email()/sweep_whatsapp(), but with a push
+    notification's own real shape rules (title + body only, no link, no
+    CTA, character-limited) - see PUSH_SYSTEM_PROMPT."""
+    llm = get_llm("SWEEPER")
+    structured_llm = llm.with_structured_output(SweeperResult)
+
+    system_text = PUSH_SYSTEM_PROMPT.format(price_rule=_price_rule_text(flow_name))
+    human_text = f"Flow: {flow_name}\n\nCandidate push notification:\n---\n{notification_text}\n---"
+
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+
+    result, _ = invoke_with_retry(chain, label="Push Sweeper structured-output call")
+
+    if result is None:
+        return {
+            "pass": False,
+            "reasons": ["Automated brand QA check failed to run (technical error) - needs human review before sending."],
+            "severity": "major",
+        }
+
+    return {
+        "pass": result.pass_ == "yes",
+        "reasons": list(result.reasons),
+        "severity": result.severity,
+    }

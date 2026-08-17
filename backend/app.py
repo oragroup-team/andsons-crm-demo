@@ -28,6 +28,7 @@ from email_image_renderer import render_email_image
 from file_context import summarize_files
 from flows import VALID_FLOW_SLUGS
 from whatsapp_image_renderer import render_whatsapp_image
+from push_image_renderer import render_push_image
 from slack_integration import (
     append_analytics_exchange,
     clear_pending_email_request,
@@ -322,9 +323,12 @@ def _post_flow_touchpoint(bot_token: str, channel: str, thread_ts: str, flow_nam
     if touchpoint["channel"] == "email":
         image = render_email_image(touchpoint["content"], NAME_PLACEHOLDER)
         filename = f"{flow_name}_step{touchpoint['n']}_email.png"
-    else:
+    elif touchpoint["channel"] == "whatsapp":
         image = render_whatsapp_image(touchpoint["content"], timing=touchpoint["timing"])
         filename = f"{flow_name}_step{touchpoint['n']}_whatsapp.png"
+    else:  # push
+        image = render_push_image(touchpoint["content"], timing=touchpoint["timing"])
+        filename = f"{flow_name}_step{touchpoint['n']}_push.png"
     caption = format_flow_touchpoint_caption(touchpoint, total)
     post_rendered_email(bot_token, channel, thread_ts, image, filename, caption)
 

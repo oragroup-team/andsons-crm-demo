@@ -28,6 +28,12 @@ SECRET_NAME="bigquery-service-account-key"
 # `gcloud secrets create` - see README if any need rotating.
 SLACK_SECRETS="SLACK_EMAIL_SIGNING_SECRET=slack-email-signing-secret:latest,SLACK_EMAIL_BOT_TOKEN=slack-email-bot-token:latest,SLACK_ANALYTICS_SIGNING_SECRET=slack-analytics-signing-secret:latest,SLACK_ANALYTICS_BOT_TOKEN=slack-analytics-bot-token:latest"
 
+# Same durable-storage reasoning as the Slack secrets above - the MoEngage
+# Campaigns Search API key (Settings -> Account -> APIs -> "Campaign
+# report/Business events/..." tile, NOT the same key as MOENGAGE_DATA_API_KEY,
+# which only works for the Analytics Dashboards API).
+MOENGAGE_SECRETS="MOENGAGE_CAMPAIGN_API_KEY=moengage-campaign-api-key:latest"
+
 # --no-cpu-throttling matters here specifically: the Slack webhook handlers
 # ack fast and do the real work (LLM calls, image rendering, the Slack post
 # itself) in a background thread AFTER the HTTP response is sent. Cloud
@@ -47,7 +53,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --region="$REGION" \
   --allow-unauthenticated \
   --env-vars-file=cloudrun-env.yaml \
-  --set-secrets="/secrets/gcp-key.json=${SECRET_NAME}:latest,${SLACK_SECRETS}" \
+  --set-secrets="/secrets/gcp-key.json=${SECRET_NAME}:latest,${SLACK_SECRETS},${MOENGAGE_SECRETS}" \
   --memory=1Gi \
   --timeout=120 \
   --no-cpu-throttling

@@ -177,7 +177,9 @@ STRUCTURE (per email, use judgement - these are OPTIONAL composable blocks, not 
 taken before pointing at the next one.
 - what_happens_next (OPTIONAL): a short numbered block (2-3 short lines) ONLY when it genuinely adds \
 clarity for this moment. Omit it (leave null) for a simpler, more personal email - restraint is the \
-luxury here, not decoration.
+luxury here, not decoration. Its markers (icon or number) default automatically - if a reviewer's \
+feedback specifically asks for a different marker look (e.g. plain bullets), that is the step_marker_style \
+field's job, not something to solve by editing the step text - use that field.
 - trust_line (OPTIONAL): a thin centred line like "Doctor-led plan · Clinically studied · Discreet \
 delivery", plain text separated by " · ", never a description of badge graphics. Include only when it \
 adds confidence; omit for a simpler email.
@@ -284,12 +286,34 @@ class EmailContent(BaseModel):
         "it genuinely adds clarity. Each string is just the step's sentence, with NO leading "
         "number/bullet. Omit (null) for a simpler email.",
     )
+    step_marker_style: Optional[str] = Field(
+        default=None,
+        description="Leave null for the normal default (a content-matched icon, or a plain numbered "
+        "circle when no icon genuinely fits). Only set this when a human reviewer's feedback specifically "
+        "asks for a different visual treatment of the what_happens_next markers - describe, in a few of "
+        "your own plain words, the actual visual thing they asked for (e.g. 'plain round bullet dots, no "
+        "numbers or icons'). This is read by the renderer, not shown to the customer - describe what you "
+        "genuinely understood them to want, don't pick from a fixed list of options.",
+    )
     gentle_truth_line: Optional[str] = Field(
         default=None,
         description="OPTIONAL: one gentle, caring true sentence relevant to this flow's moment (care, "
         "not urgency). Omit if nothing true and relevant fits this flow.",
     )
     cta_text: str = Field(description="The call-to-action button text, e.g. 'Start My Treatment'")
+    cta_position: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Where the CTA button actually sits along the row, as a fraction of the space "
+        "between the two margins: 0.0 means its left edge sits flush against the left margin, 1.0 "
+        "means its right edge sits flush against the right margin - that is the entire meaning of the "
+        "number, a plain physical coordinate, nothing else. Default 0.0 (the golden template). When a "
+        "human reviewer gives feedback about where the button should sit, read what they actually "
+        "wrote, picture the real button actually moving on the real page you're looking at, and set "
+        "the number that puts it where a person reading their words would expect to see it land - "
+        "your own genuine read of their intent, not a memorised mapping from stock phrases to numbers.",
+    )
     trust_line: Optional[str] = Field(
         default=None,
         description="OPTIONAL: short centred trust line, plain text separated by ' · ', e.g. "

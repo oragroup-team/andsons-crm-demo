@@ -358,7 +358,12 @@ def format_human_feedback(
         f"{feedback.strip()}\n\n"
         "Implement this new feedback exactly and completely — every specific REQUIREMENT in it must be "
         "reflected in the new draft (a real fact, number, or detail the feedback asks you to add or "
-        "change must actually appear; don't approximate it, soften it, or address only part of it).\n\n"
+        "change must actually appear; don't approximate it, soften it, or address only part of it). If "
+        "the feedback is about how something LOOKS or is LAID OUT rather than what it says, check whether "
+        "this schema has a dedicated field for that exact thing (e.g. where the CTA button sits, what "
+        "shape the what_happens_next markers are) and set that field directly to your own genuine read of "
+        "what they asked for — don't just describe the visual change in a sentence and leave the field "
+        "untouched, and don't invent a workaround in the text if a real field for it already exists.\n\n"
         "HARD RULE if the feedback includes quoted example wording (\"something like 'X'\", \"e.g. 'X'\"): "
         "that quoted text is a sketch of the KIND of line wanted, not a script — you are BANNED from "
         "reusing more than two or three consecutive words from inside those quotes anywhere in your "
@@ -477,9 +482,12 @@ def _touchpoint_content_summary(t: dict) -> str:
     if content is None:
         return "(failed to generate - nothing to reference)"
     if t["channel"] == "email":
+        position = content.get("cta_position", 0.0) or 0.0
         return (
-            f"subject {content['subject']!r}, hero {content.get('hero')}, CTA button reading "
-            f"{content['cta_text']!r}"
+            f"subject {content['subject']!r}, hero {content.get('hero')}, has a real REPOSITIONABLE CTA "
+            f"BUTTON reading {content['cta_text']!r} currently sitting at horizontal position "
+            f"{position:.2f} (0.0=flush left, 0.5=centre, 1.0=flush right) - the only channel where a "
+            f"request to move/align/reposition 'the button' is even possible"
         )
     if t["channel"] == "whatsapp":
         return (

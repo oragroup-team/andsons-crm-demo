@@ -307,6 +307,14 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     # --- What happens next (numbered circle badges instead of icons - on
     # brand, no icon asset library needed) ---
     steps = content.get("what_happens_next")
+    marker_style_text = (content.get("step_marker_style") or "").lower()
+    # The Copywriter writes step_marker_style as free-form English (its own
+    # understanding of a reviewer's request), not a fixed choice - this is
+    # this renderer's own best-effort read of that free text into one of
+    # the few marker shapes it actually knows how to draw with PIL, not a
+    # menu the Copywriter picks from.
+    force_bullets = any(w in marker_style_text for w in ("bullet", "dot"))
+    force_numbers = "number" in marker_style_text and not force_bullets
     if steps:
         box_top = y + _s(6)
         box_padding = _s(20)
@@ -340,14 +348,22 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
         for i, step in enumerate(steps, start=1):
             badge_cy = inner_y + _s(10)
             badge_cx = MARGIN + box_padding + badge_r
-            icon_fn = _pick_step_icon(step)
+            icon_fn = None if (force_bullets or force_numbers) else _pick_step_icon(step)
             if icon_fn:
                 # A content-appropriate icon (matches the real sent-email
                 # template's line-icon style) - no filled circle backdrop.
                 icon_fn(draw, badge_cx, badge_cy, badge_r * 1.9, COLOR_ACCENT)
+            elif force_bullets:
+                # A reviewer explicitly asked for plain bullets - a small
+                # filled dot, no number inside it.
+                dot_r = badge_r * 0.35
+                draw.ellipse(
+                    [badge_cx - dot_r, badge_cy - dot_r, badge_cx + dot_r, badge_cy + dot_r],
+                    fill=COLOR_ACCENT,
+                )
             else:
-                # No icon genuinely fits this step's content - fall back to
-                # a plain numbered badge rather than forcing a wrong icon.
+                # No icon genuinely fits this step's content (or a reviewer
+                # explicitly asked for numbers) - a plain numbered badge.
                 draw.ellipse(
                     [badge_cx - badge_r, badge_cy - badge_r, badge_cx + badge_r, badge_cy + badge_r],
                     fill=COLOR_ACCENT,
@@ -366,14 +382,20 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
         y = _draw_wrapped(draw, content["gentle_truth_line"], MARGIN, y, body_font, CONTENT_WIDTH, COLOR_TEXT)
         y += _s(20)
 
-    # --- CTA button (flush left, matching the golden template - the real
-    # andSons Copywriter spec has no button-position field at all) ---
+    # --- CTA button (flush left by default, matching the golden template -
+    # a human reviewer can ask to reposition it; the Copywriter judges the
+    # actual position being asked for and records it as
+    # content["cta_position"], a 0.0 (left)-1.0 (right) fraction, rather
+    # than this renderer deciding between a fixed set of named positions -
+    # demo-only scope, not part of the real andSons Copywriter spec) ---
     cta_text = content.get("cta_text", "")
     cta_font = _font(_s(15), "SemiBold")
     btn_padding_x, btn_padding_y = _s(28), _s(14)
     btn_w = draw.textlength(cta_text, font=cta_font) + 2 * btn_padding_x
     btn_h = cta_font.size + 2 * btn_padding_y
-    btn_x = MARGIN
+    cta_position = content.get("cta_position", 0.0) or 0.0
+    available_x = CANVAS_WIDTH - 2 * MARGIN - btn_w
+    btn_x = MARGIN + available_x * cta_position
     draw.rounded_rectangle([btn_x, y, btn_x + btn_w, y + btn_h], radius=_s(6), fill=COLOR_ACCENT)
     draw.text((btn_x + btn_padding_x, y + btn_padding_y - _s(2)), cta_text, font=cta_font, fill=COLOR_WHITE)
     y += btn_h + _s(24)

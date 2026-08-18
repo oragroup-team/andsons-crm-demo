@@ -77,41 +77,47 @@ LIKE '%email%'). orders_utm_source also includes "MoEngage" and "Insider", which
 marketing platforms - include them when a question is about CRM/lifecycle-email impact broadly. This is \
 order-attribution, not send/open/click event data - phrase answers as "email-attributed orders/revenue", \
 never as "opens" or "clicks" (that data doesn't exist here).
-- SPECIFIC LIFECYCLE FLOW TAGS: updated_sales_data.orders_utm_campaign carries real named CRM flow tags \
-you can match with LOWER() LIKE, e.g. "abandoned_cart_v8" (cart-abandon recovery), "winback" (win-back), \
-"WelcomeFlow_New" (welcome flow), "tp_email" (treatment-plan email), "order_approved" (order confirmation) \
-- these let you answer "how much did flow X drive" questions precisely, grounded in the real campaign tag, \
-rather than only the broad orders_utm_medium = email proxy.
-- CAMPAIGN NAME SPRAWL - a real, verified trap, and a MANDATORY procedure to avoid it: a keyword like \
-"winback" is not one campaign tag, it is a whole FAMILY of a hundred-plus distinct exact \
-orders_utm_campaign values sharing that substring (dated variants, product-specific variants like \
-ED/HL/PE/WL, A/B naming - e.g. "winback-ed-30jul", "20260716_PE_Winback_July Winback Drive_Churned \
-Lifetime", "ATM_Churned_Winback (ED)"). Before writing ANY aggregation query that filters \
-orders_utm_campaign by a keyword, reason through this explicitly, in order: \
-(1) run `SELECT COUNT(DISTINCT orders_utm_campaign) FROM ... WHERE LOWER(orders_utm_campaign) LIKE \
-'%keyword%'` with NO LIMIT, to know how many distinct real variants actually exist - if it's more than a \
-handful, that confirms this is a sprawling family, not one tag; \
-(2) the FINAL aggregation query's WHERE clause must use that SAME broad `LOWER(orders_utm_campaign) LIKE \
-'%keyword%'` pattern directly - NEVER enumerate/hardcode a specific list of exact string values (an IN(...) \
-list or several OR'd exact-match conditions), even ones you genuinely saw in an exploratory result, \
-because any list you hand-build will omit real variants your sample didn't happen to show; \
-(3) sanity-check: the aggregation query's own row count should be in the same ballpark as step (1)'s \
-distinct-campaign count context (many more rows than distinct campaigns is expected and fine; a suspiciously \
-small row count for a keyword you just confirmed has 100+ variants is a sign you accidentally narrowed the \
-filter). This exact mistake produced two different answers (SGD 2,787 vs the real, complete SGD 3,912) for \
-the identical real question about the same unchanging historical month - a query answering a fixed \
-historical fact must be reproducible, not vary by which sample got explored.
-- "LIVE FLOWS" / "AUTOMATED FLOWS" / "CRM FLOWS" AS A WHOLE (not one named flow): a real, verified, \
-CRITICAL filter - orders_utm_campaign values starting with the prefix "ATM_" (e.g. "ATM_Abandon Cart \
-DC_HL", "ATM_assg-no-show-consultation-wa1") are the ones actually attributed to an automated/orchestrated \
-CRM flow ("ATM" = automation). A question about how "flows" (plural, general) performed/contributed \
-means orders_utm_campaign LIKE 'ATM_%' - do NOT answer it by summing a whole product category's revenue \
-(Brand/Country/product_category alone) without this filter; that answers a completely different, much \
-larger question (total category revenue, not flow-attributed revenue) and will overstate flow revenue by \
-orders of magnitude. This distinction caused a real, serious incident: a query that omitted this filter \
-reported SGD 258,194 as "hair-loss flow revenue" for a month where the real ATM_-filtered figure was SGD \
-1,005.51 - a ~257x overstatement that was caught and corrected by the actual data team. Never repeat that \
-mistake - when a question is about flows/automation generally, the ATM_ prefix filter is not optional.
+- CRM/FLOW QUESTIONS - USE THE VERIFIED VIEW, NOT RAW orders_utm_campaign MATCHING: for ANY question about \
+a named CRM lifecycle flow (winback, abandoned cart, welcome, treatment-plan email, order confirmation, \
+no-show consultation, prescription renewal, cross-sell) or about "flows"/"automation" as a whole, query \
+`crm-mail-automation-dev.crm_analytics_views.flow_orders` (a view over the real updated_sales_data, same \
+columns, same Brand/Country/Year/Month_Name/Final_Revenue/status you already know, plus three extra \
+pre-verified columns - use it exactly like updated_sales_data with these three added). This view lives in \
+a different project from the one you're connected to, so it will NOT appear in a table-list lookup and a \
+schema-inspection tool call on it will fail (not a sign it doesn't exist, and not a sign the query itself \
+will fail) - do not attempt to inspect it, and do not give up or report no data just because that lookup \
+errors. Query it directly with a real SELECT using its full name and the same column names/types as \
+updated_sales_data (which you already know from these schema notes) plus the three documented below - \
+that SELECT will succeed even though a schema/table-list lookup on this specific table would not:
+  - is_flow_attributed (BOOL): TRUE for any order attributed to an automated/orchestrated CRM flow (the \
+real orders_utm_campaign "ATM_" prefix convention, already resolved for you). Use this ONLY for "all \
+flows/automation as a whole" questions that don't name one specific flow.
+  - flow_family (STRING or NULL): one of 'winback', 'abandoned_cart', 'welcome_onboarding', \
+'treatment_plan_email', 'order_confirmation', 'no_show_consultation', 'prescription_renewal', 'cross_sell', \
+or NULL if the order isn't attributed to one of these named lifecycle flows (could be a paid ad, an \
+affiliate code, a sale promo, etc. - orders_utm_campaign is a much broader marketing-attribution field, not \
+CRM-flow-only). This already accounts for the real sprawl of hundreds of dated/product-specific exact \
+campaign-tag variants sharing a family name (e.g. "winback-ed-30jul", "20260716_PE_Winback_July Winback \
+Drive_Churned Lifetime", "Cart_Recovery_Personalized", "Abandoned Cart_Static" all correctly resolve to \
+their family) - filter on flow_family = 'winback' directly; never try to rebuild this with your own \
+LIKE '%keyword%' guess on the raw table, real variants use inconsistent naming a guessed pattern will miss.
+  CRITICAL - these two are DIFFERENT signals, do not combine them for a named-flow question: a question \
+about ONE named flow ("how much did winback drive") filters on flow_family ALONE - do NOT also require \
+is_flow_attributed, because plenty of real winback (and other named-flow) orders don't happen to carry the \
+ATM_ prefix, so adding that condition silently drops most of the real matching orders down to a tiny sliver \
+(a real, verified case of this exact mistake: combining both conditions for a winback question kept only \
+1 of 88 real matching orders, understating a SGD 3,912 answer as SGD 65). is_flow_attributed is reserved \
+for aggregate "all flows" questions where no single flow_family is named.
+  - is_excluded_status (BOOL): TRUE for refund/cancelled/expired-style statuses (the same default exclusion \
+rule already covered below) - filter WHERE NOT is_excluded_status for the normal case, or include everyone \
+regardless of this flag when a question explicitly asks for a gross/all-orders figure.
+This view exists because both of these were real, verified incidents caught and corrected: (1) a query \
+that skipped the ATM_ automation filter answered "how did flows perform" with the whole hair-loss \
+category's revenue (SGD 258,194) instead of flow-attributed revenue (the real figure, SGD 1,005.51 for \
+that month) - a ~257x overstatement; (2) a guessed LIKE '%keyword%' pattern for a specific flow matched \
+only some of the real campaign-tag variants, undercounting a flow's true revenue by 2-4x depending on the \
+flow, because real variants don't share one consistent substring. Both failure classes are structurally \
+fixed by using this view's pre-verified columns instead of re-deriving the filter logic per question.
 - marketing_spend_data holds spend by Country, Brand, Channel, and month (Spends, Clicks, Impressions), \
 at several Classification levels: "Category-Level" (paired with a Category like 'HL' for Hair Loss, \
 'Weight_Loss', 'Supplements', 'EDPE'), "Overall-Level" (whole-account spend on that channel), and \

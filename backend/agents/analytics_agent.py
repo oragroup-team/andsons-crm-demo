@@ -46,6 +46,18 @@ Malaysia and Philippines) - forgetting this filter silently mixes in other brand
 status, Revenue, Final_Revenue, New_COGS, Order_Type, Revenue_Type, Prescription_Type, Applicable_Discount, \
 Applicable_Cashback, Delivery_Fee, quantity, product_category, created_at). Use this table for standard \
 revenue/order questions.
+- CATEGORY FIELD - a real, verified data-quality trap: updated_sales_data (and its flow_orders view) has \
+BOTH product_category (values like "Hair Loss", "Erectile Dysfunction", "Weight Loss") AND \
+new_product_category (short codes: "HL", "ED", "PE", "Weight_Loss", "Consult", "Well_Being", "SC", \
+"Sexual Health", "Weight_Loss_Program", "Supplements") - these are NOT interchangeable aliases for the \
+same thing. new_product_category is the more complete, corrected field - verified directly: every single \
+row product_category correctly identifies, new_product_category also identifies, PLUS real additional rows \
+product_category misses entirely (confirmed live: product_category = 'Hair Loss' alone undercounted a real \
+flow-revenue answer by about 5% versus the complete figure, and this same gap - product_category missing \
+rows new_product_category catches - holds across every category checked, not just hair loss). ALWAYS \
+filter on new_product_category for any category-scoped question (hair loss, ED, weight loss, etc.) - \
+never product_category alone, and don't assume they'd return the same rows just because they sound like \
+the same categorization.
 - status values are channel-prefixed, e.g. "[Dotcom] DELIVERED", "[Dotcom] PACKED_DISPATCHED", \
 "[Dotcom] PAID_CONSULTATION_ONLY", "[Dotcom] REFUND", "[Dotcom] PAYMENT_EXPIRED", "[Marketplace] \
 Completed", "[Marketplace] Confirmed", "[Marketplace] Cancelled", "[Marketplace] Delivered" - match with \
@@ -463,6 +475,227 @@ def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
     )
 
 
+_FLOW_FAMILIES = (
+    "winback", "abandoned_cart", "welcome_onboarding", "treatment_plan_email",
+    "order_confirmation", "no_show_consultation", "prescription_renewal", "cross_sell",
+)
+_CATEGORY_CODES = ("HL", "ED", "PE", "Weight_Loss", "Consult", "Well_Being", "SC", "Sexual Health", "Weight_Loss_Program", "Supplements")
+_CATEGORY_ALIASES = {
+    "hair loss": "HL", "hairloss": "HL", "hl": "HL",
+    "erectile dysfunction": "ED", "ed": "ED",
+    "premature ejaculation": "PE", "pe": "PE",
+    "weight loss": "Weight_Loss", "weight_loss": "Weight_Loss",
+    "consultation": "Consult", "consult": "Consult",
+    "well being": "Well_Being", "well_being": "Well_Being", "wellbeing": "Well_Being",
+    "skincare": "SC", "sc": "SC",
+    "sexual health": "Sexual Health",
+    "weight loss program": "Weight_Loss_Program", "weight_loss_program": "Weight_Loss_Program",
+    "supplements": "Supplements",
+}
+
+
+def _normalize_category_code(raw: Optional[str]) -> Optional[str]:
+    """Never trust the classifier's raw string directly in SQL - it has
+    been observed returning the human category name ('Hair Loss') instead
+    of the required short code, and once returned brand/country text mixed
+    into the field entirely. Only a recognized code or a known human-name
+    alias is used; anything else is dropped (treated as no category
+    constraint) rather than injected into a query unvalidated."""
+    if not raw:
+        return None
+    if raw in _CATEGORY_CODES:
+        return raw
+    return _CATEGORY_ALIASES.get(raw.strip().lower())
+
+
+def _detect_category_code_in_text(question: str) -> Optional[str]:
+    """Deterministic fallback/cross-check for category detection - this is
+    a closed, known set of category names, so a keyword scan is more
+    reliable than trusting an LLM classifier to extract it correctly every
+    single time (confirmed live: the same classifier, same question, only
+    filled in the category on 1 of 3 calls). Longest alias first so
+    'weight loss program' matches before the shorter 'weight loss'.
+
+    WORD-BOUNDARY matching, never a bare substring check - a real, caught
+    bug: the naive 'alias in text' version matched the short alias 'ed' (=
+    erectile dysfunction) INSIDE the word 'abandonED', silently mis-scoping
+    an abandoned-cart question to the wrong product category entirely. The
+    short 2-3 letter codes (ed, hl, pe, sc) are exactly the ones likely to
+    collide with ordinary English words, so this must never be a plain
+    substring test."""
+    q_lower = question.lower()
+    for alias in sorted(_CATEGORY_ALIASES, key=len, reverse=True):
+        if re.search(r"\b" + re.escape(alias) + r"\b", q_lower):
+            return _CATEGORY_ALIASES[alias]
+    return None
+
+
+def _normalize_flow_family(raw: Optional[str]) -> Optional[str]:
+    """Same principle as _normalize_category_code - the classifier has been
+    observed returning values outside the real enum (e.g. 'live', echoing
+    a word from the question rather than an actual flow family)."""
+    if not raw:
+        return None
+    normalized = raw.strip().lower().replace(" ", "_")
+    return normalized if normalized in _FLOW_FAMILIES else None
+
+
+class _FlowQuestionIntent(BaseModel):
+    is_flow_question: bool = Field(
+        description="True if this question is genuinely about CRM/lifecycle-flow-attributed revenue or "
+        "orders (one named flow, or flows/automation as a whole) - False for a general revenue/category "
+        "question with no flow angle at all."
+    )
+    wants_all_flows: bool = Field(
+        default=False,
+        description="True if the question asks about flows/automation AS A WHOLE (e.g. 'how did our "
+        "flows perform', 'automation revenue this month') - not one named flow. False if a single named "
+        "flow is asked about, or is_flow_question is False.",
+    )
+    named_flow_family: Optional[str] = Field(
+        default=None,
+        description=f"If ONE specific flow is named, which one: {', '.join(_FLOW_FAMILIES)}. Null if "
+        "wants_all_flows is true, or this isn't a flow question.",
+    )
+    product_category_code: Optional[str] = Field(
+        default=None,
+        description=f"If the question scopes to one product category, its short code: {', '.join(_CATEGORY_CODES)} "
+        "(e.g. hair loss is HL, erectile dysfunction is ED). Null if no category is named.",
+    )
+    month_name: Optional[str] = Field(
+        default=None,
+        description="The month name if the question asks about one specific month (e.g. 'July'), "
+        "resolving a relative term like 'last month' against today's real date. Null if no specific "
+        "month is being asked about (e.g. an all-time or 'this year' question).",
+    )
+    year: Optional[int] = Field(
+        default=None,
+        description="The year that goes with month_name (or a bare year if no month is named), resolving "
+        "relative terms against today's real date. Null if no specific year/month is being asked about.",
+    )
+
+
+def _resolve_flow_intent(question: str) -> Optional[_FlowQuestionIntent]:
+    """Independently re-derives what a flow-related question is actually
+    asking - from the question's own words, never from the SQL the agent
+    happened to write - so this verification can't inherit whatever
+    mistake the agent's own query made. Same principle as
+    _resolve_live_data_request(). Fails open (None) on any error."""
+    llm = get_llm("ANALYTICS")
+    structured_llm = llm.with_structured_output(_FlowQuestionIntent)
+    system_text = (
+        f"Today's real date is {date.today().isoformat()}. Determine what this question about andSons "
+        "CRM/business data is actually asking, precisely enough to build the exact right database filter."
+    )
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", "Question: {question}")])
+    chain = prompt | structured_llm
+    try:
+        return chain.invoke({"question": question})
+    except Exception as exc:  # noqa: BLE001 - fail open, no correction attempted
+        logger.warning("Flow-intent resolution failed for %r: %s", question, exc)
+        return None
+
+
+def _verify_flow_orders_answer(question: str, answer: str, sql_query: str) -> Optional[str]:
+    """Deterministic safety net for the flow_orders view specifically - a
+    prompt instruction alone couldn't reliably guarantee the agent applies
+    BOTH is_flow_attributed/flow_family AND new_product_category correctly
+    together on an unfamiliar cross-project view (confirmed live: the exact
+    same question, same code, produced the right answer on some runs and a
+    ~40x-too-large wrong one on others). Rather than trying to detect what
+    the agent's own query got wrong, independently rebuild the correct
+    query from the ORIGINAL QUESTION and compare - this can't inherit a
+    mistake the agent's SQL made, because it never reads that SQL's filter
+    logic at all. Fails open (None - no correction) whenever the question's
+    intent can't be confidently resolved, rather than risk correcting with
+    the wrong scope."""
+    if "flow_orders" not in sql_query:
+        return None
+    try:
+        db = _get_db_cached()
+    except Exception:
+        return None
+
+    intent = _resolve_flow_intent(question)
+    if intent is None or not intent.is_flow_question:
+        return None
+    named_flow_family = _normalize_flow_family(intent.named_flow_family)
+    if not intent.wants_all_flows and not named_flow_family:
+        return None  # ambiguous which flow - don't guess, don't correct
+    category_code = _normalize_category_code(intent.product_category_code) or _detect_category_code_in_text(question)
+    _VALID_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+                      "August", "September", "October", "November", "December")
+    month_name = intent.month_name.strip().capitalize() if intent.month_name else None
+    if month_name not in _VALID_MONTHS:
+        month_name = None
+    year = int(intent.year) if intent.year else None
+    if month_name and not year:
+        # Same real, verified trap as the main agent's own YEAR RESOLUTION
+        # rule (see BIGQUERY_SCHEMA_NOTES) - never guess a year for a
+        # month-only reference, including here in the classifier's own
+        # output. Confirmed live: leaving year unresolved silently summed
+        # a month across every year in the warehouse (2021-present)
+        # instead of the one real year being asked about, corrupting the
+        # very check meant to catch exactly this failure mode. Look up the
+        # most recent year with real data for this scope directly.
+        try:
+            year_probe = ["Brand='AndSons'", "Country='Singapore'", f"Month_Name='{month_name}'"]
+            if category_code:
+                year_probe.append(f"new_product_category='{category_code}'")
+            year_result = db.run(
+                "SELECT MAX(Year) FROM `crm-mail-automation-dev.crm_analytics_views.flow_orders` WHERE "
+                + " AND ".join(year_probe)
+            )
+            year_match = re.search(r"\d{4}", str(year_result))
+            if year_match:
+                year = int(year_match.group())
+        except Exception:
+            logger.warning("Year lookup for month-only flow_orders check failed - proceeding without a year filter.")
+
+    where = ["Brand='AndSons'", "Country='Singapore'"]
+    period = ""
+    if year:
+        where.append(f"Year={year}")
+        period = f" for {year}"
+    if month_name:
+        where.append(f"Month_Name='{month_name}'")
+        period = f" for {month_name} {year}" if year else f" for {month_name}"
+    if category_code:
+        where.append(f"new_product_category='{category_code}'")
+    where.append("NOT is_excluded_status")
+    if intent.wants_all_flows:
+        where.append("is_flow_attributed")
+    else:
+        where.append(f"flow_family='{named_flow_family}'")
+
+    try:
+        canonical_result = db.run(
+            "SELECT ROUND(SUM(Final_Revenue),2) AS total FROM `crm-mail-automation-dev.crm_analytics_views.flow_orders` "
+            "WHERE " + " AND ".join(where)
+        )
+        match = re.search(r"[-\d.]+", str(canonical_result))
+        if not match:
+            # A genuine NULL/no-rows result (str(canonical_result) has no
+            # digits at all, e.g. "[(None,)]") - not an error, just nothing
+            # to correct against.
+            return None
+        canonical_total = float(match.group())
+    except Exception:
+        logger.exception("flow_orders cross-check query failed for intent %r - skipping correction.", intent)
+        return None
+
+    stated_numbers = [float(n) for n in _extract_numbers(answer)]
+    if any(_close(canonical_total, n) for n in stated_numbers):
+        return None  # the agent's own answer already matches the independently-derived correct total
+
+    logger.warning(
+        "flow_orders mismatch for question %r: stated answer had %s, independently-derived correct total is %s - correcting.",
+        question, stated_numbers, canonical_total,
+    )
+    scope_desc = named_flow_family if named_flow_family else "all flow-attributed"
+    return f"SGD {canonical_total:,.2f} ({scope_desc} revenue, independently verified){period}."
+
+
 class _ResolvedQuestion(BaseModel):
     standalone_question: str = Field(
         description="The follow-up question rewritten as a complete, standalone question that makes "
@@ -693,6 +926,17 @@ def ask_analytics(
     correction = _verify_campaign_family_total(answer, sql_query)
     if correction:
         answer = correction
+        verified = True
+
+    # Second, broader safety net specifically for the flow_orders view -
+    # unlike the check above (which reverse-engineers the agent's own SQL),
+    # this independently re-derives the correct answer from the question
+    # itself, so it catches mistakes the agent's SQL made that still look
+    # internally consistent (e.g. correctly using is_flow_attributed but
+    # forgetting new_product_category, or vice versa).
+    view_correction = _verify_flow_orders_answer(effective_question, answer, sql_query)
+    if view_correction:
+        answer = view_correction
         verified = True
 
     return {

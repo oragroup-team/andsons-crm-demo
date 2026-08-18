@@ -158,6 +158,21 @@ writing the answer. A query that returns only raw component counts is not enough
 computed rate/percentage/difference as its own column in the same query or a follow-up query, so the \
 exact number you state is the exact number SQL returned.
 
+SANITY-CHECK YOUR OWN RESULT BEFORE ANSWERING - think like an analyst who'd be embarrassed to be wrong, \
+not like someone reporting whatever a query happened to return: before you finalize a headline number, \
+ask yourself whether it's actually plausible for what was asked. Concrete real example: a query answering \
+"how did our flows perform" returned a number that was actually the ENTIRE product category's revenue \
+because a real filter got dropped - a human analyst who knew the business would have sensed something \
+was off (a specific automation flow's revenue being close to 100% of a whole category's revenue is an \
+immediate red flag, not a headline to report proudly) and gone back to check the filter before answering. \
+Concrete checks worth a second before you answer: does a "flow-specific" or "campaign-specific" number \
+look suspiciously close to a much broader total you could compare it against (category, brand, company-\
+wide) - if so, re-verify the specific filter actually narrowed the population; does a rate/percentage land \
+outside a sane range (e.g. a share over 100%, an open rate above 100%, a negative count); does a total for \
+a short/narrow window look implausibly large relative to a longer/broader one you also computed. If \
+something looks off, re-run the check with a tighter or corrected filter before answering - don't report a \
+number that doesn't pass your own smell test just because SQL executed without an error.
+
 READ-ONLY, NO EXCEPTIONS: you may only ever run SELECT queries. Never write, generate, or attempt an \
 INSERT, UPDATE, DELETE, UPSERT, MERGE, DROP, ALTER, TRUNCATE, CREATE, or REPLACE statement, even if the \
 question asks for it directly or implies fixing/changing a record - if a question asks you to change \
@@ -340,6 +355,18 @@ def _verify_numbers(answer: str, tool_results_text: str) -> bool:
 _CAMPAIGN_LIKE_RE = re.compile(r"orders_utm_campaign\)?\s*\)?\s*LIKE\s*'%([^%']+)%'", re.IGNORECASE)
 _YEAR_EQ_RE = re.compile(r"\bYear\s*=\s*'?(\d{4})'?", re.IGNORECASE)
 _MONTH_EQ_RE = re.compile(r"\bMonth_Name\s*=\s*'([A-Za-z]+)'", re.IGNORECASE)
+_CREATED_AT_GE_RE = re.compile(r"created_at\s*>=\s*DATE\s*'(\d{4}-\d{2}-\d{2})'", re.IGNORECASE)
+_CREATED_AT_LT_RE = re.compile(r"created_at\s*<\s*DATE\s*'(\d{4}-\d{2}-\d{2})'", re.IGNORECASE)
+_REFUND_EXCLUSION_RE = re.compile(r"status\)?\s*\)?\s*NOT\s+LIKE\s*'%refund%'", re.IGNORECASE)
+
+
+def _last(pattern: re.Pattern, text: str):
+    """The LAST match, not the first - an exploratory step earlier in the
+    trace can mention a different year/keyword than the FINAL aggregation
+    that actually produced the stated answer; the final query is reliably
+    the last one run, so its filters are what this check needs to mirror."""
+    matches = list(pattern.finditer(text))
+    return matches[-1] if matches else None
 
 
 def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
@@ -353,10 +380,12 @@ def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
     ourselves (never trusting the model to have done it right) and check
     the answer's stated number actually matches. Returns a corrected
     answer string if a real mismatch is found, else None (nothing to fix -
-    the normal answer stands). Fails open (None) on any error - this is a
-    safety net, not a required step; if it can't run, the existing
-    _verify_numbers check is still the fallback guardrail."""
-    match = _CAMPAIGN_LIKE_RE.search(sql_query)
+    the normal answer stands). Fails open (None) on any error, AND fails
+    open (no correction) whenever the real scope (time period, refund
+    inclusion) can't be confidently reconstructed from the query text -
+    correcting with the wrong scope would make a right answer wrong, which
+    is worse than not correcting at all."""
+    match = _last(_CAMPAIGN_LIKE_RE, sql_query)
     if not match:
         return None
     keyword = match.group(1)
@@ -366,17 +395,42 @@ def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
     except Exception:
         return None
 
-    year_match = _YEAR_EQ_RE.search(sql_query)
-    month_match = _MONTH_EQ_RE.search(sql_query)
+    year_match = _last(_YEAR_EQ_RE, sql_query)
+    month_match = _last(_MONTH_EQ_RE, sql_query)
+    created_ge = _last(_CREATED_AT_GE_RE, sql_query)
+    created_lt = _last(_CREATED_AT_LT_RE, sql_query)
     scope_sql = "WHERE Brand='AndSons' AND Country='Singapore'"
+    period = ""
     if year_match:
         scope_sql += f" AND Year={int(year_match.group(1))}"
-    if month_match:
-        scope_sql += f" AND Month_Name='{month_match.group(1)}'"
-    scope_sql += (
-        " AND LOWER(status) NOT LIKE '%refund%' AND LOWER(status) NOT LIKE '%cancelled%' "
-        "AND LOWER(status) NOT LIKE '%expired%'"
-    )
+        if month_match:
+            scope_sql += f" AND Month_Name='{month_match.group(1)}'"
+            period = f" for {month_match.group(1)} {year_match.group(1)}"
+        else:
+            period = f" for {year_match.group(1)}"
+    elif created_ge or created_lt:
+        # The model used a created_at date-range instead of Year/Month_Name
+        # (against instructions, but it happens) - mirror THAT range rather
+        # than silently dropping the time scope entirely, which would
+        # compare an all-time total against a single-month answer and
+        # "correct" a right answer into a wrong one.
+        if created_ge:
+            scope_sql += f" AND created_at >= DATE '{created_ge.group(1)}'"
+        if created_lt:
+            scope_sql += f" AND created_at < DATE '{created_lt.group(1)}'"
+        period = f" for the same period as the original query"
+    # else: no time scope found anywhere in the trace - assume the question
+    # genuinely was an all-time total (matches the original's own scope).
+
+    # Only exclude refunds/cancellations/expirations if the model's OWN
+    # query already did - mirroring a gross-including-refunds question's
+    # scope exactly, not silently narrowing it to net-of-refunds and
+    # "correcting" a right inclusive answer into a wrong exclusive one.
+    if _REFUND_EXCLUSION_RE.search(sql_query):
+        scope_sql += (
+            " AND LOWER(status) NOT LIKE '%refund%' AND LOWER(status) NOT LIKE '%cancelled%' "
+            "AND LOWER(status) NOT LIKE '%expired%'"
+        )
 
     try:
         canonical_result = db.run(
@@ -397,7 +451,6 @@ def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
         "Campaign-family mismatch for keyword %r: stated answer had %s, complete broad-match total is %s - correcting.",
         keyword, stated_numbers, canonical_total,
     )
-    period = f" for {month_match.group(1)} {year_match.group(1)}" if (year_match and month_match) else ""
     return (
         f"SGD {canonical_total:,.2f} (verified against every real matching '{keyword}' campaign variant, "
         f"not a partial sample){period}."

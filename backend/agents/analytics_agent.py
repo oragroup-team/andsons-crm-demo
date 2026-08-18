@@ -548,9 +548,44 @@ def ask_analytics(
             + moengage_context + "\n---\n\n" + agent_input
         )
 
-    result = agent_executor.invoke({"input": agent_input})
+    # Real, repeatedly-observed failure mode (same class already fixed for
+    # every Copywriter/Sweeper call via invoke_with_retry): a transient Groq
+    # tool-calling hiccup mid-ReAct-loop ("Failed to parse tool call
+    # arguments as JSON", "attempted to call tool X which was not in
+    # request.tools") used to crash this whole call with zero retry - the
+    # caller's broad except still caught it and told the human "something
+    # went wrong", but a real, answerable question shouldn't need a second
+    # manual attempt just because of infra flakiness. Retry here too,
+    # same principle, before giving up with a graceful message instead of
+    # letting the exception propagate.
+    result = None
+    last_exc = None
+    for attempt in range(3):
+        try:
+            result = agent_executor.invoke({"input": agent_input})
+            break
+        except Exception as exc:  # noqa: BLE001 - every attempt logged, final one falls through gracefully
+            last_exc = exc
+            logger.warning("Analytics SQL agent call failed (attempt %d/3): %s", attempt + 1, exc)
+    if result is None:
+        logger.error("Analytics SQL agent failed after 3 attempts: %s", last_exc)
+        return {
+            "answer": "I hit a technical error trying to answer that - worth trying again in a moment, "
+            "or rephrasing the question.",
+            "sql_query": "",
+            "verified": False,
+            "data_source": "bigquery",
+            "moengage_used": moengage_used,
+        }
+
     raw_output = result.get("output", "").strip()
-    if raw_output.lower().startswith("agent stopped due to"):
+    if raw_output.lower().startswith("agent stopped due to") or not raw_output:
+        # Blank output is a real, separate way this can go wrong from the
+        # "agent stopped due to..." message (e.g. the agent's last step
+        # produced no final text) - both get the same graceful fallback
+        # rather than a blank answer silently passing every check below
+        # (an empty string has no numbers to verify, so it would otherwise
+        # come back marked verified=True).
         raw_output = (
             "I couldn't find data to answer that question with what's available in this database. "
             "It may be tracked in a different system, or the question may need to be more specific."

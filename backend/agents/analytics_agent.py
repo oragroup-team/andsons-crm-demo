@@ -81,6 +81,17 @@ you can match with LOWER() LIKE, e.g. "abandoned_cart_v8" (cart-abandon recovery
 "WelcomeFlow_New" (welcome flow), "tp_email" (treatment-plan email), "order_approved" (order confirmation) \
 - these let you answer "how much did flow X drive" questions precisely, grounded in the real campaign tag, \
 rather than only the broad orders_utm_medium = email proxy.
+- "LIVE FLOWS" / "AUTOMATED FLOWS" / "CRM FLOWS" AS A WHOLE (not one named flow): a real, verified, \
+CRITICAL filter - orders_utm_campaign values starting with the prefix "ATM_" (e.g. "ATM_Abandon Cart \
+DC_HL", "ATM_assg-no-show-consultation-wa1") are the ones actually attributed to an automated/orchestrated \
+CRM flow ("ATM" = automation). A question about how "flows" (plural, general) performed/contributed \
+means orders_utm_campaign LIKE 'ATM_%' - do NOT answer it by summing a whole product category's revenue \
+(Brand/Country/product_category alone) without this filter; that answers a completely different, much \
+larger question (total category revenue, not flow-attributed revenue) and will overstate flow revenue by \
+orders of magnitude. This distinction caused a real, serious incident: a query that omitted this filter \
+reported SGD 258,194 as "hair-loss flow revenue" for a month where the real ATM_-filtered figure was SGD \
+1,005.51 - a ~257x overstatement that was caught and corrected by the actual data team. Never repeat that \
+mistake - when a question is about flows/automation generally, the ATM_ prefix filter is not optional.
 - marketing_spend_data holds spend by Country, Brand, Channel, and month (Spends, Clicks, Impressions), \
 at several Classification levels: "Category-Level" (paired with a Category like 'HL' for Hair Loss, \
 'Weight_Loss', 'Supplements', 'EDPE'), "Overall-Level" (whole-account spend on that channel), and \

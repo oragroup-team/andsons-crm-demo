@@ -323,10 +323,103 @@ def run_insight_flow_pipeline(
     return result
 
 
+class _LiveDataRequest(BaseModel):
+    wants_live_data: bool = Field(
+        description="True only if this feedback explicitly asks to check/use REAL, LIVE business data "
+        "(BigQuery, MoEngage, 'the database', 'live data', 'actual numbers') to inform this revision - "
+        "not just 'make it more convincing/compelling' on its own, which is a general creative ask with "
+        "no real data source implied."
+    )
+    query_question: Optional[str] = Field(
+        default=None,
+        description="If wants_live_data: the actual business question to investigate, as one clean "
+        "sentence a data analyst could act on, grounded in this flow's real context (e.g. 'How many "
+        "andSons customers have started treatment in total?'). Null otherwise.",
+    )
+
+
+def _resolve_live_data_request(feedback: str, flow_name: str) -> Optional[str]:
+    """Determines whether a piece of human revision feedback is genuinely
+    asking for a real, live database lookup (BigQuery/MoEngage) - a real
+    reasoning call, same principle as resolve_touchpoint_reference(), not
+    keyword matching. Returns the question to actually investigate, or
+    None. Fails closed (None) on any error - a failed classification just
+    means no live lookup happens, same as before this existed - the
+    revision still proceeds normally without one."""
+    llm = get_llm("HEAD_OF_CRM", temperature=0.0)  # a classification task, not creative writing
+    structured_llm = llm.with_structured_output(_LiveDataRequest)
+    system_text = (
+        f"This is real human revision feedback on the andSons '{flow_name}' CRM flow. Determine whether "
+        "it genuinely asks for real, live business data to be checked and used for this revision, or is "
+        "just a general creative request with no real data source implied."
+    )
+    escaped_feedback = feedback.replace("{", "{{").replace("}", "}}")
+    human_text = f"Feedback: {escaped_feedback}"
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+    result, last_exc = invoke_with_retry(chain, label="Live-data-request resolution call")
+    if result is None:
+        logger.warning("Live-data-request resolution failed (%s) - proceeding without a live lookup.", last_exc)
+        return None
+    if not result.wants_live_data:
+        return None
+    if result.query_question:
+        return result.query_question
+    # Groq sometimes sets the boolean correctly but drops the dependent
+    # field on the same call (same tool-calling quirk seen elsewhere in
+    # this codebase) - a correctly-detected "yes they want live data" must
+    # not get silently discarded just because the follow-up field came back
+    # empty. Fall back to a concrete, answerable question rather than a
+    # vague one an analytics query can't actually resolve (a generic "what
+    # data exists" question reliably comes back empty-handed).
+    return (
+        "How many andSons customers have completed a consultation or started treatment in total? "
+        "What other real aggregate customer numbers exist (signups, bookings, completions) that could "
+        f"work as honest social proof for the '{flow_name}' flow? Context for why this is being asked: {feedback}"
+    )
+
+
+def _run_live_data_lookup(query_question: str) -> str:
+    """Actually calls investigate() (real BigQuery, optionally real
+    MoEngage) and turns the result into a plain-text section for
+    format_human_feedback() - the real fix for the Copywriter inventing a
+    plausible-sounding excuse for why it 'couldn't retrieve' live data it
+    never actually had a way to try to retrieve. Now it genuinely tries,
+    and the outcome (real finding, or a real 'nothing usable came back')
+    is what gets handed to the Copywriter - never fabricated either way."""
+    try:
+        insight = investigate(query_question, file_context="")
+    except Exception:
+        logger.exception("Live data lookup failed for revision question %r", query_question[:120])
+        return (
+            "A live data lookup was just attempted for this request but failed technically (a real "
+            "error, not a missing capability). Do not invent a number or claim you found one - if the "
+            "feedback specifically required real data, say plainly in the note field that the lookup "
+            "failed, and proceed without fabricating a substitute."
+        )
+    if insight.get("bigquery_verified"):
+        return (
+            "A LIVE DATA LOOKUP WAS JUST RUN FOR THIS REQUEST (real, verified BigQuery result):\n"
+            f"{insight['bigquery_answer']}\n"
+            "Use this genuinely if it strengthens the message - as strategic context/angle by default, "
+            "or as a literal number in the copy ONLY if the feedback explicitly asked for a number to "
+            "appear AND this one is customer-safe (a real aggregate/social-proof count, e.g. total "
+            "customers - never an internal engagement/marketing metric, which must never appear in "
+            "customer copy regardless of what was asked). Never invent a different number than this one."
+        )
+    return (
+        "A live data lookup was just attempted for this request but did not return anything "
+        "verified/usable. Do not fabricate a number or claim you found one - if the feedback "
+        "specifically required real data, say plainly in the note field that the lookup ran but "
+        "returned nothing usable, and proceed without inventing a substitute."
+    )
+
+
 def format_human_feedback(
     feedback: str,
     previous_draft: Optional[str] = None,
     feedback_history: Optional[list] = None,
+    live_data_context: Optional[str] = None,
 ) -> str:
     """Turn a human reviewer's free-text note into a structured correction
     instruction. Same rule as format_correction(): never passed to the
@@ -344,6 +437,9 @@ def format_human_feedback(
             "point — you are editing this specific text, not writing a new email from a blank page:\n"
             "---\n" + previous_draft.strip() + "\n---"
         )
+
+    if live_data_context:
+        sections.append(live_data_context)
 
     if feedback_history:
         numbered = "\n".join(f"{i + 1}. {f}" for i, f in enumerate(feedback_history))
@@ -412,6 +508,9 @@ def revise_with_feedback(
     a normal automatic retry fixing it first."""
     feedback_history = feedback_history or []
 
+    query_question = _resolve_live_data_request(feedback, flow_name)
+    live_data_context = _run_live_data_lookup(query_question) if query_question else None
+
     previous_draft = previous_rendered_text
     sweeper_correction = None
     email = None
@@ -419,7 +518,8 @@ def revise_with_feedback(
 
     for attempt_num in range(MAX_RETRIES + 1):  # attempt 0 = the human's ask, 1 and 2 = Sweeper-driven retries
         correction = format_human_feedback(
-            feedback, previous_draft=previous_draft, feedback_history=feedback_history
+            feedback, previous_draft=previous_draft, feedback_history=feedback_history,
+            live_data_context=live_data_context,
         )
         if sweeper_correction:
             correction = correction + "\n\n" + sweeper_correction
@@ -569,6 +669,13 @@ def revise_flow_touchpoint(
     step = {"n": target["n"], "channel": target["channel"], "timing": target["timing"], "intent": target["intent"]}
     other_heroes = _heroes_from_touchpoints(touchpoints, touchpoint_n)
 
+    # Run the live-data lookup (if this feedback genuinely asks for one) ONCE,
+    # not per-retry - a real BigQuery/MoEngage query, same one every retry
+    # attempt reuses, so a flaky reclassification can't silently query twice
+    # with different answers within a single revision.
+    query_question = _resolve_live_data_request(feedback, flow_name)
+    live_data_context = _run_live_data_lookup(query_question) if query_question else None
+
     previous_draft = target["rendered_text"]
     sweeper_correction = None
     new_touchpoint = None
@@ -576,7 +683,8 @@ def revise_flow_touchpoint(
 
     for attempt_num in range(MAX_RETRIES + 1):  # attempt 0 = the human's ask, 1 and 2 = Sweeper-driven retries
         correction = format_human_feedback(
-            feedback, previous_draft=previous_draft, feedback_history=feedback_history
+            feedback, previous_draft=previous_draft, feedback_history=feedback_history,
+            live_data_context=live_data_context,
         )
         if sweeper_correction:
             correction = correction + "\n\n" + sweeper_correction

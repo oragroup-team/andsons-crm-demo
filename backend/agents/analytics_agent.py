@@ -82,6 +82,25 @@ you can match with LOWER() LIKE, e.g. "abandoned_cart_v8" (cart-abandon recovery
 "WelcomeFlow_New" (welcome flow), "tp_email" (treatment-plan email), "order_approved" (order confirmation) \
 - these let you answer "how much did flow X drive" questions precisely, grounded in the real campaign tag, \
 rather than only the broad orders_utm_medium = email proxy.
+- CAMPAIGN NAME SPRAWL - a real, verified trap, and a MANDATORY procedure to avoid it: a keyword like \
+"winback" is not one campaign tag, it is a whole FAMILY of a hundred-plus distinct exact \
+orders_utm_campaign values sharing that substring (dated variants, product-specific variants like \
+ED/HL/PE/WL, A/B naming - e.g. "winback-ed-30jul", "20260716_PE_Winback_July Winback Drive_Churned \
+Lifetime", "ATM_Churned_Winback (ED)"). Before writing ANY aggregation query that filters \
+orders_utm_campaign by a keyword, reason through this explicitly, in order: \
+(1) run `SELECT COUNT(DISTINCT orders_utm_campaign) FROM ... WHERE LOWER(orders_utm_campaign) LIKE \
+'%keyword%'` with NO LIMIT, to know how many distinct real variants actually exist - if it's more than a \
+handful, that confirms this is a sprawling family, not one tag; \
+(2) the FINAL aggregation query's WHERE clause must use that SAME broad `LOWER(orders_utm_campaign) LIKE \
+'%keyword%'` pattern directly - NEVER enumerate/hardcode a specific list of exact string values (an IN(...) \
+list or several OR'd exact-match conditions), even ones you genuinely saw in an exploratory result, \
+because any list you hand-build will omit real variants your sample didn't happen to show; \
+(3) sanity-check: the aggregation query's own row count should be in the same ballpark as step (1)'s \
+distinct-campaign count context (many more rows than distinct campaigns is expected and fine; a suspiciously \
+small row count for a keyword you just confirmed has 100+ variants is a sign you accidentally narrowed the \
+filter). This exact mistake produced two different answers (SGD 2,787 vs the real, complete SGD 3,912) for \
+the identical real question about the same unchanging historical month - a query answering a fixed \
+historical fact must be reproducible, not vary by which sample got explored.
 - "LIVE FLOWS" / "AUTOMATED FLOWS" / "CRM FLOWS" AS A WHOLE (not one named flow): a real, verified, \
 CRITICAL filter - orders_utm_campaign values starting with the prefix "ATM_" (e.g. "ATM_Abandon Cart \
 DC_HL", "ATM_assg-no-show-consultation-wa1") are the ones actually attributed to an automated/orchestrated \
@@ -318,6 +337,73 @@ def _verify_numbers(answer: str, tool_results_text: str) -> bool:
     return True
 
 
+_CAMPAIGN_LIKE_RE = re.compile(r"orders_utm_campaign\)?\s*\)?\s*LIKE\s*'%([^%']+)%'", re.IGNORECASE)
+_YEAR_EQ_RE = re.compile(r"\bYear\s*=\s*'?(\d{4})'?", re.IGNORECASE)
+_MONTH_EQ_RE = re.compile(r"\bMonth_Name\s*=\s*'([A-Za-z]+)'", re.IGNORECASE)
+
+
+def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
+    """Deterministic safety net for the campaign-name-sprawl failure mode
+    (see BIGQUERY_SCHEMA_NOTES) - a prompt instruction alone can't guarantee
+    a probabilistic ReAct SQL agent always builds the complete broad LIKE
+    filter instead of a partial hand-enumerated one it stumbled onto while
+    exploring. If the agent's own query trace used a `LIKE '%keyword%'`
+    filter on orders_utm_campaign anywhere, independently re-run the
+    CANONICAL, guaranteed-complete version of that same aggregation
+    ourselves (never trusting the model to have done it right) and check
+    the answer's stated number actually matches. Returns a corrected
+    answer string if a real mismatch is found, else None (nothing to fix -
+    the normal answer stands). Fails open (None) on any error - this is a
+    safety net, not a required step; if it can't run, the existing
+    _verify_numbers check is still the fallback guardrail."""
+    match = _CAMPAIGN_LIKE_RE.search(sql_query)
+    if not match:
+        return None
+    keyword = match.group(1)
+
+    try:
+        db = _get_db_cached()
+    except Exception:
+        return None
+
+    year_match = _YEAR_EQ_RE.search(sql_query)
+    month_match = _MONTH_EQ_RE.search(sql_query)
+    scope_sql = "WHERE Brand='AndSons' AND Country='Singapore'"
+    if year_match:
+        scope_sql += f" AND Year={int(year_match.group(1))}"
+    if month_match:
+        scope_sql += f" AND Month_Name='{month_match.group(1)}'"
+    scope_sql += (
+        " AND LOWER(status) NOT LIKE '%refund%' AND LOWER(status) NOT LIKE '%cancelled%' "
+        "AND LOWER(status) NOT LIKE '%expired%'"
+    )
+
+    try:
+        canonical_result = db.run(
+            "SELECT ROUND(SUM(Final_Revenue),2) AS total, COUNT(*) AS n "
+            "FROM updated_sales_data " + scope_sql +
+            f" AND LOWER(orders_utm_campaign) LIKE '%{keyword.lower()}%'"
+        )
+        canonical_total = float(re.search(r"[-\d.]+", str(canonical_result)).group())
+    except Exception:
+        logger.exception("Campaign-family cross-check query failed for keyword %r - skipping correction.", keyword)
+        return None
+
+    stated_numbers = [float(n) for n in _extract_numbers(answer)]
+    if any(_close(canonical_total, n) for n in stated_numbers):
+        return None  # the model's own answer already matches the complete total - nothing to fix
+
+    logger.warning(
+        "Campaign-family mismatch for keyword %r: stated answer had %s, complete broad-match total is %s - correcting.",
+        keyword, stated_numbers, canonical_total,
+    )
+    period = f" for {month_match.group(1)} {year_match.group(1)}" if (year_match and month_match) else ""
+    return (
+        f"SGD {canonical_total:,.2f} (verified against every real matching '{keyword}' campaign variant, "
+        f"not a partial sample){period}."
+    )
+
+
 class _ResolvedQuestion(BaseModel):
     standalone_question: str = Field(
         description="The follow-up question rewritten as a complete, standalone question that makes "
@@ -445,7 +531,20 @@ def ask_analytics(
             "isn't available, and do not run a SQL query as a substitute for a metric this doesn't cover "
             "(e.g. don't answer an open-rate question with an order count instead just because SQL has "
             "orders). Still run SQL for anything this data doesn't cover (revenue, order counts), and "
-            "combine both when the question genuinely needs both:\n---\n"
+            "combine both ONLY when the question genuinely needs both. A real, serious mistake this "
+            "caused before: a plain 'how did automation perform this year' question, already fully and "
+            "cleanly answered by one SQL revenue/order total, got padded out with several unrelated "
+            "single-flow chart snippets (daily send/open counts for named flows the question never asked "
+            "about) glued on with no stated relationship to the SQL total - a reader can't tell if those "
+            "numbers are included in, separate from, or overlapping with the real total, which makes the "
+            "whole answer impossible to trust. If the SQL total alone actually answers the question, stop "
+            "there - do not append MoEngage detail just because it happens to be available. Only bring in "
+            "a MoEngage number when it covers something SQL genuinely can't (opens/clicks/delivery rate), "
+            "and when you do, state plainly which exact time period and population it covers so it's "
+            "never confused with a different total in the same answer. Also: MoEngage/BigQuery 'ATM_' "
+            "flows are automation broadly (WhatsApp AND email AND other channels) - never call them "
+            "'automated email flows' collectively unless the question is specifically about the email "
+            "channel; call them 'automated/CRM flows' otherwise.\n---\n"
             + moengage_context + "\n---\n\n" + agent_input
         )
 
@@ -490,6 +589,17 @@ def ask_analytics(
         answer = raw_answer
     else:
         answer = "I couldn't verify that figure - the number in my draft answer didn't trace back to a query result."
+
+    # Deterministic safety net for the campaign-name-sprawl failure mode - a
+    # prompt instruction alone can't guarantee a probabilistic SQL agent
+    # never builds an incomplete filter, so re-check independently rather
+    # than trust it. Runs regardless of the `verified` outcome above (a
+    # partial-match answer traces back to a real query result, so the
+    # generic check alone wouldn't have caught it either).
+    correction = _verify_campaign_family_total(answer, sql_query)
+    if correction:
+        answer = correction
+        verified = True
 
     return {
         "answer": answer,

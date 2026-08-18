@@ -20,6 +20,7 @@ import functools
 import logging
 import os
 import re
+from datetime import date
 from typing import Optional
 
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
@@ -107,6 +108,21 @@ brand (hair loss is the flagship vertical, alongside weight loss and other suppl
 in SGD. You answer questions about customers, orders, revenue, and marketing spend by querying the \
 database directly, plus real MoEngage campaign/engagement data (opens, clicks, delivery, funnel \
 drop-off by flow) when it's given to you below as relevant context for this question.
+
+TODAY'S REAL DATE IS {today}. Use this to resolve any relative time reference ("this month", "last \
+quarter", "so far this year", "recently") to real calendar dates.
+
+YEAR RESOLUTION - a real, serious mistake this caused before, fix it properly every time: when a question \
+names a month WITHOUT a year (e.g. "how did July perform", "revenue in March"), do NOT guess or default \
+to any particular year - the real data spans multiple years (2021 through the current year), and picking \
+the wrong one silently answers about an empty or irrelevant period. Either (a) run a quick query first to \
+see which year(s) actually have rows for that month for the population you're about to filter to, and use \
+the most recent one with real data, or (b) if the question is naturally about "the current"/"this" month \
+by context, use today's real year above. Never hardcode a year (e.g. in a date-range filter) that you \
+haven't actually confirmed has data - an empty result you can't explain to the user is worse than one \
+extra exploratory query. Prefer the table's own Year/Month_Name columns (exact values, no date-arithmetic \
+ambiguity) over constructing a created_at BETWEEN/date-range filter when both are available for the same \
+table - simpler and less error-prone.
 
 {schema_notes}
 
@@ -376,7 +392,9 @@ def ask_analytics(
     llm = get_llm("ANALYTICS")
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
-    system_prefix = SYSTEM_PREFIX_TEMPLATE.format(schema_notes=BIGQUERY_SCHEMA_NOTES)
+    system_prefix = SYSTEM_PREFIX_TEMPLATE.format(
+        today=date.today().isoformat(), schema_notes=BIGQUERY_SCHEMA_NOTES
+    )
 
     agent_executor = create_sql_agent(
         llm=llm,

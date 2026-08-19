@@ -67,6 +67,21 @@ class _MoEngageSummary(BaseModel):
     )
 
 
+class _MoEngageFinding(BaseModel):
+    summary: str = Field(
+        description="Three to six short plain-English sentences reporting what the REAL chart data below "
+        "actually says about this question's engagement-metric angle (opens, clicks, delivery, funnel, "
+        "engagement, flow performance) - this question already contains an explicit reference to one of "
+        "these, so genuinely search for it across the charts rather than defaulting to 'not available'. "
+        "Never invent or estimate a number/trend that isn't really there. Only if, after actually looking, "
+        "truly nothing in these charts covers it, say that plainly in one honest sentence instead - but "
+        "only after really checking, not as a default. Write this as a finished answer a customer-facing "
+        "analyst would say out loud: never say 'chart', 'dashboard', 'data shows', or name a raw metric/"
+        "field label - translate every one into the plain business term. This may be used directly as "
+        "someone's final answer with no further editing."
+    )
+
+
 _PRECHECK_PROMPT = "Question: {question}"
 
 _MOENGAGE_SUMMARY_PROMPT = """You are given the REAL raw data from every chart on every MoEngage \
@@ -75,6 +90,22 @@ analytics dashboard in this workspace ({chart_count} charts total). The question
 
 This workspace covers multiple andSons programs (hair loss, ED, weight loss, etc.), so most charts \
 will be irrelevant to any one question - pick out ONLY the ones whose data actually applies.
+
+Charts (label: raw data):
+{charts}
+"""
+
+_MOENGAGE_FINDING_PROMPT = """You are given the REAL raw data from every chart on every MoEngage analytics \
+dashboard in this workspace ({chart_count} charts total). This question already contains an explicit, real \
+engagement-metric reference (opens, clicks, delivery, funnel, engagement, or flow performance) - it is \
+already known this needs MoEngage data, so your only job is to find and report what the real data actually \
+says, not to decide whether to look. The question motivating this is:
+{question}
+
+This workspace covers multiple andSons programs (hair loss, ED, weight loss, etc.) and this question may \
+also have parts about revenue or orders that these charts don't cover - that's fine, just report the real \
+engagement-metric part genuinely, searching properly across every chart below before concluding nothing \
+applies.
 
 Charts (label: raw data):
 {charts}
@@ -123,46 +154,76 @@ def _might_need_moengage(question: str, llm) -> tuple:
     prompt = ChatPromptTemplate.from_messages([("human", _PRECHECK_PROMPT)])
     chain = prompt | structured_llm
     try:
-        result: _NeedsMoEngage = chain.invoke({"question": question})
+        result: _NeedsMoEngage = _invoke_with_retry(
+            chain, {"question": question}, attempts=3, label="MoEngage relevance pre-check",
+        )
         return result.needs_moengage == "yes", False
     except Exception as exc:  # noqa: BLE001 - fail safe to "skip", BigQuery-only is still a complete answer
         logger.warning("MoEngage relevance pre-check failed for %r: %s", question, exc)
         return False, False
 
 
+def _invoke_with_retry(chain, payload: dict, attempts: int = 5, label: str = "MoEngage LLM call"):
+    """Local retry wrapper - the SAME real, documented Groq failure mode
+    already fixed everywhere else in this codebase via
+    llm_provider.invoke_with_retry (forced tool-calling mode rejects the
+    call outright, 'Tool choice is required, but model did not call a
+    tool', when the model tries to answer in free text instead of the
+    required structured schema), but this file's calls need real per-
+    invocation template variables filled (question/chart data), which
+    invoke_with_retry's own hardcoded chain.invoke({}) doesn't support -
+    so a small local equivalent instead of forcing this file's calls to
+    fit that signature. Real, live-caught bug this fixes: EVERY attempt in
+    the outer relevance-retry loop below was failing with this exact 400
+    error on the same nuanced compound question, consistently, across
+    multiple separate live requests - not sampling noise, a genuine
+    missing-retry gap this file had that every other LLM call site in this
+    codebase already closed. Raises the last exception if every attempt
+    fails - the caller already handles that."""
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return chain.invoke(payload)
+        except Exception as exc:  # noqa: BLE001 - every attempt logged, caller decides final handling
+            last_exc = exc
+            logger.warning("%s failed (attempt %d/%d): %s", label, attempt + 1, attempts, exc)
+    raise last_exc
+
+
 def _summarize_all_snapshots(question: str, snapshots: list, llm, keyword_matched: bool = False) -> _MoEngageSummary:
+    """keyword_matched=True uses a genuinely DIFFERENT, ungated call, not
+    just a stronger hint on the same one - the normal relevant='yes'/'no'
+    gate asks the model to re-decide something this codebase already
+    deterministically knows (the keyword match itself proves engagement
+    data is being asked about), which is pure unnecessary risk once a real
+    per-call retry (below) is handling the actual raw-failure case; skip
+    that gate entirely for this case and only ask it to find and report
+    the real data, using _MoEngageFinding (no relevant field to flake on)."""
     lines = []
     for snap in snapshots:
         if snap["error"]:
             lines.append(f"- {snap['label']}: [unavailable - {snap['error']}]")
         else:
             lines.append(f"- {snap['label']}: {str(snap['data'])[:_PER_CHART_CHAR_CAP]}")
+    charts_text = "\n".join(lines)
 
-    question_text = question
     if keyword_matched:
-        # Real, live-caught bug this guards against: a compound question
-        # ("revenue AND how well are those emails performing in terms of
-        # opens") matched an unambiguous engagement term in the pre-check
-        # keyword list, but this SEPARATE relevance judgment still came back
-        # 'no' both retry attempts, so the answer falsely claimed open-rate
-        # data "isn't captured" - when it demonstrably was, for the exact
-        # same underlying charts, moments earlier on a standalone question.
-        # An explicit nudge here - not a hardcoded override, the model still
-        # makes the real call - measurably reduces that flakiness by naming
-        # what to look for instead of leaving a compound question's
-        # secondary clause to get lost against its primary one.
-        question_text = (
-            f"{question}\n\n(This question was already confirmed to plausibly need MoEngage data - it "
-            "contains a real engagement-metric reference. If it's a compound question, look specifically "
-            "for the part about opens/clicks/delivery/engagement/funnel performance, even if another part "
-            "of the question is really about revenue or orders - relevant='yes' if ANY genuine part of it "
-            "is answered by real chart data here, not only if the whole question is.)"
+        structured_llm = llm.with_structured_output(_MoEngageFinding)
+        prompt = ChatPromptTemplate.from_messages([("human", _MOENGAGE_FINDING_PROMPT)])
+        chain = prompt | structured_llm
+        finding: _MoEngageFinding = _invoke_with_retry(
+            chain, {"question": question, "chart_count": len(snapshots), "charts": charts_text},
+            label="MoEngage finding call",
         )
+        return _MoEngageSummary(relevant="yes", summary=finding.summary)
 
     structured_llm = llm.with_structured_output(_MoEngageSummary)
     prompt = ChatPromptTemplate.from_messages([("human", _MOENGAGE_SUMMARY_PROMPT)])
     chain = prompt | structured_llm
-    return chain.invoke({"question": question_text, "chart_count": len(snapshots), "charts": "\n".join(lines)})
+    return _invoke_with_retry(
+        chain, {"question": question, "chart_count": len(snapshots), "charts": charts_text},
+        label="MoEngage summary call",
+    )
 
 
 def gather_moengage_context(question: str, llm) -> tuple:

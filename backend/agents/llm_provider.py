@@ -28,6 +28,25 @@ Anthropic key doesn't cost a failed API call on every single request, but
 still re-checks periodically - once credits are topped up, the app starts
 using Claude again on its own, without a restart or redeploy.
 
+REQUEST TIMEOUTS - a real, live-caught gap, not a preventive guess: every
+LLM call in this file used to have NO explicit timeout, so a stalled
+connection fell back to the underlying SDK's own default (the `anthropic`
+Python SDK defaults to 10 minutes) - and since every retry helper in this
+codebase (invoke_with_retry, the flow-generation retry loops) only catches
+raised EXCEPTIONS, a call that hangs instead of erroring gets zero benefit
+from any of that retry machinery; it just sits there. Caught live: a real
+Slack flow request generated all its touchpoints successfully, then went
+completely silent for 5+ minutes with no error and nothing ever posted
+back - the one call in that path with no timeout and a real vision+
+thinking payload (visual_qa_agent.review_image, running on the same
+get_llm() this file provides) is the prime suspect. Fixed by passing an
+explicit, generous-but-bounded timeout on every ChatAnthropic/ChatGroq
+instance this file creates (default_request_timeout / request_timeout -
+the real field names, confirmed via direct introspection, not guessed) -
+short enough that a genuine stall gets caught and retried within a normal
+Slack-reply wait, long enough for legitimate slow generations (adaptive
+thinking, a large structured-output schema) to finish normally.
+
 REQUIRED VENDORED PATCH - not tracked by git, must be reapplied if
 backend/vendor/ is ever regenerated/reinstalled: vendor/langchain_anthropic/
 chat_models.py's _format_messages() has a real, confirmed bug for the
@@ -97,6 +116,15 @@ DEFAULT_PROVIDERS = {
 _HEALTH_CHECK_TTL = 300  # 5 min - see module docstring
 _anthropic_health = {"ok": None, "checked_at": 0.0}
 
+# Per-call request timeout (seconds) - see module docstring's REQUEST
+# TIMEOUTS section for why this exists at all. 90s comfortably covers a
+# real structured-output/tool-calling generation with adaptive thinking on
+# (everything observed live this session has completed in well under 30s
+# when actually healthy) while still guaranteeing a stalled call surfaces
+# as a real, retryable exception within a normal Slack-reply wait rather
+# than hanging for the SDK's own much longer default.
+_REQUEST_TIMEOUT_SECONDS = 90.0
+
 
 def _anthropic_available() -> bool:
     """One real, cheap call to confirm Anthropic is actually usable right
@@ -116,7 +144,10 @@ def _anthropic_available() -> bool:
         from langchain_anthropic import ChatAnthropic
 
         # No temperature kwarg here - see get_llm()'s Anthropic branch for why.
-        probe = ChatAnthropic(model=DEFAULT_MODELS["anthropic"], api_key=api_key, max_tokens=4)
+        probe = ChatAnthropic(
+            model=DEFAULT_MODELS["anthropic"], api_key=api_key, max_tokens=4,
+            default_request_timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
         probe.invoke("Hi")
         _anthropic_health.update(ok=True, checked_at=now)
         return True
@@ -158,7 +189,7 @@ def get_llm(agent_name: str, temperature: float = 0.0):
             raise RuntimeError(
                 f"{agent_key}_PROVIDER=groq but GROQ_API_KEY is not set in the environment."
             )
-        return ChatGroq(model=model, temperature=temperature, api_key=api_key)
+        return ChatGroq(model=model, temperature=temperature, api_key=api_key, request_timeout=_REQUEST_TIMEOUT_SECONDS)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
@@ -191,7 +222,10 @@ def get_llm(agent_name: str, temperature: float = 0.0):
         # two layers downstream instead of a clean truncation. Set high
         # enough that thinking + a real structured/tool-calling response
         # both fit comfortably.
-        return ChatAnthropic(model=model, api_key=api_key, max_tokens=16000)
+        return ChatAnthropic(
+            model=model, api_key=api_key, max_tokens=16000,
+            default_request_timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
 
     raise ValueError(f"Unknown provider '{provider}' for agent {agent_key}. Use 'groq' or 'anthropic'.")
 

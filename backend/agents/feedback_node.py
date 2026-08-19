@@ -601,20 +601,26 @@ def revise_with_feedback(
 
 
 class _TouchpointReference(BaseModel):
-    touchpoint_n: Optional[int] = Field(
-        default=None,
-        description="The step number this feedback is clearly about, confidently determined from the "
-        "real content of each touchpoint below (e.g. 'move the button to the right' matches whichever "
-        "touchpoint's real CTA text was actually mentioned or is the only plausible match). Null if it "
-        "doesn't confidently resolve to exactly one step.",
+    touchpoint_ns: List[int] = Field(
+        default_factory=list,
+        description="EVERY real step number this feedback should be applied to, confidently resolved from "
+        "what it actually says and each step's real content below. Put exactly one number here if it's "
+        "about a single step (e.g. 'move the button to the right' matches whichever step's real CTA was "
+        "mentioned, or the only plausible match). Put SEVERAL numbers here - not in candidate_ns below - "
+        "when the feedback EXPLICITLY asks for the same change across more than one step, however it's "
+        "phrased ('in all three steps', 'steps 1, 2 and 3', 'on every step', 'both emails'): that is a "
+        "confident, unambiguous multi-step instruction, not a case that needs asking which one - resolve "
+        "it to every real step number it names or clearly means. Leave empty only if it doesn't confidently "
+        "resolve to any step(s) at all.",
     )
     candidate_ns: List[int] = Field(
         default_factory=list,
-        description="ONLY if touchpoint_n is null because the feedback genuinely matches two or more "
-        "touchpoints equally (e.g. several touchpoints share the same CTA text and nothing else in the "
-        "feedback narrows it down): list every one of those step numbers here, so the person can be asked "
-        "a specific question naming just those steps instead of a generic 'which one'. Leave empty if "
-        "touchpoint_n was resolved, or if the feedback matches nothing at all.",
+        description="ONLY if touchpoint_ns is empty because the feedback is genuinely AMBIGUOUS - it "
+        "matches two or more touchpoints about equally well (e.g. several share the same CTA text and "
+        "nothing else narrows it down) AND it does NOT explicitly ask for all/several of them (that case "
+        "belongs in touchpoint_ns above, not here): list every step number that could plausibly be meant, "
+        "so the person can be asked a specific question naming just those steps. Leave empty if "
+        "touchpoint_ns was resolved, or if the feedback matches nothing at all.",
     )
     reason: str = Field(description="One short line explaining the resolution (or why it's ambiguous/no match).")
 
@@ -648,10 +654,16 @@ def resolve_touchpoint_reference(feedback_text: str, touchpoints: list) -> dict:
     back asking for one when the actual touchpoint content already makes
     it obvious - matches feedback against what each touchpoint's real
     content actually says, the same 'resolve from context before asking'
-    principle as analytics_agent._resolve_followup_question(). Fails open
-    to no-match (touchpoint_n=None, candidate_ns=[]) on any error, so the
-    caller's existing generic clarifying question still works as a
-    fallback rather than the whole reply silently failing."""
+    principle as analytics_agent._resolve_followup_question(). Also tells
+    apart a genuinely AMBIGUOUS reference (real bug caught live: 'in all
+    three steps, move the button to the middle' - and every rephrasing of
+    it - kept getting bounced back asking the person to pick just one,
+    because the old shape had no way to say 'this confidently means
+    several real steps at once', only 'pick one' or 'ask a human to
+    disambiguate' - an explicit multi-step instruction is neither of
+    those). Fails open to no-match (touchpoint_ns=[], candidate_ns=[]) on
+    any error, so the caller's existing generic clarifying question still
+    works as a fallback rather than the whole reply silently failing."""
     lines = [f"- Step {t['n']} ({t['channel']}, {t['timing']}): {_touchpoint_content_summary(t)}" for t in touchpoints]
     llm = get_llm("HEAD_OF_CRM", temperature=0.0)  # a resolution/classification task, not creative writing
     structured_llm = llm.with_structured_output(_TouchpointReference)
@@ -677,7 +689,7 @@ def resolve_touchpoint_reference(feedback_text: str, touchpoints: list) -> dict:
     result, last_exc = invoke_with_retry(chain, label="Touchpoint reference resolution call")
     if result is None:
         logger.warning("Touchpoint reference resolution failed (%s) - falling back to asking directly.", last_exc)
-        return {"touchpoint_n": None, "candidate_ns": [], "reason": "resolution unavailable"}
+        return {"touchpoint_ns": [], "candidate_ns": [], "reason": "resolution unavailable"}
     return result.model_dump()
 
 
@@ -782,6 +794,42 @@ def revise_flow_touchpoint(
         "touchpoint": new_touchpoint,
         "touchpoints": updated_touchpoints,
         "feedback_history": feedback_history + [f"[step {touchpoint_n}] {feedback}"],
+    }
+
+
+def revise_flow_touchpoints(
+    flow_name: str,
+    touchpoints: list,
+    touchpoint_ns: List[int],
+    feedback: str,
+    feedback_history: Optional[list] = None,
+) -> dict:
+    """Human-in-the-loop revision of MULTIPLE existing touchpoints with the
+    SAME feedback in one go - what resolve_touchpoint_reference()'s
+    touchpoint_ns resolves to when a reply explicitly names or means
+    several real steps ('in all three steps...', 'steps 1, 2 and 3...').
+    Applies revise_flow_touchpoint() to each real step in turn, threading
+    the growing touchpoints list and feedback_history through so each
+    step's revision runs against the previous step's already-updated state
+    (matters for anything that reads sibling touchpoints, e.g. hero
+    uniqueness) rather than N independent calls against a stale snapshot.
+    Every step still gets its own full Sweeper retry loop - one step
+    failing never blocks or reverts another's."""
+    feedback_history = feedback_history or []
+    current_touchpoints = touchpoints
+    revised = []
+    for n in touchpoint_ns:
+        step_result = revise_flow_touchpoint(
+            flow_name, current_touchpoints, n, feedback, feedback_history=feedback_history,
+        )
+        current_touchpoints = step_result["touchpoints"]
+        feedback_history = step_result["feedback_history"]
+        revised.append(step_result["touchpoint"])
+    return {
+        "flow_name": flow_name,
+        "revised": revised,
+        "touchpoints": current_touchpoints,
+        "feedback_history": feedback_history,
     }
 
 

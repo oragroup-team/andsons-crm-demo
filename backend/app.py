@@ -23,6 +23,7 @@ from agents.feedback_node import (
     remove_flow_touchpoint,
     resolve_touchpoint_reference,
     revise_flow_touchpoint,
+    revise_flow_touchpoints,
     revise_with_feedback,
     run_email_pipeline,
     run_flow_pipeline,
@@ -467,8 +468,39 @@ def slack_events_email():
                     # content - resolve that first, and only fall back to
                     # asking when it genuinely can't be determined.
                     ref = resolve_touchpoint_reference(feedback_text, session["touchpoints"])
-                    if ref["touchpoint_n"] is not None:
-                        touchpoint_n, touchpoint_feedback = ref["touchpoint_n"], feedback_text
+                    resolved_ns = ref["touchpoint_ns"]
+
+                    if len(resolved_ns) > 1:
+                        # Real, live-caught bug this fixes: "in all three
+                        # steps, move the button to the middle" (and every
+                        # rephrasing of it) used to get bounced back asking
+                        # which ONE step was meant, because the old
+                        # resolution shape had no way to say "confidently
+                        # several steps at once" - only "pick one" or "ask a
+                        # human to disambiguate". This IS resolved, to more
+                        # than one real step - apply it to each and post
+                        # each result, no clarifying question needed.
+                        result = revise_flow_touchpoints(
+                            session["flow_name"], session["touchpoints"], resolved_ns, feedback_text,
+                            feedback_history=session.get("feedback_history", []),
+                        )
+                        save_email_session(
+                            channel, thread_ts,
+                            {
+                                "flow_name": session["flow_name"],
+                                "touchpoints": result["touchpoints"],
+                                "feedback_history": result["feedback_history"],
+                            },
+                        )
+                        for revised_touchpoint in result["revised"]:
+                            _post_flow_touchpoint(
+                                bot_token, channel, thread_ts, session["flow_name"], revised_touchpoint,
+                                len(result["touchpoints"]),
+                            )
+                        return
+
+                    if resolved_ns:
+                        touchpoint_n, touchpoint_feedback = resolved_ns[0], feedback_text
                     elif ref["candidate_ns"]:
                         steps = ", ".join(str(n) for n in ref["candidate_ns"])
                         post_message(

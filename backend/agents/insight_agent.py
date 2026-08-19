@@ -41,7 +41,7 @@ def investigate(question: str, file_context: str = "") -> dict:
     )
     bq_result = ask_analytics(bigquery_question)
 
-    moengage_notes, moengage_relevant = gather_moengage_context(question, get_llm("ANALYTICS"))
+    moengage_notes, moengage_relevant, _ = gather_moengage_context(question, get_llm("ANALYTICS"))
     if not moengage_relevant:
         moengage_notes += " This brief is based on BigQuery sales data only."
 

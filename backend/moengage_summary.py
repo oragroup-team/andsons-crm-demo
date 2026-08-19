@@ -56,7 +56,14 @@ class _MoEngageSummary(BaseModel):
     summary: str = Field(
         description="If relevant='yes': three to six short plain-English sentences describing ONLY what "
         "is actually present in the charts you used - never invent or estimate a number/trend that isn't "
-        "really there, never mention a chart you're not using. If relevant='no': empty string."
+        "really there, never mention a chart you're not using. If relevant='no': empty string. Write this "
+        "as a finished answer a customer-facing analyst would say out loud, not as a description of the "
+        "data source: never say 'chart', 'dashboard', 'data shows', or name a raw metric/field label - "
+        "translate every one into the plain business term (e.g. a chart tracking step-1-to-step-2 dropoff "
+        "on a winback flow becomes 'winback emails that get a response', not a description of the chart). "
+        "This may be used directly as someone's final answer with no further editing, so it must already "
+        "read like one: lead with the headline finding, plain and confident, zero trace it came from a "
+        "chart at all."
     )
 
 
@@ -128,25 +135,32 @@ def _summarize_all_snapshots(question: str, snapshots: list, llm) -> _MoEngageSu
 
 
 def gather_moengage_context(question: str, llm) -> tuple:
-    """Returns (text, relevant). `relevant` is the only signal callers
-    should use to decide whether real MoEngage data actually informed the
-    answer - never infer it from `text`'s wording, which exists purely for
-    display/context and can describe a "nothing relevant" outcome in
-    several different ways."""
+    """Returns (text, relevant, raw_summary). `relevant` is the only signal
+    callers should use to decide whether real MoEngage data actually
+    informed the answer - never infer it from `text`'s wording, which
+    exists purely for display/context (it names chart counts, deliberately,
+    for a downstream agent's own transparency) and can describe a "nothing
+    relevant" outcome in several different ways. `raw_summary` is the plain,
+    customer-voiced finding alone (empty string if not relevant) - safe to
+    use directly as a final answer with no further editing (unlike `text`,
+    it never mentions charts/dashboards - see _MoEngageSummary.summary's
+    own docstring), for a caller that determined MoEngage is the ONLY
+    source this question needs and there is nothing to hand off to another
+    agent to translate."""
     if not moengage_client.is_configured():
-        return "MoEngage is not connected.", False
+        return "MoEngage is not connected.", False, ""
 
     if not _might_need_moengage(question, llm):
-        return "MoEngage was not checked - this question doesn't look like it needs campaign/engagement data.", False
+        return "MoEngage was not checked - this question doesn't look like it needs campaign/engagement data.", False, ""
 
     try:
         snapshots = moengage_client.get_all_chart_snapshots()
     except Exception as exc:  # noqa: BLE001 - report, don't propagate
         logger.warning("Failed to fetch MoEngage chart snapshots: %s", exc)
-        return f"MoEngage is connected but the chart fetch failed ({exc}).", False
+        return f"MoEngage is connected but the chart fetch failed ({exc}).", False, ""
 
     if not snapshots:
-        return "MoEngage is connected but has no dashboards/charts yet.", False
+        return "MoEngage is connected but has no dashboards/charts yet.", False, ""
 
     failed = [s for s in snapshots if s["error"]]
     # Up to 2 tries: caught live, this specific judgment ("is any chart
@@ -166,11 +180,11 @@ def gather_moengage_context(question: str, llm) -> tuple:
             break
 
     if result is None:
-        return f"MoEngage is connected ({len(snapshots)} charts pulled) but the summary step failed.", False
+        return f"MoEngage is connected ({len(snapshots)} charts pulled) but the summary step failed.", False, ""
     if result.relevant != "yes":
-        return f"Checked all {len(snapshots)} MoEngage charts - none are relevant to this question.", False
+        return f"Checked all {len(snapshots)} MoEngage charts - none are relevant to this question.", False, ""
 
     notes = f"MoEngage campaign/engagement data ({len(snapshots)} charts checked):\n{result.summary}"
     if failed:
         notes += f"\n({len(failed)} chart(s) could not be fetched and were excluded.)"
-    return notes, True
+    return notes, True, result.summary

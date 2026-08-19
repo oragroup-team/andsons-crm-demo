@@ -820,6 +820,43 @@ def _resolve_followup_question(question: str, conversation_history: list, llm) -
         return question
 
 
+class _MoEngageExclusive(BaseModel):
+    moengage_only: bool = Field(
+        description="True ONLY if this question is entirely about MoEngage campaign/engagement metrics "
+        "(opens, clicks, delivery rate, funnel drop-off) and needs NOTHING from the sales database at all "
+        "- no revenue, no order count, no customer count, no spend, not even as a comparison or share. "
+        "False if answering it needs a database query for anything, even partially alongside MoEngage "
+        "data, or if you're genuinely not sure."
+    )
+
+
+def _is_moengage_exclusive(question: str, llm) -> bool:
+    """Only called once MoEngage relevance is already confirmed (see
+    gather_moengage_context) - decides whether the SQL agent needs to run
+    AT ALL for this specific question, so a genuinely MoEngage-only
+    question (e.g. 'what's our winback open rate') can skip BigQuery
+    entirely instead of it running unconditionally on every question
+    regardless of relevance. Real gap this fixes: MoEngage already had a
+    real relevance gate (gather_moengage_context's pre-check) before this
+    existed, but BigQuery's SQL agent had none at all - it built and ran
+    the full ReAct loop on every single question, even ones with nothing
+    for a database to answer, relying entirely on a prompt instruction
+    ('don't run SQL as a substitute') to keep it from padding the answer
+    with an irrelevant query - the same class of reliability gap this
+    codebase's own deterministic safety nets exist to close everywhere
+    else. Fails closed (False - query BigQuery too) on any error, since
+    BigQuery is this system's broad default source and skipping it
+    wrongly is a worse mistake than an unnecessary query."""
+    structured_llm = llm.with_structured_output(_MoEngageExclusive)
+    prompt = ChatPromptTemplate.from_messages([("human", "Question: {question}")])
+    chain = prompt | structured_llm
+    try:
+        return chain.invoke({"question": question}).moengage_only
+    except Exception as exc:  # noqa: BLE001 - fail closed to the safer default (query BigQuery too)
+        logger.warning("MoEngage-exclusive check failed for %r: %s - querying BigQuery too, to be safe.", question, exc)
+        return False
+
+
 def ask_analytics(
     question: str, conversation_history: Optional[list] = None, file_context: Optional[str] = None
 ) -> dict:
@@ -839,6 +876,49 @@ def ask_analytics(
     if _contains_write_operation(question):
         return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": "bigquery", "moengage_used": False}
 
+    llm = get_llm("ANALYTICS")
+
+    # Resolve a follow-up ("what about for hair loss specifically") into a
+    # complete standalone question BEFORE anything else - this is what the
+    # source-selection reasoning below, the SQL agent, and number-
+    # verification all actually work from, so topic continuity is settled
+    # once up front rather than re-litigated (unreliably) inside one giant
+    # combined prompt. effective_question is used for processing; `question`
+    # (the human's literal text) is still what gets logged to history.
+    effective_question = question
+    if conversation_history:
+        effective_question = _resolve_followup_question(question, conversation_history, llm)
+        if effective_question != question:
+            logger.info("Resolved follow-up %r -> %r", question, effective_question)
+
+    # SOURCE SELECTION - reasoned, not a hard constraint to query both: real
+    # gap this closes (previously) - MoEngage already had a genuine
+    # relevance gate (gather_moengage_context's own pre-check), but BigQuery
+    # had none at all, so the SQL agent ran unconditionally on every single
+    # question regardless of whether a database had anything to do with it.
+    # gather_moengage_context decides MoEngage relevance first (cheap
+    # pre-check before paying the ~40-50s full-fetch cost); when it IS
+    # relevant, _is_moengage_exclusive then decides whether BigQuery is
+    # needed AT ALL for this specific question, so a genuinely
+    # MoEngage-only question can skip the SQL agent entirely rather than
+    # relying purely on a prompt instruction to keep it from padding the
+    # answer with an irrelevant query.
+    moengage_context, moengage_used, moengage_raw_summary = gather_moengage_context(effective_question, llm)
+    skip_bigquery = moengage_used and _is_moengage_exclusive(effective_question, llm)
+
+    if skip_bigquery:
+        raw_answer = sanitize_text(moengage_raw_summary)
+        if _contains_pii(raw_answer):
+            return {"answer": PII_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": "moengage", "moengage_used": True}
+        verified = _verify_numbers(raw_answer, moengage_context)
+        answer = raw_answer if verified else (
+            "I couldn't verify that figure - the number in my draft answer didn't trace back to a real chart result."
+        )
+        return {"answer": answer, "sql_query": "", "verified": verified, "data_source": "moengage", "moengage_used": True}
+
+    # Only reachable once source selection above has already decided this
+    # question genuinely needs the database - a BigQuery outage no longer
+    # blocks a question the database was never going to be needed for.
     try:
         db = _get_db_cached()
     except Exception:
@@ -849,10 +929,9 @@ def ask_analytics(
             "sql_query": "",
             "verified": False,
             "data_source": "bigquery",
-            "moengage_used": False,
+            "moengage_used": moengage_used,
         }
 
-    llm = get_llm("ANALYTICS")
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
     system_prefix = SYSTEM_PREFIX_TEMPLATE.format(
@@ -868,19 +947,6 @@ def ask_analytics(
         agent_executor_kwargs={"return_intermediate_steps": True},
     )
 
-    # Resolve a follow-up ("what about for hair loss specifically") into a
-    # complete standalone question BEFORE anything else - this is what the
-    # MoEngage relevance check, the SQL agent, and number-verification all
-    # actually work from, so topic continuity is settled once up front
-    # rather than re-litigated (unreliably) inside one giant combined
-    # prompt. effective_question is used for processing; `question` (the
-    # human's literal text) is still what gets logged to history.
-    effective_question = question
-    if conversation_history:
-        effective_question = _resolve_followup_question(question, conversation_history, llm)
-        if effective_question != question:
-            logger.info("Resolved follow-up %r -> %r", question, effective_question)
-
     agent_input = (
         "Never copy a number from prior knowledge - always compute the answer with a fresh query:\n"
         + effective_question
@@ -892,13 +958,6 @@ def ask_analytics(
             "products, the database has revenue for them):\n---\n" + file_context + "\n---\n\n" + agent_input
         )
 
-    # MoEngage (campaign/engagement data) is a separate real data source from
-    # BigQuery (sales/order data) - gather_moengage_context does a cheap
-    # relevance pre-check first (most questions, e.g. "how many orders",
-    # have nothing to do with campaign data) before paying the ~40-50s cost
-    # of the full ~138-chart fetch+summarize. `relevant` is a real boolean
-    # from structured output, not a guess from the summary text's wording.
-    moengage_context, moengage_used = gather_moengage_context(effective_question, llm)
     if moengage_used:
         agent_input = (
             "Real MoEngage campaign/engagement data relevant to this question, given to you directly "
@@ -944,6 +1003,8 @@ def ask_analytics(
         except Exception as exc:  # noqa: BLE001 - every attempt logged, final one falls through gracefully
             last_exc = exc
             logger.warning("Analytics SQL agent call failed (attempt %d/3): %s", attempt + 1, exc)
+    data_source = "bigquery+moengage" if moengage_used else "bigquery"
+
     if result is None:
         logger.error("Analytics SQL agent failed after 3 attempts: %s", last_exc)
         return {
@@ -951,7 +1012,7 @@ def ask_analytics(
             "or rephrasing the question.",
             "sql_query": "",
             "verified": False,
-            "data_source": "bigquery",
+            "data_source": data_source,
             "moengage_used": moengage_used,
         }
 
@@ -986,10 +1047,10 @@ def ask_analytics(
     sql_query = "\n\n".join(executed_queries)
 
     if _contains_write_operation(sql_query):
-        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery", "moengage_used": moengage_used}
+        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": data_source, "moengage_used": moengage_used}
 
     if _contains_pii(raw_answer):
-        return {"answer": PII_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": "bigquery", "moengage_used": moengage_used}
+        return {"answer": PII_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": data_source, "moengage_used": moengage_used}
 
     if file_context:
         tool_results_text += "\n" + file_context
@@ -1028,6 +1089,6 @@ def ask_analytics(
         "answer": answer,
         "sql_query": sql_query,
         "verified": verified,
-        "data_source": "bigquery",
+        "data_source": data_source,
         "moengage_used": moengage_used,
     }

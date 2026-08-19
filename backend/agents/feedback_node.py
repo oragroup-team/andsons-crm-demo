@@ -14,6 +14,8 @@ from typing import List, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from flows import FLOW_BY_SLUG
+
 from .copywriter_agent import (
     _touchpoint_summary,
     generate_email,
@@ -21,7 +23,7 @@ from .copywriter_agent import (
     generate_touchpoint,
     pick_flow_for_signal,
 )
-from .head_of_crm_agent import brief_campaign
+from .head_of_crm_agent import brief_campaign, synthesize_flow_for_signal
 from .insight_agent import investigate
 from .learned_rules_agent import distill_and_save_rule, learned_rules_text
 from .llm_provider import get_llm, invoke_with_retry
@@ -203,28 +205,60 @@ def _sweep_touchpoint(
     raise ValueError(f"Unknown channel: {touchpoint['channel']!r}")
 
 
-def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text: Optional[str] = None) -> dict:
-    """Generate the WHOLE real flow - every Email + WhatsApp touchpoint in
-    its real MoEngage cadence (flows.py) - not just one email. Each
-    touchpoint goes through its own Sweeper QA gate; a touchpoint that
-    fails is regenerated (capped at MAX_RETRIES) in place, using the same
-    correction-loop principle as _run_pipeline_loop, without discarding or
-    re-generating the touchpoints around it (regenerating the whole
-    sequence over one failing WhatsApp line would also throw away good
-    passing emails, and would risk small wording drift between runs)."""
+def run_flow_pipeline(
+    flow_name: str, file_context: str = "", insight_brief_text: Optional[str] = None,
+    raw_request: Optional[str] = None,
+) -> dict:
+    """Generate the WHOLE real flow - every touchpoint in its real cadence
+    - not just one email. Each touchpoint goes through its own Sweeper QA
+    gate; a touchpoint that fails is regenerated (capped at MAX_RETRIES) in
+    place, using the same correction-loop principle as _run_pipeline_loop,
+    without discarding or re-generating the touchpoints around it
+    (regenerating the whole sequence over one failing touchpoint would also
+    throw away good passing ones, and would risk small wording drift
+    between runs).
+
+    `raw_request`, when given, is the human's own literal text (never
+    paraphrased) - passed straight to the Head of CRM so an explicit
+    structural ask ("5 sequence mixed with WhatsApp and email") reaches
+    the cadence decision directly."""
+    # EVERY flow build is grounded in real, live data before anything is
+    # decided - not only ones explicitly framed as a business signal. A
+    # direct 'write the winback flow' request still gets a real BigQuery/
+    # MoEngage check first, same as an insight-driven one; the only
+    # difference is what question gets investigated (the human's own
+    # signal question there, a generated one about this flow's real
+    # performance here). Skipped only when a caller already did this
+    # investigation itself (run_insight_flow_pipeline) and handed the
+    # result in, so this never double-queries the same request.
+    if insight_brief_text is None:
+        flow_meta = FLOW_BY_SLUG.get(flow_name)
+        flow_label = flow_meta["label"] if flow_meta else flow_name
+        default_question = (
+            f"How is the andSons '{flow_label}' flow performing right now, and what does the real "
+            "data suggest about its cadence, channel mix, and messaging angle?"
+        )
+        investigation = investigate(default_question, file_context=file_context)
+        insight_brief_text = investigation["brief_text"]
+
     # Head of CRM runs FIRST, unconditionally, on every flow build - not
     # only ones explicitly framed as a business signal (matching the real
     # pipeline: Head of CRM -> Copywriter is fixed, never skipped). It
-    # turns whatever's known (the flow's real metadata, plus any live
-    # signal that motivated this specific request) into one decisive
-    # commercial brief the Copywriter executes against.
-    crm_brief = brief_campaign(flow_name, signal_context=insight_brief_text, learned_rules=learned_rules_text())
+    # turns whatever's known (the flow's real metadata, the live signal
+    # above, and the human's own literal request) into one decisive
+    # commercial brief AND real touchpoint plan the Copywriter executes
+    # against - flows.py's cadence is this decision's baseline, not a
+    # requirement (see head_of_crm_agent.py's CADENCE instructions).
+    crm_brief = brief_campaign(
+        flow_name, signal_context=insight_brief_text, learned_rules=learned_rules_text(),
+        raw_request=raw_request,
+    )
 
     brief_parts = [f"CAMPAIGN BRIEF (Head of CRM):\n{crm_brief['brief_text']}"]
     if file_context:
         brief_parts.append(f"DATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}")
     brief = "\n\n".join(brief_parts)
-    flow_result = generate_flow(flow_name, insight_brief=brief)
+    flow_result = generate_flow(flow_name, insight_brief=brief, cadence=crm_brief.get("cadence"))
 
     prior_summaries = []
     final_touchpoints = []
@@ -299,16 +333,22 @@ def run_flow_pipeline(flow_name: str, file_context: str = "", insight_brief_text
 
 
 def run_insight_flow_pipeline(
-    question: str, flow_name: Optional[str] = None, file_context: str = ""
+    question: str, flow_name: Optional[str] = None, file_context: str = "",
+    raw_request: Optional[str] = None,
 ) -> dict:
     """Investigate a business signal, then generate the WHOLE flow (every
     real touchpoint) addressing it - the flow-level counterpart to
-    run_insight_email_pipeline(). Same flow-picking logic; same
-    needs_flow_clarification escape hatch when nothing genuinely fits."""
+    run_insight_email_pipeline(). Same flow-picking logic. When nothing in
+    the real catalog genuinely fits, the Head of CRM designs a new flow
+    from the real signal instead of stopping to ask a human which existing
+    one to force it into (synthesize_flow_for_signal()) - only falls back
+    to needs_flow_clarification if that design call itself fails."""
     brief = investigate(question, file_context=file_context)
 
     if not flow_name:
         flow_name = pick_flow_for_signal(question, brief["brief_text"])
+    if not flow_name:
+        flow_name = synthesize_flow_for_signal(question, brief["brief_text"], raw_request=raw_request)
     if not flow_name:
         return {
             "needs_flow_clarification": True,
@@ -316,7 +356,9 @@ def run_insight_flow_pipeline(
             "question": question,
         }
 
-    result = run_flow_pipeline(flow_name, insight_brief_text=brief["brief_text"])
+    result = run_flow_pipeline(
+        flow_name, insight_brief_text=brief["brief_text"], raw_request=raw_request or question,
+    )
     result["needs_flow_clarification"] = False
     result["insight_brief"] = brief
     result["signal_question"] = question

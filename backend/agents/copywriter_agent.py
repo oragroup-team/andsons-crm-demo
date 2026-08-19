@@ -442,7 +442,15 @@ def render_email(content: EmailContent, first_name: str, hero_info: Optional[dic
         # approved hero photo.
         if headline:
             label = "baked-in headline (already part of the approved image, not subject to the overlay word-count rule)" if is_baked else "overlay headline"
-            headline_part = f' — {label}: "{headline}"'
+            # Plain hyphen, never an em-dash - this internal annotation is
+            # part of the same candidate text the Sweeper reads, and the
+            # brand's em-dash ban applies to anything in that text, not
+            # just what a customer would actually see. A real, latent bug
+            # this whole session: this line always used an em-dash, but it
+            # only started reliably failing every touchpoint once the real
+            # (properly strict) Anthropic Sweeper replaced the Groq
+            # fallback that had been silently letting it slide.
+            headline_part = f' - {label}: "{headline}"'
         else:
             headline_part = ""
         parts.append(f'[HERO IMAGE: {description}{headline_part}]')
@@ -785,15 +793,23 @@ def generate_touchpoint(
     raise ValueError(f"Unknown channel: {step['channel']!r}")
 
 
-def generate_flow(flow_name: str, insight_brief: Optional[str] = None) -> dict:
-    """Generate every real touchpoint in a flow's cadence (flows.py), in
-    order, each aware of what earlier touchpoints in the same flow already
-    said (so the sequence reads as one continuous journey, and no hero
-    image or opening line repeats). Always addresses the NAME placeholder -
-    there is no real customer in a Slack conversation to name. Returns
+def generate_flow(flow_name: str, insight_brief: Optional[str] = None, cadence: Optional[list] = None) -> dict:
+    """Generate every real touchpoint in a flow's cadence, in order, each
+    aware of what earlier touchpoints in the same flow already said (so
+    the sequence reads as one continuous journey, and no hero image or
+    opening line repeats). Always addresses the NAME placeholder - there
+    is no real customer in a Slack conversation to name. Returns
     {"flow_name", "touchpoints": [...]} - each touchpoint has "channel",
     "timing", "intent", "rendered_text", "content", and (email only) hero
-    fields, ready for the Sweeper and the image renderers."""
+    fields, ready for the Sweeper and the image renderers.
+
+    `cadence`, when given, is the Head of CRM's actual decided touchpoint
+    plan (head_of_crm_agent.brief_campaign()'s "cadence") - flows.py's own
+    cadence is a baseline reference, not a hardcoded requirement; the real
+    decision belongs to whichever brief actually grounded this generation.
+    Falls back to the flow's own baseline cadence only when no decided
+    cadence was given at all (e.g. a direct call bypassing the Head of CRM
+    step, such as a test)."""
     flow = FLOW_BY_SLUG.get(flow_name)
     if flow is None:
         raise ValueError(f"Unknown flow: {flow_name}")
@@ -801,7 +817,7 @@ def generate_flow(flow_name: str, insight_brief: Optional[str] = None) -> dict:
     touchpoints = []
     prior_summaries = []
 
-    for step in flow["cadence"]:
+    for step in (cadence or flow["cadence"]):
         try:
             touchpoint = generate_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
         except RuntimeError as exc:

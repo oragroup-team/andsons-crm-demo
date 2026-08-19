@@ -27,6 +27,21 @@ The health check result is cached for _HEALTH_CHECK_TTL so a broken
 Anthropic key doesn't cost a failed API call on every single request, but
 still re-checks periodically - once credits are topped up, the app starts
 using Claude again on its own, without a restart or redeploy.
+
+REQUIRED VENDORED PATCH - not tracked by git, must be reapplied if
+backend/vendor/ is ever regenerated/reinstalled: vendor/langchain_anthropic/
+chat_models.py's _format_messages() has a real, confirmed bug for the
+current Claude model family - it deliberately keeps a trailing EMPTY-content
+assistant message as an intentional "prefill" (a real, legitimate technique
+on older Claude models), but the current API (Opus 5, Sonnet 5, and the
+4.6+ family) rejects that outright: "This model does not support assistant
+message prefill. The conversation must end with a user message." Find the
+line `if not content and role == "assistant" and _i < len(merged_messages) - 1:`
+and remove the `and _i < len(merged_messages) - 1` condition so an empty
+assistant message is always dropped, not just when it isn't last. (backend/
+vendor/ is gitignored - a large third-party bundle, not meant to be
+committed - so this fix has to be reapplied by hand if that directory is
+ever refreshed from a clean pip install; there is no other record of it.)
 """
 import logging
 import os
@@ -60,7 +75,23 @@ DEFAULT_PROVIDERS = {
     # model that will just reject the request shape.
     "VISUAL_QA": "anthropic",
     "SWEEPER": "anthropic",
-    "ANALYTICS": "anthropic",
+    # NOT anthropic, despite this looking like the obvious choice: the
+    # LangChain SQL ReAct agent (create_sql_agent) this agent runs on has a
+    # real, confirmed incompatibility with the current Claude API - caught
+    # live, reproducibly, across every question tried. When the model
+    # writes a plain-text reasoning turn mid-loop instead of a tool call,
+    # AgentExecutor's own retry path re-sends that text as the start of
+    # the NEXT turn (a continuation "prefill") - a pattern the current
+    # Claude model family rejects outright ("This model does not support
+    # assistant message prefill"). This isn't the smaller max_tokens
+    # truncation issue already fixed above (verified: still fails
+    # identically at max_tokens=16000) - it's AgentExecutor's own
+    # scratchpad-continuation logic, which would need a real LangChain-
+    # internals fix, not a config change, to run on Anthropic. Groq has
+    # been reliable for this exact SQL-agent flow all session - stay on
+    # it here rather than ship a "live data" feature that silently fails
+    # every time.
+    "ANALYTICS": "groq",
 }
 
 _HEALTH_CHECK_TTL = 300  # 5 min - see module docstring
@@ -145,7 +176,22 @@ def get_llm(agent_name: str, temperature: float = 0.0):
         # is no way to tune this anymore for these models - the caller's
         # `temperature` argument is accepted for API-shape compatibility with
         # the Groq branch above but deliberately NOT forwarded here.
-        return ChatAnthropic(model=model, api_key=api_key)
+        #
+        # max_tokens: langchain_anthropic's own default is a real, verified
+        # problem, not a safe default - only 1024. claude-opus-5 runs
+        # adaptive thinking ON BY DEFAULT (confirmed), which spends real
+        # output-token budget from that same 1024 cap before the model even
+        # gets to its actual answer/tool call - caught live, repeatedly:
+        # the SQL agent's response kept getting cut off mid-generation
+        # ("received a `max_tokens` stop reason"), and LangChain's recovery
+        # for that (re-sending the truncated partial response as a
+        # continuation prefill) is itself rejected by the current API
+        # ("This model does not support assistant message prefill") - so a
+        # too-small max_tokens was silently turning into a hard failure
+        # two layers downstream instead of a clean truncation. Set high
+        # enough that thinking + a real structured/tool-calling response
+        # both fit comfortably.
+        return ChatAnthropic(model=model, api_key=api_key, max_tokens=16000)
 
     raise ValueError(f"Unknown provider '{provider}' for agent {agent_key}. Use 'groq' or 'anthropic'.")
 

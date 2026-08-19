@@ -471,7 +471,9 @@ def slack_events_email():
 
             if intent["mode"] == "insight":
                 question = intent["signal_question"] or combined_text or "Review the attached data and identify what needs addressing."
-                result = run_insight_flow_pipeline(question, flow_name=intent["flow_name"], file_context=file_context)
+                result = run_insight_flow_pipeline(
+                    question, flow_name=intent["flow_name"], file_context=file_context, raw_request=combined_text,
+                )
                 if result["needs_flow_clarification"]:
                     save_pending_email_request(channel, thread_ts, pending_texts + [text])
                     post_message(
@@ -506,7 +508,7 @@ def slack_events_email():
                 return
 
             clear_pending_email_request(channel, thread_ts)
-            result = run_flow_pipeline(intent["flow_name"], file_context=file_context)
+            result = run_flow_pipeline(intent["flow_name"], file_context=file_context, raw_request=combined_text)
             save_email_session(
                 channel, thread_ts,
                 {

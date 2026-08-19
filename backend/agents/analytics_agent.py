@@ -21,7 +21,7 @@ import logging
 import os
 import re
 from datetime import date
-from typing import Optional
+from typing import Literal, Optional
 
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
@@ -387,7 +387,44 @@ def _last(pattern: re.Pattern, text: str):
     return matches[-1] if matches else None
 
 
-def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
+class _MetricIntent(BaseModel):
+    metric: Literal["revenue", "order_count", "other"] = Field(
+        description="What number this question is actually asking for. 'revenue' for a dollar/SGD amount "
+        "(revenue, sales, spend, value earned). 'order_count' for a plain count of orders (e.g. 'how many "
+        "orders', 'how many people bought'). 'other' for anything else (average order value, unique "
+        "customer count, a ratio/percentage, etc.)."
+    )
+
+
+def _resolve_metric_intent(question: str) -> str:
+    """Independently classifies what NUMBER a question is actually asking
+    for, from the question's own words - shared by both deterministic
+    safety nets in this file, so neither assumes revenue by default and
+    silently overwrites a correct answer with a different kind of number.
+    Real, live-caught bug this fixes: a plain order-count question ('how
+    many orders came from winback') got its correct integer answer
+    overwritten with an unrelated revenue figure, because the only check
+    either safety net ran was 'does any number in the stated answer match
+    the independently-computed revenue total' - with no awareness that
+    revenue might not even be what was asked for. Defaults to 'revenue' on
+    any resolution failure - the long-standing prior behavior for both
+    checks, not a new assumption - so a classifier hiccup degrades to the
+    existing behavior rather than silently disabling every correction."""
+    llm = get_llm("ANALYTICS")
+    structured_llm = llm.with_structured_output(_MetricIntent)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "Determine what number this question about andSons business data is actually asking for."),
+        ("human", "Question: {question}"),
+    ])
+    chain = prompt | structured_llm
+    try:
+        return chain.invoke({"question": question}).metric
+    except Exception as exc:  # noqa: BLE001 - fail to the prior default, never block a correction outright
+        logger.warning("Metric-intent resolution failed for %r: %s - defaulting to revenue.", question, exc)
+        return "revenue"
+
+
+def _verify_campaign_family_total(question: str, answer: str, sql_query: str) -> Optional[str]:
     """Deterministic safety net for the campaign-name-sprawl failure mode
     (see BIGQUERY_SCHEMA_NOTES) - a prompt instruction alone can't guarantee
     a probabilistic ReAct SQL agent always builds the complete broad LIKE
@@ -411,6 +448,16 @@ def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
     try:
         db = _get_db_cached()
     except Exception:
+        return None
+
+    metric = _resolve_metric_intent(question)
+    if metric == "other":
+        # Same real principle as the flow_orders check's own metric guard:
+        # this function can only independently verify revenue or a plain
+        # order count - anything else (average order value, unique
+        # customers, a ratio) must fail open rather than force-fit a
+        # revenue correction onto a question this check can't actually
+        # answer.
         return None
 
     year_match = _last(_YEAR_EQ_RE, sql_query)
@@ -450,15 +497,16 @@ def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
             "AND LOWER(status) NOT LIKE '%expired%'"
         )
 
+    select_expr = "COUNT(DISTINCT order_id) AS total" if metric == "order_count" else "ROUND(SUM(Final_Revenue),2) AS total"
     try:
         canonical_result = db.run(
-            "SELECT ROUND(SUM(Final_Revenue),2) AS total, COUNT(*) AS n "
+            f"SELECT {select_expr} "
             "FROM updated_sales_data " + scope_sql +
             f" AND LOWER(orders_utm_campaign) LIKE '%{keyword.lower()}%'"
         )
         canonical_total = float(re.search(r"[-\d.]+", str(canonical_result)).group())
     except Exception:
-        logger.exception("Campaign-family cross-check query failed for keyword %r - skipping correction.", keyword)
+        logger.exception("Campaign-family cross-check query failed for keyword %r (metric=%s) - skipping correction.", keyword, metric)
         return None
 
     stated_numbers = [float(n) for n in _extract_numbers(answer)]
@@ -466,9 +514,15 @@ def _verify_campaign_family_total(answer: str, sql_query: str) -> Optional[str]:
         return None  # the model's own answer already matches the complete total - nothing to fix
 
     logger.warning(
-        "Campaign-family mismatch for keyword %r: stated answer had %s, complete broad-match total is %s - correcting.",
-        keyword, stated_numbers, canonical_total,
+        "Campaign-family mismatch for keyword %r (metric=%s): stated answer had %s, complete broad-match "
+        "total is %s - correcting.",
+        keyword, metric, stated_numbers, canonical_total,
     )
+    if metric == "order_count":
+        return (
+            f"{int(round(canonical_total)):,} orders (verified against every real matching '{keyword}' "
+            f"campaign variant, not a partial sample){period}."
+        )
     return (
         f"SGD {canonical_total:,.2f} (verified against every real matching '{keyword}' campaign variant, "
         f"not a partial sample){period}."
@@ -546,6 +600,15 @@ class _FlowQuestionIntent(BaseModel):
         "orders (one named flow, or flows/automation as a whole) - False for a general revenue/category "
         "question with no flow angle at all."
     )
+    metric: Literal["revenue", "order_count", "other"] = Field(
+        default="revenue",
+        description="What number the question is actually asking for. 'revenue' for a dollar/SGD amount "
+        "(revenue, sales, spend, value earned). 'order_count' for a plain count of orders (e.g. 'how many "
+        "orders', 'how many people bought'). 'other' for anything else this specific check can't verify "
+        "(average order value, unique customer count, conversion rate, a ratio/percentage, etc.) - "
+        "critical to get right: correcting a count question with a revenue number (or vice versa) would "
+        "answer a completely different question than the one actually asked.",
+    )
     wants_all_flows: bool = Field(
         default=False,
         description="True if the question asks about flows/automation AS A WHOLE (e.g. 'how did our "
@@ -619,6 +682,19 @@ def _verify_flow_orders_answer(question: str, answer: str, sql_query: str) -> Op
     intent = _resolve_flow_intent(question)
     if intent is None or not intent.is_flow_question:
         return None
+    if intent.metric == "other":
+        # Real bug this guards against, caught live: this check used to
+        # ALWAYS compute SUM(Final_Revenue) regardless of what the question
+        # actually asked for - a plain order-count question ("how many
+        # orders came from winback") got its correct integer answer
+        # silently overwritten with an unrelated revenue figure, because
+        # the only thing being compared was "does any number in the answer
+        # match the revenue total", not "is revenue even the right metric
+        # for this question". Anything this specific check doesn't know how
+        # to independently compute (average order value, unique customers,
+        # a ratio) must fail open, never force-fit a revenue correction
+        # onto a question about something else entirely.
+        return None
     named_flow_family = _normalize_flow_family(intent.named_flow_family)
     if not intent.wants_all_flows and not named_flow_family:
         return None  # ambiguous which flow - don't guess, don't correct
@@ -668,11 +744,17 @@ def _verify_flow_orders_answer(question: str, answer: str, sql_query: str) -> Op
     else:
         where.append(f"flow_family='{named_flow_family}'")
 
+    # Which real aggregate to check against depends on intent.metric,
+    # resolved above from the question's own words - never assume revenue
+    # regardless of what was actually asked (see the metric field's
+    # docstring for the real incident this fixes).
+    if intent.metric == "order_count":
+        select_sql = "SELECT COUNT(DISTINCT order_id) AS total FROM `crm-mail-automation-dev.crm_analytics_views.flow_orders` "
+    else:
+        select_sql = "SELECT ROUND(SUM(Final_Revenue),2) AS total FROM `crm-mail-automation-dev.crm_analytics_views.flow_orders` "
+
     try:
-        canonical_result = db.run(
-            "SELECT ROUND(SUM(Final_Revenue),2) AS total FROM `crm-mail-automation-dev.crm_analytics_views.flow_orders` "
-            "WHERE " + " AND ".join(where)
-        )
+        canonical_result = db.run(select_sql + "WHERE " + " AND ".join(where))
         match = re.search(r"[-\d.]+", str(canonical_result))
         if not match:
             # A genuine NULL/no-rows result (str(canonical_result) has no
@@ -689,10 +771,13 @@ def _verify_flow_orders_answer(question: str, answer: str, sql_query: str) -> Op
         return None  # the agent's own answer already matches the independently-derived correct total
 
     logger.warning(
-        "flow_orders mismatch for question %r: stated answer had %s, independently-derived correct total is %s - correcting.",
-        question, stated_numbers, canonical_total,
+        "flow_orders mismatch for question %r (metric=%s): stated answer had %s, independently-derived "
+        "correct total is %s - correcting.",
+        question, intent.metric, stated_numbers, canonical_total,
     )
     scope_desc = named_flow_family if named_flow_family else "all flow-attributed"
+    if intent.metric == "order_count":
+        return f"{int(round(canonical_total)):,} orders ({scope_desc}, independently verified){period}."
     return f"SGD {canonical_total:,.2f} ({scope_desc} revenue, independently verified){period}."
 
 
@@ -923,7 +1008,7 @@ def ask_analytics(
     # than trust it. Runs regardless of the `verified` outcome above (a
     # partial-match answer traces back to a real query result, so the
     # generic check alone wouldn't have caught it either).
-    correction = _verify_campaign_family_total(answer, sql_query)
+    correction = _verify_campaign_family_total(effective_question, answer, sql_query)
     if correction:
         answer = correction
         verified = True

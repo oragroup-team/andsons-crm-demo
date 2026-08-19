@@ -499,9 +499,10 @@ def format_human_feedback(
         "change must actually appear; don't approximate it, soften it, or address only part of it). If "
         "the feedback is about how something LOOKS or is LAID OUT rather than what it says, check whether "
         "this schema has a dedicated field for that exact thing (e.g. where the CTA button sits, what "
-        "shape the what_happens_next markers are) and set that field directly to your own genuine read of "
-        "what they asked for — don't just describe the visual change in a sentence and leave the field "
-        "untouched, and don't invent a workaround in the text if a real field for it already exists.\n\n"
+        "shape the what_happens_next markers are, the email's background colour) and set that field "
+        "directly to your own genuine read of what they asked for — don't just describe the visual change "
+        "in a sentence and leave the field untouched, and don't invent a workaround in the text if a real "
+        "field for it already exists.\n\n"
         "HARD RULE if the feedback includes quoted example wording (\"something like 'X'\", \"e.g. 'X'\"): "
         "that quoted text is a sketch of the KIND of line wanted, not a script — you are BANNED from "
         "reusing more than two or three consecutive words from inside those quotes anywhere in your "
@@ -520,10 +521,16 @@ def format_human_feedback(
         "reinterpret it into something smaller without saying so either — apply the closest compliant "
         "interpretation of what they actually asked for, and set the note field to one short, plain "
         "sentence naming the conflict: what they asked for, and why you couldn't do it literally.\n\n"
-        "The note field is ONLY about this NEW feedback above, evaluated against the fields that actually "
-        "exist in this schema right now — never about an earlier round in the history above (those were "
-        "already resolved when they happened; don't re-litigate or re-explain them here), and never about "
-        "a capability this schema doesn't have. Leave note null unless THIS feedback itself hits a real "
+        "The note field is ONLY for THIS new feedback genuinely hitting one of the hard rules above "
+        "(compliance, language rules, the flow's exact CTA label, invent-nothing) — never about an earlier "
+        "round in the history above (those were already resolved when they happened; don't re-litigate or "
+        "re-explain them here), and never, ever because a change simply has no dedicated field of its own: "
+        "an aesthetic or content request is not a hard-rule conflict, it's a real, buildable change — a "
+        "field for it either already exists (check the schema again before concluding otherwise) or the "
+        "change belongs directly in an existing text/content field. Writing a note that says 'I can't do "
+        "this, there's no field for it' is always wrong; either make the change through a real field, or if "
+        "one genuinely doesn't cover it, make the closest real content edit that honestly reflects what was "
+        "asked rather than refusing. Leave note null unless THIS feedback itself hits a real hard-rule "
         "conflict right now."
     )
 
@@ -631,11 +638,13 @@ def _touchpoint_content_summary(t: dict) -> str:
         return "(failed to generate - nothing to reference)"
     if t["channel"] == "email":
         position = content.get("cta_position", 0.0) or 0.0
+        bg = content.get("background_color") or "the standard brand default"
         return (
             f"subject {content['subject']!r}, hero {content.get('hero')}, has a real REPOSITIONABLE CTA "
             f"BUTTON reading {content['cta_text']!r} currently sitting at horizontal position "
-            f"{position:.2f} (0.0=flush left, 0.5=centre, 1.0=flush right) - the only channel where a "
-            f"request to move/align/reposition 'the button' is even possible"
+            f"{position:.2f} (0.0=flush left, 0.5=centre, 1.0=flush right), background colour currently "
+            f"{bg} - the only channel where repositioning 'the button' or changing the page background is "
+            f"even possible"
         )
     if t["channel"] == "whatsapp":
         return (

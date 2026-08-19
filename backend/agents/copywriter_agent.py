@@ -189,6 +189,12 @@ true and relevant fits.
 - Never more than one of each block. Never fabricate content to fill a block - an empty/omitted block is \
 always better than an invented one.
 
+BACKGROUND COLOUR (rare, reactive only): defaults to null - the standard brand background. Only set \
+background_color when a human reviewer's feedback specifically asks for a different background colour for \
+the email; set it to the real hex code that genuinely represents what they described. This is a real, \
+renderable field - never write a note saying you can't change the background, and never describe the \
+change in the copy text instead of setting the field.
+
 HERO IMAGE SELECTION (per-email judgement, but use one whenever a real photo fits): a hero photo is the \
 default for this brand - these are real marketing emails, and a photo makes the moment feel human, not \
 just a wall of text. Go through the approved photo bank below and actually look at what each photo shows \
@@ -319,6 +325,14 @@ class EmailContent(BaseModel):
         description="OPTIONAL: short centred trust line, plain text separated by ' · ', e.g. "
         "'Doctor-led plan · Clinically studied · Discreet delivery'. Omit for a simpler email.",
     )
+    background_color: Optional[str] = Field(
+        default=None,
+        description="Leave null for the normal default (the standard brand background). Only set this "
+        "when a human reviewer's feedback specifically asks for a different background colour - a real "
+        "hex colour code (e.g. '#d6e9f7') that is your own genuine read of the colour they actually "
+        "described, not a memorised mapping from stock phrases to hex codes. This is the whole page's "
+        "background - the email template's own real, brand-owned canvas, not any third-party app's UI.",
+    )
     hero: Literal[tuple(HERO_KEYS)] = Field(
         description="Which hero image to use: one of the approved bank keys, or 'none' for a deliberate "
         "text-first email."
@@ -346,11 +360,15 @@ class EmailContent(BaseModel):
         description="Leave null on a normal draft, and leave null unless the CURRENT, newest feedback you "
         "were just given (not any earlier round already applied in a prior draft) asks for something a "
         "hard rule (compliance, language rules, the flow's exact CTA label, invent-nothing) does not "
-        "allow, or names a capability that doesn't exist in this schema: apply the closest compliant "
-        "interpretation of what they actually asked for instead of just refusing, and use this field to "
-        "say in one short, plain sentence what they asked for and why you couldn't do it literally. Never "
-        "use this field to comment on, re-explain, or re-litigate a past feedback round - those are "
-        "already settled.",
+        "allow: apply the closest compliant interpretation of what they actually asked for instead of just "
+        "refusing, and use this field to say in one short, plain sentence what they asked for and why you "
+        "couldn't do it literally. This field must NEVER fire just because a requested visual or content "
+        "change has no dedicated field of its own below - an aesthetic or content request is not a hard "
+        "rule conflict, it's a real, buildable change: check first whether an existing field (background_"
+        "color, cta_position, step_marker_style, include_address, or a plain edit to any text field) can "
+        "genuinely represent what they asked for, and if one can, set it directly - never write a note "
+        "about something you could have just done. Never use this field to comment on, re-explain, or "
+        "re-litigate a past feedback round - those are already settled.",
     )
 
 
@@ -648,10 +666,16 @@ class WhatsAppContent(BaseModel):
         default=None,
         description="Leave null on a normal draft, and leave null unless the CURRENT, newest feedback you "
         "were just given (not any earlier round already applied in a prior draft) asks for something a "
-        "hard rule does not allow, or names a capability that doesn't exist in this schema: apply the "
-        "closest compliant interpretation instead of just refusing, and say in one short, plain sentence "
-        "what they asked for and why you couldn't do it literally. Never use this field to comment on, "
-        "re-explain, or re-litigate a past feedback round - those are already settled.",
+        "hard rule does not allow: apply the closest compliant interpretation instead of just refusing, "
+        "and say in one short, plain sentence what they asked for and why you couldn't do it literally. "
+        "This field must NEVER fire just because a change has no dedicated field of its own - most content "
+        "requests (the wording, the hook, the CTA label) are just a plain edit to an existing text field, "
+        "so make it directly instead of writing a note. The one genuine hard constraint specific to this "
+        "channel: this mockup renders WhatsApp's own real, actual dark-mode app chrome (colours, bubble "
+        "style), not an andSons-owned design - a request to restyle THAT (not the message content itself) "
+        "is the one case where a note explaining that real constraint is correct, not a missing field. "
+        "Never use this field to comment on, re-explain, or re-litigate a past feedback round - those are "
+        "already settled.",
     )
 
 
@@ -729,10 +753,16 @@ class PushContent(BaseModel):
         default=None,
         description="Leave null on a normal draft, and leave null unless the CURRENT, newest feedback you "
         "were just given (not any earlier round already applied in a prior draft) asks for something a "
-        "hard rule does not allow, or names a capability that doesn't exist in this schema: apply the "
-        "closest compliant interpretation instead of just refusing, and say in one short, plain sentence "
-        "what they asked for and why you couldn't do it literally. Never use this field to comment on, "
-        "re-explain, or re-litigate a past feedback round - those are already settled.",
+        "hard rule does not allow: apply the closest compliant interpretation instead of just refusing, "
+        "and say in one short, plain sentence what they asked for and why you couldn't do it literally. "
+        "This field must NEVER fire just because a change has no dedicated field of its own - a wording "
+        "request is just a plain edit to title/body, so make it directly instead of writing a note. The "
+        "one genuine hard constraint specific to this channel: this mockup renders a real phone lock "
+        "screen's own actual chrome (wallpaper, clock, card style) - andSons doesn't control what a "
+        "customer's phone OS looks like in reality, so a request to restyle THAT (not the notification's "
+        "own title/body text) is the one case where a note explaining that real constraint is correct, not "
+        "a missing field. Never use this field to comment on, re-explain, or re-litigate a past feedback "
+        "round - those are already settled.",
     )
 
 

@@ -18,6 +18,7 @@ from the same EmailContent the Copywriter already produced and the Sweeper
 already checked; this module only lays it out visually.
 """
 import os
+import re
 import textwrap
 from typing import Optional
 
@@ -37,6 +38,26 @@ COLOR_BORDER = "#e6ddd2"
 COLOR_ACCENT = "#963e21"
 COLOR_STEPS_BG = "#faf7f2"
 COLOR_WHITE = "#ffffff"
+
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+def _normalize_background_color(value: Optional[str]) -> str:
+    """Validates the Copywriter's EmailContent.background_color before it
+    ever reaches PIL - never trust a raw model-generated string directly
+    into an image call (same validate-before-trust principle used
+    throughout this codebase for other LLM-produced values, e.g.
+    analytics_agent's category/flow-family normalizers). A malformed value
+    (missing, not a real hex code, stray whitespace) falls back to the
+    normal brand background rather than crashing the whole render or
+    passing PIL a string it can't parse - a rare bad value should degrade
+    silently to the default look, not take down the entire touchpoint."""
+    if not value:
+        return COLOR_WHITE
+    candidate = value.strip()
+    if not _HEX_COLOR_RE.match(candidate):
+        return COLOR_WHITE
+    return candidate
 
 # Rendered at 2x a "standard" 600px email width, then left at that native
 # resolution (not downsampled) - Slack fits the display size to its message
@@ -273,7 +294,8 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     # Oversized canvas, cropped to actual content height at the end - the
     # simplest way to lay out genuinely variable-length email content
     # without a separate two-pass height-measurement engine.
-    canvas = Image.new("RGB", (CANVAS_WIDTH, _s(2400)), COLOR_WHITE)
+    page_background = _normalize_background_color(content.get("background_color"))
+    canvas = Image.new("RGB", (CANVAS_WIDTH, _s(2400)), page_background)
     draw = ImageDraw.Draw(canvas)
     y = 0
 

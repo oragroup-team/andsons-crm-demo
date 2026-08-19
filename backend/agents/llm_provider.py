@@ -84,7 +84,8 @@ def _anthropic_available() -> bool:
     try:
         from langchain_anthropic import ChatAnthropic
 
-        probe = ChatAnthropic(model=DEFAULT_MODELS["anthropic"], api_key=api_key, temperature=0, max_tokens=4)
+        # No temperature kwarg here - see get_llm()'s Anthropic branch for why.
+        probe = ChatAnthropic(model=DEFAULT_MODELS["anthropic"], api_key=api_key, max_tokens=4)
         probe.invoke("Hi")
         _anthropic_health.update(ok=True, checked_at=now)
         return True
@@ -136,7 +137,15 @@ def get_llm(agent_name: str, temperature: float = 0.0):
             raise RuntimeError(
                 f"{agent_key}_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set in the environment."
             )
-        return ChatAnthropic(model=model, temperature=temperature, api_key=api_key)
+        # Real, verified API change (confirmed live, direct probe against
+        # the real Anthropic API): the current Claude model family rejects
+        # any explicit temperature value other than 1 outright ("`temperature`
+        # is deprecated for this model") - passing our usual 0.0 (deterministic
+        # calls) or 0.8 (creative calls) both hard-fail every request. There
+        # is no way to tune this anymore for these models - the caller's
+        # `temperature` argument is accepted for API-shape compatibility with
+        # the Groq branch above but deliberately NOT forwarded here.
+        return ChatAnthropic(model=model, api_key=api_key)
 
     raise ValueError(f"Unknown provider '{provider}' for agent {agent_key}. Use 'groq' or 'anthropic'.")
 

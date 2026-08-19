@@ -104,23 +104,33 @@ _MOENGAGE_KEYWORDS = (
 )
 
 
-def _might_need_moengage(question: str, llm) -> bool:
+def _might_need_moengage(question: str, llm) -> tuple:
+    """Returns (might_need, keyword_matched). keyword_matched - a real,
+    unambiguous MoEngage-only term (e.g. 'opens', 'funnel') was present
+    verbatim in the question - is exposed separately from the overall
+    boolean because it feeds a real downstream fix: the SEPARATE relevance
+    judgment inside _summarize_all_snapshots is its own independent LLM
+    call and has its own documented flakiness (the exact same question
+    getting 'yes' and 'no' seconds apart) - when the question already
+    contains an explicit, unambiguous engagement term, that deterministic
+    signal should carry more weight against that second judgment's flakiness
+    than an LLM-only precheck would."""
     q_lower = question.lower()
     if any(keyword in q_lower for keyword in _MOENGAGE_KEYWORDS):
-        return True
+        return True, True
 
     structured_llm = llm.with_structured_output(_NeedsMoEngage)
     prompt = ChatPromptTemplate.from_messages([("human", _PRECHECK_PROMPT)])
     chain = prompt | structured_llm
     try:
         result: _NeedsMoEngage = chain.invoke({"question": question})
-        return result.needs_moengage == "yes"
+        return result.needs_moengage == "yes", False
     except Exception as exc:  # noqa: BLE001 - fail safe to "skip", BigQuery-only is still a complete answer
         logger.warning("MoEngage relevance pre-check failed for %r: %s", question, exc)
-        return False
+        return False, False
 
 
-def _summarize_all_snapshots(question: str, snapshots: list, llm) -> _MoEngageSummary:
+def _summarize_all_snapshots(question: str, snapshots: list, llm, keyword_matched: bool = False) -> _MoEngageSummary:
     lines = []
     for snap in snapshots:
         if snap["error"]:
@@ -128,10 +138,31 @@ def _summarize_all_snapshots(question: str, snapshots: list, llm) -> _MoEngageSu
         else:
             lines.append(f"- {snap['label']}: {str(snap['data'])[:_PER_CHART_CHAR_CAP]}")
 
+    question_text = question
+    if keyword_matched:
+        # Real, live-caught bug this guards against: a compound question
+        # ("revenue AND how well are those emails performing in terms of
+        # opens") matched an unambiguous engagement term in the pre-check
+        # keyword list, but this SEPARATE relevance judgment still came back
+        # 'no' both retry attempts, so the answer falsely claimed open-rate
+        # data "isn't captured" - when it demonstrably was, for the exact
+        # same underlying charts, moments earlier on a standalone question.
+        # An explicit nudge here - not a hardcoded override, the model still
+        # makes the real call - measurably reduces that flakiness by naming
+        # what to look for instead of leaving a compound question's
+        # secondary clause to get lost against its primary one.
+        question_text = (
+            f"{question}\n\n(This question was already confirmed to plausibly need MoEngage data - it "
+            "contains a real engagement-metric reference. If it's a compound question, look specifically "
+            "for the part about opens/clicks/delivery/engagement/funnel performance, even if another part "
+            "of the question is really about revenue or orders - relevant='yes' if ANY genuine part of it "
+            "is answered by real chart data here, not only if the whole question is.)"
+        )
+
     structured_llm = llm.with_structured_output(_MoEngageSummary)
     prompt = ChatPromptTemplate.from_messages([("human", _MOENGAGE_SUMMARY_PROMPT)])
     chain = prompt | structured_llm
-    return chain.invoke({"question": question, "chart_count": len(snapshots), "charts": "\n".join(lines)})
+    return chain.invoke({"question": question_text, "chart_count": len(snapshots), "charts": "\n".join(lines)})
 
 
 def gather_moengage_context(question: str, llm) -> tuple:
@@ -150,7 +181,8 @@ def gather_moengage_context(question: str, llm) -> tuple:
     if not moengage_client.is_configured():
         return "MoEngage is not connected.", False, ""
 
-    if not _might_need_moengage(question, llm):
+    might_need, keyword_matched = _might_need_moengage(question, llm)
+    if not might_need:
         return "MoEngage was not checked - this question doesn't look like it needs campaign/engagement data.", False, ""
 
     try:
@@ -163,16 +195,23 @@ def gather_moengage_context(question: str, llm) -> tuple:
         return "MoEngage is connected but has no dashboards/charts yet.", False, ""
 
     failed = [s for s in snapshots if s["error"]]
-    # Up to 2 tries: caught live, this specific judgment ("is any chart
-    # actually relevant") is genuinely non-deterministic - the identical
-    # question got "yes" and "no" seconds apart across repeated real calls.
-    # We've already paid the full fetch cost by this point and the
-    # pre-check already decided this question plausibly needs MoEngage
-    # data, so one retry on a "no" is worth it before trusting it.
+    # Up to 2 tries normally (3 when the question already contains an
+    # unambiguous engagement term - see keyword_matched): caught live, this
+    # specific judgment ("is any chart actually relevant") is genuinely
+    # non-deterministic - the identical question got "yes" and "no" seconds
+    # apart across repeated real calls, and a live-caught case showed this
+    # can still land on "no" on both of only 2 tries for a compound question
+    # (real revenue+opens question, false "no" both attempts, when a
+    # standalone opens-only question moments earlier correctly got "yes" on
+    # the exact same underlying charts). We've already paid the full fetch
+    # cost by this point, and a real, explicit engagement term in the
+    # question makes a genuine "no" far less plausible than an LLM judgment
+    # flake, so it's worth the extra attempt before trusting a "no".
+    attempts = 3 if keyword_matched else 2
     result = None
-    for attempt in range(2):
+    for attempt in range(attempts):
         try:
-            result = _summarize_all_snapshots(question, snapshots, llm)
+            result = _summarize_all_snapshots(question, snapshots, llm, keyword_matched=keyword_matched)
         except Exception as exc:  # noqa: BLE001 - a summarization failure shouldn't kill the caller
             logger.warning("Failed to summarize MoEngage snapshots (attempt %d): %s", attempt, exc)
             continue

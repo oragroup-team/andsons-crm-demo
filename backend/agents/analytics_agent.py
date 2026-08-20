@@ -387,6 +387,36 @@ def _last(pattern: re.Pattern, text: str):
     return matches[-1] if matches else None
 
 
+def _invoke_with_retry(chain, payload: dict, attempts: int = 5, label: str = "Analytics LLM call"):
+    """Real, documented Groq failure mode, same one llm_provider.
+    invoke_with_retry already fixes for the Copywriter/Sweeper (forced
+    tool-calling mode rejects the call outright, 'Tool choice is required,
+    but model did not call a tool', when the model tries to answer in free
+    text instead of the required structured schema) - every small
+    classifier call in this file (_resolve_metric_intent,
+    _resolve_flow_intent, _resolve_followup_question,
+    _is_moengage_exclusive) needs real per-invocation template variables
+    filled, which invoke_with_retry's own hardcoded chain.invoke({})
+    doesn't support, so a small local equivalent instead of forcing this
+    file's calls to fit that signature (same fix already applied to
+    moengage_summary.py's own calls). Real, live-caught bug this fixes:
+    _is_moengage_exclusive had NO retry at all - a single transient 400 on
+    that one call silently forced 'query BigQuery too' (its documented
+    fail-closed default) even when MoEngage alone would have answered a
+    question cleanly, leading to a blended answer whose restated numbers
+    didn't trace back cleanly and got wrongly discarded as unverified.
+    Raises the last exception if every attempt fails - callers already
+    handle that with their own try/except."""
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return chain.invoke(payload)
+        except Exception as exc:  # noqa: BLE001 - every attempt logged, caller decides final handling
+            last_exc = exc
+            logger.warning("%s failed (attempt %d/%d): %s", label, attempt + 1, attempts, exc)
+    raise last_exc
+
+
 class _MetricIntent(BaseModel):
     metric: Literal["revenue", "order_count", "other"] = Field(
         description="What number this question is actually asking for. 'revenue' for a dollar/SGD amount "
@@ -418,7 +448,7 @@ def _resolve_metric_intent(question: str) -> str:
     ])
     chain = prompt | structured_llm
     try:
-        return chain.invoke({"question": question}).metric
+        return _invoke_with_retry(chain, {"question": question}, label="Metric-intent resolution call").metric
     except Exception as exc:  # noqa: BLE001 - fail to the prior default, never block a correction outright
         logger.warning("Metric-intent resolution failed for %r: %s - defaulting to revenue.", question, exc)
         return "revenue"
@@ -653,7 +683,7 @@ def _resolve_flow_intent(question: str) -> Optional[_FlowQuestionIntent]:
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", "Question: {question}")])
     chain = prompt | structured_llm
     try:
-        return chain.invoke({"question": question})
+        return _invoke_with_retry(chain, {"question": question}, label="Flow-intent resolution call")
     except Exception as exc:  # noqa: BLE001 - fail open, no correction attempted
         logger.warning("Flow-intent resolution failed for %r: %s", question, exc)
         return None
@@ -813,7 +843,9 @@ def _resolve_followup_question(question: str, conversation_history: list, llm) -
     ])
     chain = prompt | structured_llm
     try:
-        result: _ResolvedQuestion = chain.invoke({"history": history_text, "question": question})
+        result: _ResolvedQuestion = _invoke_with_retry(
+            chain, {"history": history_text, "question": question}, label="Follow-up resolution call",
+        )
         return result.standalone_question
     except Exception as exc:  # noqa: BLE001 - fail open, the raw question still works on its own
         logger.warning("Failed to resolve follow-up question %r against history: %s", question, exc)
@@ -851,7 +883,7 @@ def _is_moengage_exclusive(question: str, llm) -> bool:
     prompt = ChatPromptTemplate.from_messages([("human", "Question: {question}")])
     chain = prompt | structured_llm
     try:
-        return chain.invoke({"question": question}).moengage_only
+        return _invoke_with_retry(chain, {"question": question}, label="MoEngage-exclusive check").moengage_only
     except Exception as exc:  # noqa: BLE001 - fail closed to the safer default (query BigQuery too)
         logger.warning("MoEngage-exclusive check failed for %r: %s - querying BigQuery too, to be safe.", question, exc)
         return False
@@ -873,9 +905,17 @@ def ask_analytics(
     cite numbers from it directly (the number-verification guardrail below
     checks against BOTH the SQL tool results AND this file context, so a
     figure genuinely from the uploaded file still passes)."""
-    if _contains_write_operation(question):
-        return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": "bigquery", "moengage_used": False}
-
+    # No pre-check against the raw human question text here (there used to
+    # be one) - real, live-caught false positive: "Where is the biggest
+    # funnel drop-off?" got refused outright as an attempted write
+    # operation, because \bDROP\b matches the ordinary English word "drop"
+    # inside "drop-off" just as readily as it matches the SQL keyword. That
+    # check added no real protection anyway - the actual guardrails are the
+    # read-only DB connection (writes physically fail regardless of what
+    # anyone asks) and _contains_write_operation(sql_query) below, checked
+    # against the real SQL the agent actually tried to run, where these
+    # keywords can't appear as innocuous prose the way they can in a human
+    # question.
     llm = get_llm("ANALYTICS")
 
     # Resolve a follow-up ("what about for hair loss specifically") into a
@@ -903,7 +943,7 @@ def ask_analytics(
     # MoEngage-only question can skip the SQL agent entirely rather than
     # relying purely on a prompt instruction to keep it from padding the
     # answer with an irrelevant query.
-    moengage_context, moengage_used, moengage_raw_summary = gather_moengage_context(effective_question, llm)
+    moengage_context, moengage_used, moengage_raw_summary, moengage_checked = gather_moengage_context(effective_question, llm)
     skip_bigquery = moengage_used and _is_moengage_exclusive(effective_question, llm)
 
     if skip_bigquery:
@@ -982,6 +1022,29 @@ def ask_analytics(
             "'automated email flows' collectively unless the question is specifically about the email "
             "channel; call them 'automated/CRM flows' otherwise.\n---\n"
             + moengage_context + "\n---\n\n" + agent_input
+        )
+    elif moengage_checked:
+        # Real gap this closes: MoEngage's own real chart catalog was
+        # genuinely checked (not skipped) and came back with nothing
+        # relevant to THIS question - but without telling the SQL agent
+        # that a real check happened, it has no way to know, and ends up
+        # answering purely from BigQuery's own perspective ("no email-
+        # engagement tables in the data warehouse") in a way that reads as
+        # if MoEngage was never considered at all, when it genuinely was.
+        # Caught live: "is list health deteriorating" got exactly this
+        # vague, misleading answer even after a real MoEngage catalog
+        # check confirmed no unsubscribe/complaint/bounce chart exists
+        # anywhere in the real workspace - the honest, specific version of
+        # that same true fact ("MoEngage doesn't track this specific
+        # metric") is what should reach the final answer, not a generic
+        # "not in the data warehouse" that implies no one looked.
+        agent_input = (
+            "MoEngage's real chart catalog was already checked for this question and found nothing "
+            "relevant - the real reason, verbatim, is below. If your final answer touches anything that "
+            "reason covers, state that SPECIFIC reason plainly (e.g. 'MoEngage doesn't track that as its "
+            "own metric' or whatever the real reason says) - never say generically that the data 'isn't in "
+            "the database' or 'isn't available' when a real, specific check already ran and found a real, "
+            "specific reason.\n---\n" + moengage_context + "\n---\n\n" + agent_input
         )
 
     # Real, repeatedly-observed failure mode (same class already fixed for

@@ -46,6 +46,8 @@ _MAX_RETRIES = 2
 _CACHE_TTL_SECONDS = 900  # 15 min - see module docstring
 
 _cache = {"snapshots": None, "fetched_at": 0.0}
+_catalog_cache = {"refs": None, "fetched_at": 0.0}
+_catalog_cache_lock = threading.Lock()
 # Each Slack @-mention is handled on its own background thread (run_in_background
 # in slack_integration.py) - without a lock, two questions arriving close
 # together with an expired/cold cache would both kick off a full ~138-chart
@@ -156,6 +158,33 @@ def _list_all_chart_refs() -> list:
         for result in pool.map(_charts_for, dashboards):
             refs.extend(result)
     return refs
+
+
+def list_chart_catalog(force_refresh: bool = False) -> list:
+    """The real MoEngage 'schema' - every real dashboard+chart NAME across
+    the workspace (no chart data, just what exists and what it's called),
+    the direct MoEngage analogy to BigQuery's own schema-inspection tools
+    (sql_db_list_tables/sql_db_schema) that the SQL agent already uses to
+    reason about what's genuinely available before writing a query. A
+    thin, cached public wrapper around _list_all_chart_refs() - confirmed
+    live to cost ~7s (vs ~40-50s for the full per-chart data fetch), cheap
+    enough to genuinely reason over on every question rather than needing
+    a coarse pre-gate to avoid paying for it. Cached like
+    get_all_chart_snapshots (chart NAMES change even less often than chart
+    DATA, so the same TTL is a safe, conservative choice, not a compromise)."""
+    now = time.time()
+    if not force_refresh and _catalog_cache["refs"] is not None and (now - _catalog_cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+        return _catalog_cache["refs"]
+
+    with _catalog_cache_lock:
+        now = time.time()
+        if not force_refresh and _catalog_cache["refs"] is not None and (now - _catalog_cache["fetched_at"]) < _CACHE_TTL_SECONDS:
+            return _catalog_cache["refs"]
+
+        refs = _list_all_chart_refs()
+        _catalog_cache["refs"] = refs
+        _catalog_cache["fetched_at"] = now
+        return refs
 
 
 def get_all_chart_snapshots(force_refresh: bool = False) -> list:

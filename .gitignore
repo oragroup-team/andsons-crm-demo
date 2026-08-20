@@ -1,5 +1,10 @@
 BigQuery Metadata.xlsx
 Image_Bank/
+# Real MoEngage CSV exports (internal staff emails, real WhatsApp/email
+# template text, real campaign data) - real business data, not code. The
+# loader that turns these into BigQuery tables is tracked
+# (backend/moengage_export/load_moengage_csvs.py); the raw exports are not.
+Flows_-_Schema_*/
 *.json.key
 Hari ORA Service Account Key.json
 *Service Account Key*.json

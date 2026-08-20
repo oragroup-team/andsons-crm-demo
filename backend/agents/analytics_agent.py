@@ -136,9 +136,69 @@ at several Classification levels: "Category-Level" (paired with a Category like 
 "Middle-Tier". NEVER sum different Classification levels together in the same total - that double-counts \
 spend. Default to Category-Level rows (Category = 'HL') for "marketing spend" questions about hair loss \
 specifically; ask/clarify or use Overall-Level for whole-account spend questions.
-- There is NO email send/open/click event-tracking table in this warehouse at all - if a question asks \
-about email opens, clicks, or send counts, say plainly that this data isn't available here rather than \
-searching for it or guessing; do not loop trying to find a table that doesn't exist."""
+- MOENGAGE CAMPAIGN-LEVEL DATA - REAL, STRUCTURED, EXACT (prefer these tables over the chart-based \
+MoEngage tool for anything they cover - an exact queried number beats an LLM's read of a chart every \
+time). Source: MoEngage's own real "Flows" report, exported 2026-08-20 - a STATIC SNAPSHOT as of that \
+date, NOT live-updating like the chart-based tool; say so plainly if asked how current this is. These \
+live in crm-mail-automation-dev (this app's own project, not the connected ora-bigquery warehouse) - \
+same real situation as flow_orders above: a schema-inspection tool call on them will fail (cross-project) \
+- that is not a sign they don't exist, query them directly by full name regardless.
+  - crm-mail-automation-dev.crm_analytics_views.moengage_flows_summary (263 real flows, one row each): \
+Flow_Name, Flow_Status, Campaign_Channel, Global_CG_enabled (BOOL), Campaign_Control_Group_Percentage, \
+Trips_Started_Total_users, Trips_Started_CG_Users, plus the Goal/attribution-window/control-group columns \
+described below.
+  - crm-mail-automation-dev.crm_analytics_views.moengage_campaigns_email (821 real email sends, one row \
+per real campaign/touchpoint): Campaign_Name, Campaign_ID, Flows_Name (which real flow it belongs to), \
+Campaign_Status, Total_Sent, Total_Delivered, Open_rate, CTR, Hard_bounce_rate, Soft_bounce_rate, \
+Unsubscribe_rate, Complaints_rate - ALL real percentages (0-100 scale) - the actual real source for list-\
+health questions (unsubscribes/complaints/bounces), which the chart-based tool cannot answer at all.
+  - crm-mail-automation-dev.crm_analytics_views.moengage_campaigns_whatsapp (163 real sends): same shape, \
+WhatsApp-specific fields too (Read_Rate, CTOR, Body/Header/Footer real template text).
+  - crm-mail-automation-dev.crm_analytics_views.moengage_campaigns_push (51 real sends): same idea, \
+broken out PER PLATFORM - Android_/Ios_/Web_/All_Platform_ prefixes on almost every column, since a push \
+send can behave differently per OS. Use the All_Platform_* columns for a platform-unspecified question.
+  - COLUMN NAMING PATTERN (all 4 tables, learn this once, don't guess per question): <Goal_1 or Goal_2> \
+(a campaign can have up to 2 real conversion goals) + <Click_Through / View_Through / In_Session> \
+(attribution window - Click_Through is the default/most meaningful for "did this send cause a purchase") \
++ one of: Total_Revenue, CVR, Converted_Users, Conversion_Events, Average_Order_Value, \
+Control_Group_CVR, Control_Group_Uplift, Global_Control_Group_CVR, Global_Control_Group_Uplift, \
+Control_Group_Conversions, Global_Control_Group_Conversions. E.g. Goal_1_Click_Through_Total_Revenue is \
+Goal 1's real revenue attributed to people who clicked the send - the real source for "which campaigns \
+drive revenue" and "email-driven conversion" questions (Goal_1_Click_Through_CVR). THESE ARE REAL, REAL \
+MONETARY VALUES, NOT COUNTS: Goal_1_Click_Through_Total_Revenue (and its View_Through/In_Session and \
+Goal_2 counterparts) genuinely holds a real SGD figure per campaign in all 3 campaign-level tables \
+(email/whatsapp/push) - confirmed live and non-zero for real campaigns. Never claim these tables "contain \
+no monetary values" - verify that claim against a real query before ever stating it, because it is false \
+for these specific tables; SUM(Total_Revenue-shaped column) / SUM(Sent-shaped column) is real, computable \
+revenue-per-send for any real Flows_Name.
+  - VERIFIED REAL FACT about control groups, not something to re-derive per question - independently \
+confirmed live against every real row in this data: NOT ONE of the 263 real flows or any real campaign \
+in any channel has a nonzero Campaign_Control_Group_Percentage or Global_CG_enabled=TRUE. Control groups \
+have never actually been turned on for any real andSons campaign. A question asking "which campaigns \
+show incremental revenue vs a control group" has one true, confident answer: none currently do - no \
+campaign has a control group running, so incremental/uplift attribution genuinely isn't computable for \
+any of them right now. State this plainly and confidently as a verified fact, not a data gap you \
+couldn't find - a query confirming zero rows with a real control group is itself the complete, correct \
+answer.
+  - Campaign_Name is NOT a unique key - the same display name can appear on multiple real rows (a live \
+send and an earlier draft/version, or a genuine re-run); Campaign_ID is the real unique identifier - \
+group/filter by Campaign_ID when counting distinct real campaigns.
+  - Flows_Name links each individual send to the real flow it belongs to - use it for "lifecycle stage" \
+questions by matching against real flow names (e.g. names containing "Winback" are the real winback \
+lifecycle stage - query these tables and report its real revenue-per-send even if other named stages in \
+the same question don't exist, same principle as reporting a partial real answer rather than none at \
+all). There is NO separate "Sale", "Upgrade", or "Edu" lifecycle category anywhere in this real data - if \
+asked about one of those specifically, say plainly that this exact categorization doesn't exist in the \
+real MoEngage setup rather than forcing a different real flow into that label, but ALWAYS query these \
+tables first to check and report what real, named stages DO exist (e.g. Winback) before concluding \
+anything is missing - never conclude "not tracked" from the chart-based tool's own catalog check alone \
+when these real per-campaign tables haven't been queried yet; they are the first, primary place to look \
+for ANY question about campaign performance by name, product line, or channel, ALWAYS before the chart \
+tool and before falling back to a BigQuery order-attribution proxy (e.g. orders_utm_medium share) for \
+something these tables already report directly and exactly (conversion rate, revenue, funnel step \
+rates like open/click/CVR in sequence).
+  - Still use the chart-based MoEngage tool for anything these tables don't cover (day-by-day trend \
+detail, funnel step-by-step breakdowns not captured as a Goal here)."""
 
 SYSTEM_PREFIX_TEMPLATE = """You are the andSons analytics assistant. andSons is a men's health telehealth \
 brand (hair loss is the flagship vertical, alongside weight loss and other supplements); all prices are \
@@ -854,11 +914,14 @@ def _resolve_followup_question(question: str, conversation_history: list, llm) -
 
 class _MoEngageExclusive(BaseModel):
     moengage_only: bool = Field(
-        description="True ONLY if this question is entirely about MoEngage campaign/engagement metrics "
-        "(opens, clicks, delivery rate, funnel drop-off) and needs NOTHING from the sales database at all "
-        "- no revenue, no order count, no customer count, no spend, not even as a comparison or share. "
-        "False if answering it needs a database query for anything, even partially alongside MoEngage "
-        "data, or if you're genuinely not sure."
+        description="True ONLY if answering this question needs NOTHING that a database query could "
+        "provide - no revenue, no order count, no customer count, no spend, and no per-campaign opens/ "
+        "clicks/CVR/unsubscribe/control-group metric either, since those now live in real, exact BigQuery "
+        "tables too (see schema notes: moengage_campaigns_email/whatsapp/push, moengage_flows_summary) - "
+        "prefer that real, queryable source over a chart summary whenever a question could be answered "
+        "either way. This should be True mainly for genuine chart-only detail those tables don't capture "
+        "(day-by-day trend over time, funnel step-by-step breakdown). False if answering it needs a "
+        "database query for anything, even partially, or if you're genuinely not sure."
     )
 
 
@@ -984,6 +1047,20 @@ def ask_analytics(
         agent_type="tool-calling",
         prefix=system_prefix,
         verbose=False,
+        # max_iterations: real gap this raises - LangChain's own default (15)
+        # was too low once real, verified, live-caught: a question needing
+        # exploration across the 3 new real per-campaign MoEngage tables
+        # (checking which real flow names exist, per table, before
+        # aggregating) genuinely used every step correctly and still ran
+        # out before producing a final answer, falling back to "couldn't
+        # find data" despite already having computed the real number it
+        # needed. More tables to reason over needs more budget to do it in,
+        # not a smaller one. create_sql_agent's own top-level max_iterations
+        # param, not agent_executor_kwargs - it passes max_iterations into
+        # the AgentExecutor itself internally, so setting it again inside
+        # agent_executor_kwargs is a genuine duplicate-keyword conflict
+        # (caught live: TypeError on every single call once added there).
+        max_iterations=25,
         agent_executor_kwargs={"return_intermediate_steps": True},
     )
 
@@ -1001,12 +1078,15 @@ def ask_analytics(
     if moengage_used:
         agent_input = (
             "Real MoEngage campaign/engagement data relevant to this question, given to you directly "
-            "below - BigQuery has NO email open/click/delivery event data at all (see schema notes), so "
-            "for opens/clicks/delivery-rate/funnel-drop-off questions this is your ONLY real source. "
-            "USE IT: if it answers the question, cite it directly in your answer - do not say that data "
-            "isn't available, and do not run a SQL query as a substitute for a metric this doesn't cover "
-            "(e.g. don't answer an open-rate question with an order count instead just because SQL has "
-            "orders). Still run SQL for anything this data doesn't cover (revenue, order counts), and "
+            "below FROM THE CHART-BASED TOOL - a separate, narrower source than the real "
+            "moengage_campaigns_email/whatsapp/push/flows_summary BigQuery tables (see schema notes), "
+            "which now hold real, exact per-campaign opens/clicks/CVR/unsubscribe/control-group numbers - "
+            "PREFER those tables via SQL for anything they cover (they give an exact queried number, not "
+            "an LLM's read of a chart); use this chart-based context below only for genuine detail those "
+            "tables don't have (day-by-day trend, funnel step-by-step breakdown). "
+            "USE IT: if it answers something the tables genuinely don't, cite it directly - do not say "
+            "that data isn't available if this context already shows it. Still run SQL for anything this "
+            "doesn't cover (revenue, order counts, or the exact per-campaign metrics above), and "
             "combine both ONLY when the question genuinely needs both. A real, serious mistake this "
             "caused before: a plain 'how did automation perform this year' question, already fully and "
             "cleanly answered by one SQL revenue/order total, got padded out with several unrelated "

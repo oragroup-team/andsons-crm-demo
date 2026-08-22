@@ -480,26 +480,40 @@ def _invoke_with_retry(chain, payload: dict, attempts: int = 5, label: str = "An
 class _MetricIntent(BaseModel):
     metric: Literal["revenue", "order_count", "other"] = Field(
         description="What number this question is actually asking for. 'revenue' for a dollar/SGD amount "
-        "(revenue, sales, spend, value earned). 'order_count' for a plain count of orders (e.g. 'how many "
-        "orders', 'how many people bought'). 'other' for anything else (average order value, unique "
-        "customer count, a ratio/percentage, etc.)."
+        "(revenue, sales, spend, value earned) from real orders. 'order_count' for a plain count of real "
+        "orders (e.g. 'how many orders', 'how many people bought'). 'other' for anything else this check "
+        "can't verify, including a count of USERS/PEOPLE/TRIPS entering or being sent something (a real, "
+        "different MoEngage concept, not a BigQuery order count), average order value, unique customer "
+        "count, or a ratio/percentage."
+    )
+    wants_breakdown: bool = Field(
+        default=False,
+        description="True if the question asks for results BROKEN DOWN across multiple groups rather than "
+        "one single total - by brand, by category, by time period (week-over-week, month-over-month, a "
+        "trend), by attribution window, 'each', 'every', 'top N', or any other multi-row comparison. True "
+        "here means a single corrected number could never represent or fix the real answer, so no "
+        "correction should be attempted at all.",
     )
 
 
-def _resolve_metric_intent(question: str) -> str:
+def _resolve_metric_intent(question: str) -> tuple:
     """Independently classifies what NUMBER a question is actually asking
-    for, from the question's own words - shared by both deterministic
-    safety nets in this file, so neither assumes revenue by default and
-    silently overwrites a correct answer with a different kind of number.
-    Real, live-caught bug this fixes: a plain order-count question ('how
-    many orders came from winback') got its correct integer answer
-    overwritten with an unrelated revenue figure, because the only check
-    either safety net ran was 'does any number in the stated answer match
-    the independently-computed revenue total' - with no awareness that
-    revenue might not even be what was asked for. Defaults to 'revenue' on
-    any resolution failure - the long-standing prior behavior for both
-    checks, not a new assumption - so a classifier hiccup degrades to the
-    existing behavior rather than silently disabling every correction."""
+    for (and whether it wants a breakdown, not one total), from the
+    question's own words - shared by both deterministic safety nets in
+    this file, so neither assumes revenue by default and silently
+    overwrites a correct answer with a different kind of number, or
+    discards a genuinely correct multi-row breakdown answer for one
+    irrelevant blanket total. Real, live-caught bugs this fixes: a plain
+    order-count question ('how many orders came from winback') got its
+    correct integer answer overwritten with an unrelated revenue figure;
+    separately, several genuinely correct per-brand/per-flow-type
+    breakdown answers got replaced with one blanket total, because the
+    only correction either safety net could make was a single number.
+    Returns (metric, wants_breakdown); defaults to ('revenue', False) on
+    any resolution failure - the long-standing prior default for the
+    metric, and False for wants_breakdown so a classifier hiccup degrades
+    to the existing single-total-correction behavior rather than silently
+    disabling every correction outright."""
     llm = get_llm("ANALYTICS")
     structured_llm = llm.with_structured_output(_MetricIntent)
     prompt = ChatPromptTemplate.from_messages([
@@ -508,10 +522,11 @@ def _resolve_metric_intent(question: str) -> str:
     ])
     chain = prompt | structured_llm
     try:
-        return _invoke_with_retry(chain, {"question": question}, label="Metric-intent resolution call").metric
+        result = _invoke_with_retry(chain, {"question": question}, label="Metric-intent resolution call")
+        return result.metric, result.wants_breakdown
     except Exception as exc:  # noqa: BLE001 - fail to the prior default, never block a correction outright
         logger.warning("Metric-intent resolution failed for %r: %s - defaulting to revenue.", question, exc)
-        return "revenue"
+        return "revenue", False
 
 
 def _verify_campaign_family_total(question: str, answer: str, sql_query: str) -> Optional[str]:
@@ -540,7 +555,15 @@ def _verify_campaign_family_total(question: str, answer: str, sql_query: str) ->
     except Exception:
         return None
 
-    metric = _resolve_metric_intent(question)
+    metric, wants_breakdown = _resolve_metric_intent(question)
+    if wants_breakdown:
+        # Same real principle as the flow_orders check's own breakdown
+        # guard: a single corrected total can never represent or fix a
+        # genuinely correct multi-row breakdown answer (by brand, by
+        # period, by category) - must fail open rather than actively make
+        # a detailed, correct answer worse by replacing it with one
+        # irrelevant number.
+        return None
     if metric == "other":
         # Same real principle as the flow_orders check's own metric guard:
         # this function can only independently verify revenue or a plain
@@ -693,17 +716,36 @@ class _FlowQuestionIntent(BaseModel):
     metric: Literal["revenue", "order_count", "other"] = Field(
         default="revenue",
         description="What number the question is actually asking for. 'revenue' for a dollar/SGD amount "
-        "(revenue, sales, spend, value earned). 'order_count' for a plain count of orders (e.g. 'how many "
-        "orders', 'how many people bought'). 'other' for anything else this specific check can't verify "
-        "(average order value, unique customer count, conversion rate, a ratio/percentage, etc.) - "
-        "critical to get right: correcting a count question with a revenue number (or vice versa) would "
-        "answer a completely different question than the one actually asked.",
+        "(revenue, sales, spend, value earned) FROM ORDERS - real completed purchases in the sales "
+        "database. 'order_count' for a plain count of real completed ORDERS/PURCHASES (e.g. 'how many "
+        "orders', 'how many people bought'). 'other' for anything else this specific check can't verify - "
+        "this includes average order value, unique customer count, conversion rate, a ratio/percentage, "
+        "AND critically any count of USERS/PEOPLE/TRIPS ENTERING or being SENT a flow (MoEngage's own "
+        "'Trips Started'/'users entered'/'sent' concept - a real, different metric living in MoEngage "
+        "data, not a BigQuery order count) - a real, live-caught mistake this guards against: 'how many "
+        "users entered our flows' was wrongly treated as an order_count question and 'corrected' with an "
+        "unrelated real order count, silently answering a completely different metric than what was asked. "
+        "Get this right: correcting a count question with a revenue number (or an order count with a "
+        "user/trip count, or vice versa) answers a completely different question than the one actually "
+        "asked.",
     )
     wants_all_flows: bool = Field(
         default=False,
         description="True if the question asks about flows/automation AS A WHOLE (e.g. 'how did our "
         "flows perform', 'automation revenue this month') - not one named flow. False if a single named "
         "flow is asked about, or is_flow_question is False.",
+    )
+    wants_breakdown: bool = Field(
+        default=False,
+        description="True if the question asks for results BROKEN DOWN across multiple groups rather than "
+        "one single total - by brand, by flow/flow-type ('separate between onboarding/winback/"
+        "replenishment/abandonment'), by time period (week-over-week, month-over-month, a trend), by "
+        "attribution window (view-through vs click-through), 'each', 'every', 'top N', or any other "
+        "multi-row comparison. A real, live-caught mistake this guards against: a genuinely correct, "
+        "properly-grouped breakdown answer (e.g. real per-brand or per-flow-type revenue) was silently "
+        "discarded and replaced with one irrelevant blanket total, because the only correction this check "
+        "could make was a SINGLE number - which can never represent or fix a multi-row breakdown answer. "
+        "True here means: do not attempt any correction at all, no single total is the right answer.",
     )
     named_flow_family: Optional[str] = Field(
         default=None,
@@ -771,6 +813,17 @@ def _verify_flow_orders_answer(question: str, answer: str, sql_query: str) -> Op
 
     intent = _resolve_flow_intent(question)
     if intent is None or not intent.is_flow_question:
+        return None
+    if intent.wants_breakdown:
+        # Real, live-caught bug this guards against: several genuinely
+        # correct, properly-grouped breakdown answers (per-brand revenue,
+        # per-flow-type revenue, a WoW/MoM trend) got silently discarded
+        # and replaced with one irrelevant blanket total, because this
+        # check's only correction mechanism is a SINGLE number - which can
+        # never represent or fix a multi-row breakdown answer. A breakdown
+        # question needs a real per-group check to verify at all (not built
+        # here) - until then, this must fail open rather than actively make
+        # a detailed, correct answer worse.
         return None
     if intent.metric == "other":
         # Real bug this guards against, caught live: this check used to

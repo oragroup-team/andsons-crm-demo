@@ -38,58 +38,118 @@ logger = logging.getLogger("analytics_agent")
 
 BIGQUERY_SCHEMA_NOTES = """SCHEMA NOTES (this is the real ORA group data warehouse - it holds every ORA \
 brand and country together, so filtering correctly is essential, not optional):
-- ALWAYS filter Brand = 'AndSons' AND Country = 'Singapore' by default in every query on \
-dotcom_plus_marketplace, updated_sales_data, and marketing_spend_data, unless the question explicitly \
-asks about another brand (Ova, Modern Molecules, WithJuno) or another country (andSons also has rows for \
-Malaysia and Philippines) - forgetting this filter silently mixes in other brands'/countries' real data.
-- dotcom_plus_marketplace is the primary order-line sales fact table (Country, Brand, Channel, order_id, \
-status, Revenue, Final_Revenue, New_COGS, Order_Type, Revenue_Type, Prescription_Type, Applicable_Discount, \
-Applicable_Cashback, Delivery_Fee, quantity, product_category, created_at). Use this table for standard \
+
+TABLE ACCESS: you can now see and query 26 real tables (up from 3) - use the real schema-inspection \
+tools on any of them rather than guessing columns; they have real column names/types you should actually \
+look up, not assume from the notes below. The notes below cover semantic GOTCHAS that column names alone \
+won't tell you - not a substitute for looking at the real schema yourself.
+
+- ALWAYS filter Brand = 'AndSons' AND Country = 'Singapore' by default on any table with those columns, \
+unless the question explicitly asks about another brand (Ova, Modern Molecules, WithJuno) or another \
+country (andSons also has rows for Malaysia and Philippines) - forgetting this filter silently mixes in \
+other brands'/countries' real data. Almost every table below has real Brand and Country columns (check \
+case: some are 'Brand'/'Country', some are lowercase 'brand'/'country' - look up the real casing before \
+filtering, it varies table to table and a case-sensitive equality filter with the wrong case silently \
+returns zero rows, not an error).
+
+CORE ORDER/REVENUE TABLES:
+- dotcom_plus_marketplace is the primary order-line sales fact table. Use this table for standard \
 revenue/order questions.
-- CATEGORY FIELD - a real, verified data-quality trap: updated_sales_data (and its flow_orders view) has \
-BOTH product_category (values like "Hair Loss", "Erectile Dysfunction", "Weight Loss") AND \
-new_product_category (short codes: "HL", "ED", "PE", "Weight_Loss", "Consult", "Well_Being", "SC", \
-"Sexual Health", "Weight_Loss_Program", "Supplements") - these are NOT interchangeable aliases for the \
-same thing. new_product_category is the more complete, corrected field - verified directly: every single \
-row product_category correctly identifies, new_product_category also identifies, PLUS real additional rows \
-product_category misses entirely (confirmed live: product_category = 'Hair Loss' alone undercounted a real \
-flow-revenue answer by about 5% versus the complete figure, and this same gap - product_category missing \
-rows new_product_category catches - holds across every category checked, not just hair loss). ALWAYS \
-filter on new_product_category for any category-scoped question (hair loss, ED, weight loss, etc.) - \
-never product_category alone, and don't assume they'd return the same rows just because they sound like \
-the same categorization.
-- status values are channel-prefixed, e.g. "[Dotcom] DELIVERED", "[Dotcom] PACKED_DISPATCHED", \
-"[Dotcom] PAID_CONSULTATION_ONLY", "[Dotcom] REFUND", "[Dotcom] PAYMENT_EXPIRED", "[Marketplace] \
-Completed", "[Marketplace] Confirmed", "[Marketplace] Cancelled", "[Marketplace] Delivered" - match with \
-LIKE '%DELIVERED%' / '%Completed%' style patterns rather than assuming the exact prefix. ALWAYS exclude \
-REFUND/CANCELLED/EXPIRED-style statuses by default on EVERY revenue or order-count question on this table \
-or updated_sales_data - not only ones phrased like "how much did we sell", but also comparisons, shares, \
-rates, and trends - so that two numbers being compared or combined are always measuring the same \
-population. Only include them if the question explicitly asks about refunds/cancellations, or asks for a \
-gross/all-orders figure specifically.
-- Channel spans Dotcom, Shopee, Lazada, Zalora, and TikTok - andSons sells on real marketplaces, not just \
-its own site. Default to no channel filter (all channels) unless asked about one specifically.
-- Order_Type is "Products" or "Consult Only" (free doctor-led consult, no product, revenue is 0).
-- Revenue_Type has many real values (e.g. "One-off", "Repeat One-off", "New One-off", "Repeat 3 Month \
-Sub", "Repeat 6 Month Sub", "New Customer New 3 Month Sub") - use LIKE patterns for "subscription" vs \
-"one-off" style groupings rather than an exact match on one string.
-- Prescription_Type is "Prescription" or "Non-Prescription" - never name the specific prescription \
-medicine even if the data contains it; refer to it only as "the doctor-prescribed plan".
-- Revenue is gross; Final_Revenue is net of discounts/cashback (use Final_Revenue for "how much revenue" \
-unless gross is asked for). New_COGS is cost of goods sold. Applicable_Discount/Applicable_Cashback are \
-per-order amounts, not rates.
 - updated_sales_data is a broader, richer table (customer email/phone, utm_source/utm_campaign, \
 signup_timestamp, cohort/attribution fields) - use it only when a question needs customer-level \
 attribution or cohort data that dotcom_plus_marketplace doesn't have. NEVER sum revenue across both \
 tables together in the same total - that double-counts the same orders. updated_sales_data.email and \
 .phone are real customer PII - never state one in an answer, aggregate only.
-- EMAIL / CRM IMPACT: updated_sales_data.orders_utm_medium is the real (order-level) proxy for \
-email-driven orders - values include "email", "EMAIL", and "ATM_EMAIL" (case-varies, match with LOWER() \
-LIKE '%email%'). orders_utm_source also includes "MoEngage" and "Insider", which are real CRM/email \
-marketing platforms - include them when a question is about CRM/lifecycle-email impact broadly. This is \
-order-attribution, not send/open/click event data - phrase answers as "email-attributed orders/revenue", \
-never as "opens" or "clicks" (that data doesn't exist here).
-- CRM/FLOW QUESTIONS - USE THE VERIFIED VIEW, NOT RAW orders_utm_campaign MATCHING: for ANY question about \
+- Revenue is gross; Final_Revenue is net of discounts/cashback (use Final_Revenue for "how much revenue" \
+unless gross is asked for).
+- status values are channel-prefixed, e.g. "[Dotcom] DELIVERED", "[Marketplace] Completed" - match with \
+LIKE '%DELIVERED%' / '%Completed%' style patterns rather than assuming the exact prefix. ALWAYS exclude \
+REFUND/CANCELLED/EXPIRED-style statuses by default on EVERY revenue or order-count question - not only \
+ones phrased like "how much did we sell", but also comparisons, shares, rates, and trends. Only include \
+them if the question explicitly asks about refunds/cancellations, or a gross/all-orders figure.
+- CATEGORY FIELD - a real, verified data-quality trap: this warehouse has BOTH product_category (values \
+like "Hair Loss", "Erectile Dysfunction") AND new_product_category (short codes: "HL", "ED", "PE", \
+"Weight_Loss", etc.) - NOT interchangeable. new_product_category is the more complete, corrected field - \
+verified directly: product_category alone undercounted a real flow-revenue answer by about 5% versus the \
+complete figure. ALWAYS filter on new_product_category for any category-scoped question.
+- Prescription_Type is "Prescription" or "Non-Prescription" - never name the specific prescription \
+medicine even if the data contains it; refer to it only as "the doctor-prescribed plan".
+
+THREE REAL, DIFFERENT "CHANNEL" CONCEPTS - a real, live-caught mistake this guards against (a "which \
+channels are driving sales" question answered with the wrong one of these three, because all three share \
+the literal column name "Channel"): figure out which one a question actually means before picking a table.
+  1. dotcom_plus_marketplace.Channel - the real MARKETPLACE the order was placed on: Dotcom, Shopee, \
+Lazada, Zalora, TikTok. Use for "which marketplace/storefront" questions.
+  2. marketing_data.channel / marketing_clicks_data.Channel / marketing_historical_data.Channel / \
+marketing_spend_data.Channel / creative_data.channel / _staging_consolidated_paid_performance.channel - \
+the real PAID ADVERTISING platform spend went to: Facebook, Google, Bing, TikTok, Quora, Snapchat, Reddit \
+(confirmed live values). Use for "which ad platform/paid channel" questions.
+  3. updated_sales_data.orders_utm_medium / orders_utm_source - the real, order-level CRM/marketing \
+ATTRIBUTION signal: real values include "email", "EMAIL", "crm", "ATM_crm", "ATM_EMAIL", "whatsapp", \
+"WhatsApp", "banner", "cpc", "social", "flow" (case varies, match with LOWER() LIKE). This is the closest \
+real thing to "CRM channel" or "marketing channel" in the plain business sense (not marketplace, not paid \
+ad platform) - use THIS for "channels driving sales" style questions in a CRM/lifecycle-marketing context, \
+unless the question is clearly about marketplaces or paid ads specifically. It's order-attribution, not \
+send/open/click event data - phrase answers as "email-attributed orders/revenue", never as "opens" or \
+"clicks" (that event-level data doesn't exist in BigQuery at all - see the MoEngage section below).
+
+REAL FUNNEL DATA IN BIGQUERY - use these instead of guessing from MoEngage charts or from order-count \
+proxies whenever a question is about signup/consultation/purchase funnel stages, not email engagement \
+funnels specifically (opens/clicks - those live only in MoEngage, see below):
+  - sg_regs_funnel, user_level_funnel, latest_funnel_view, consult_cats_sg_regs_funnel, \
+sg_regs_funnel_with_cohort_view - real signup-to-order funnel tables (near-identical shape): UTM signup \
+attribution, appointment timestamps, first-order timestamp, Brand, Country. Several very similar tables \
+exist (real historical iterations) - latest_funnel_view is the most likely current/canonical one unless a \
+question specifically needs the cohort-status fields only in sg_regs_funnel_with_cohort_view.
+  - ATC_aggregated, Signups_ATC_Funnel - real PRE-AGGREGATED funnel tables, already summed by day/brand/ \
+country/category: total_unique_users -> total_users_with_appt -> total_final_orders (ATC_aggregated), or \
+total_unique_users -> total_carts -> total_orders (Signups_ATC_Funnel). Prefer these over building your \
+own funnel from the row-level tables when the question just needs stage-to-stage counts/rates - the \
+aggregation is already done and verified.
+  - automation_testing_ova_sg_funnel - same funnel shape, Ova/Singapore-specific - the name suggests a \
+test/staging table, not confirmed production; say so if citing it for anything Ova-specific.
+
+REAL CONSULTATION DATA - use for P1/P2-style questions about doctor consultations, no-shows, treatment \
+plan purchases:
+  - doctor_consultation_sg, doctor_consultation_all, doctor_consultation_my - real per-consultation rows: \
+consult_status, ATTENDED_DR (the real no-show/attendance signal), charge_tp_button_clicked/ \
+charge_tp_success (real treatment-plan purchase signal), cancel_reason, dr_email, brand, country.
+  - order_to_consultation_my - order-to-consultation timing specifically: attended_dr, \
+adjusted_order_to_consult_hours, adjusted_consult_time_bucket.
+
+REAL PAID MARKETING DATA (separate from marketing_spend_data, which stays the default for simple spend \
+questions - see its own note below): marketing_data, marketing_clicks_data, marketing_historical_data, \
+_staging_consolidated_paid_performance, creative_data - campaign/adset/creative-level spend, impressions, \
+clicks, revenue, brand/country. creative_data goes down to individual ad/creative level. \
+marketplace_marketing_spends is a separate, simpler spend table (Spends, UNC, Traffic) - check which one \
+a question actually needs before picking; don't assume they're interchangeable or summable together.
+
+REAL CUSTOMER/COHORT DATA: customer_analysis_data and signups_purchase_time (per-customer first-purchase- \
+by-category timestamps, Ever_Bought_Subs), utm_cohort_data (cohort revenue/return-rate by acquisition \
+UTM), subs_only_cohort_data (subscription cohort ARPU/AOV/return-rate). Use for lifetime-value/cohort/ \
+retention questions, not simple period revenue questions.
+
+marketing_spend_data holds spend by Country, Brand, Channel (paid ad platform - see the Channel \
+disambiguation above), and month, at several Classification levels: "Category-Level" (paired with a \
+Category like 'HL'), "Overall-Level" (whole-account spend on that channel), "Middle-Tier". NEVER sum \
+different Classification levels together - that double-counts spend. Default to Category-Level rows for \
+a category-specific spend question; ask/clarify or use Overall-Level for whole-account questions.
+
+projection holds real forward-looking revenue/customer forecasts by year/month/brand/country/category - \
+use only when a question explicitly asks about projected/forecast numbers, never as a substitute for an \
+actual historical total.
+
+Tables that exist in this dataset but are deliberately NOT included above (so don't be surprised they're \
+invisible to schema inspection - this is intentional, not a gap to work around): 4 tables ending in \
+"_test" (marketing_clicks_data_test, marketing_data_all_test, marketing_impressions_data_test, \
+marketing_spend_data_test - dev/staging duplicates of real tables already listed above); 3 "mm_*" tables \
+(mm_production_data, mm_staging_data, mm_test_updated_sales_data - Modern Molecules, a different real ORA \
+brand's own Shopify data, out of scope here); a handful of confirmed-empty/dead tables (doctor-consultation- \
+sg, order_to_consultation_my_new, dod_campaign_data); and point-in-time snapshot tables (dated suffixes on \
+dotcom_plus_marketplace/updated_sales_data/marketing_spend_data - historical backups, not needed for a \
+current-state question).
+
+CRM/FLOW QUESTIONS - USE THE VERIFIED VIEW, NOT RAW orders_utm_campaign MATCHING: for ANY question about \
 a named CRM lifecycle flow (winback, abandoned cart, welcome, treatment-plan email, order confirmation, \
 no-show consultation, prescription renewal, cross-sell) or about "flows"/"automation" as a whole, query \
 `crm-mail-automation-dev.crm_analytics_views.flow_orders` (a view over the real updated_sales_data, same \
@@ -106,99 +166,104 @@ real orders_utm_campaign "ATM_" prefix convention, already resolved for you). Us
 flows/automation as a whole" questions that don't name one specific flow.
   - flow_family (STRING or NULL): one of 'winback', 'abandoned_cart', 'welcome_onboarding', \
 'treatment_plan_email', 'order_confirmation', 'no_show_consultation', 'prescription_renewal', 'cross_sell', \
-or NULL if the order isn't attributed to one of these named lifecycle flows (could be a paid ad, an \
-affiliate code, a sale promo, etc. - orders_utm_campaign is a much broader marketing-attribution field, not \
-CRM-flow-only). This already accounts for the real sprawl of hundreds of dated/product-specific exact \
-campaign-tag variants sharing a family name (e.g. "winback-ed-30jul", "20260716_PE_Winback_July Winback \
-Drive_Churned Lifetime", "Cart_Recovery_Personalized", "Abandoned Cart_Static" all correctly resolve to \
-their family) - filter on flow_family = 'winback' directly; never try to rebuild this with your own \
-LIKE '%keyword%' guess on the raw table, real variants use inconsistent naming a guessed pattern will miss.
+or NULL if the order isn't attributed to one of these named lifecycle flows. This already accounts for \
+the real sprawl of hundreds of dated/product-specific exact campaign-tag variants sharing a family name - \
+filter on flow_family = 'winback' directly; never try to rebuild this with your own LIKE '%keyword%' guess.
   CRITICAL - these two are DIFFERENT signals, do not combine them for a named-flow question: a question \
 about ONE named flow ("how much did winback drive") filters on flow_family ALONE - do NOT also require \
 is_flow_attributed, because plenty of real winback (and other named-flow) orders don't happen to carry the \
-ATM_ prefix, so adding that condition silently drops most of the real matching orders down to a tiny sliver \
-(a real, verified case of this exact mistake: combining both conditions for a winback question kept only \
-1 of 88 real matching orders, understating a SGD 3,912 answer as SGD 65). is_flow_attributed is reserved \
-for aggregate "all flows" questions where no single flow_family is named.
-  - is_excluded_status (BOOL): TRUE for refund/cancelled/expired-style statuses (the same default exclusion \
-rule already covered below) - filter WHERE NOT is_excluded_status for the normal case, or include everyone \
-regardless of this flag when a question explicitly asks for a gross/all-orders figure.
-This view exists because both of these were real, verified incidents caught and corrected: (1) a query \
+ATM_ prefix, so adding that condition silently drops most of the real matching orders down to a tiny \
+sliver (a real, verified case: combining both conditions for a winback question kept only 1 of 88 real \
+matching orders, understating a SGD 3,912 answer as SGD 65). is_flow_attributed is reserved for aggregate \
+"all flows" questions where no single flow_family is named.
+  - is_excluded_status (BOOL): TRUE for refund/cancelled/expired-style statuses - filter WHERE NOT \
+is_excluded_status for the normal case, or include everyone regardless when a question explicitly asks for \
+a gross/all-orders figure.
+This view exists because two real, verified incidents were caught and corrected this way: (1) a query \
 that skipped the ATM_ automation filter answered "how did flows perform" with the whole hair-loss \
 category's revenue (SGD 258,194) instead of flow-attributed revenue (the real figure, SGD 1,005.51 for \
 that month) - a ~257x overstatement; (2) a guessed LIKE '%keyword%' pattern for a specific flow matched \
-only some of the real campaign-tag variants, undercounting a flow's true revenue by 2-4x depending on the \
-flow, because real variants don't share one consistent substring. Both failure classes are structurally \
-fixed by using this view's pre-verified columns instead of re-deriving the filter logic per question.
-- marketing_spend_data holds spend by Country, Brand, Channel, and month (Spends, Clicks, Impressions), \
-at several Classification levels: "Category-Level" (paired with a Category like 'HL' for Hair Loss, \
-'Weight_Loss', 'Supplements', 'EDPE'), "Overall-Level" (whole-account spend on that channel), and \
-"Middle-Tier". NEVER sum different Classification levels together in the same total - that double-counts \
-spend. Default to Category-Level rows (Category = 'HL') for "marketing spend" questions about hair loss \
-specifically; ask/clarify or use Overall-Level for whole-account spend questions.
-- MOENGAGE CAMPAIGN-LEVEL DATA - REAL, STRUCTURED, EXACT (prefer these tables over the chart-based \
-MoEngage tool for anything they cover - an exact queried number beats an LLM's read of a chart every \
-time). Source: MoEngage's own real "Flows" report, exported 2026-08-20 - a STATIC SNAPSHOT as of that \
-date, NOT live-updating like the chart-based tool; say so plainly if asked how current this is. These \
-live in crm-mail-automation-dev (this app's own project, not the connected ora-bigquery warehouse) - \
-same real situation as flow_orders above: a schema-inspection tool call on them will fail (cross-project) \
-- that is not a sign they don't exist, query them directly by full name regardless.
-  - crm-mail-automation-dev.crm_analytics_views.moengage_flows_summary (263 real flows, one row each): \
-Flow_Name, Flow_Status, Campaign_Channel, Global_CG_enabled (BOOL), Campaign_Control_Group_Percentage, \
-Trips_Started_Total_users, Trips_Started_CG_Users, plus the Goal/attribution-window/control-group columns \
-described below.
-  - crm-mail-automation-dev.crm_analytics_views.moengage_campaigns_email (821 real email sends, one row \
-per real campaign/touchpoint): Campaign_Name, Campaign_ID, Flows_Name (which real flow it belongs to), \
-Campaign_Status, Total_Sent, Total_Delivered, Open_rate, CTR, Hard_bounce_rate, Soft_bounce_rate, \
-Unsubscribe_rate, Complaints_rate - ALL real percentages (0-100 scale) - the actual real source for list-\
-health questions (unsubscribes/complaints/bounces), which the chart-based tool cannot answer at all.
-  - crm-mail-automation-dev.crm_analytics_views.moengage_campaigns_whatsapp (163 real sends): same shape, \
-WhatsApp-specific fields too (Read_Rate, CTOR, Body/Header/Footer real template text).
-  - crm-mail-automation-dev.crm_analytics_views.moengage_campaigns_push (51 real sends): same idea, \
-broken out PER PLATFORM - Android_/Ios_/Web_/All_Platform_ prefixes on almost every column, since a push \
-send can behave differently per OS. Use the All_Platform_* columns for a platform-unspecified question.
-  - COLUMN NAMING PATTERN (all 4 tables, learn this once, don't guess per question): <Goal_1 or Goal_2> \
-(a campaign can have up to 2 real conversion goals) + <Click_Through / View_Through / In_Session> \
-(attribution window - Click_Through is the default/most meaningful for "did this send cause a purchase") \
-+ one of: Total_Revenue, CVR, Converted_Users, Conversion_Events, Average_Order_Value, \
-Control_Group_CVR, Control_Group_Uplift, Global_Control_Group_CVR, Global_Control_Group_Uplift, \
-Control_Group_Conversions, Global_Control_Group_Conversions. E.g. Goal_1_Click_Through_Total_Revenue is \
-Goal 1's real revenue attributed to people who clicked the send - the real source for "which campaigns \
-drive revenue" and "email-driven conversion" questions (Goal_1_Click_Through_CVR). THESE ARE REAL, REAL \
-MONETARY VALUES, NOT COUNTS: Goal_1_Click_Through_Total_Revenue (and its View_Through/In_Session and \
-Goal_2 counterparts) genuinely holds a real SGD figure per campaign in all 3 campaign-level tables \
-(email/whatsapp/push) - confirmed live and non-zero for real campaigns. Never claim these tables "contain \
-no monetary values" - verify that claim against a real query before ever stating it, because it is false \
-for these specific tables; SUM(Total_Revenue-shaped column) / SUM(Sent-shaped column) is real, computable \
-revenue-per-send for any real Flows_Name.
-  - VERIFIED REAL FACT about control groups, not something to re-derive per question - independently \
-confirmed live against every real row in this data: NOT ONE of the 263 real flows or any real campaign \
-in any channel has a nonzero Campaign_Control_Group_Percentage or Global_CG_enabled=TRUE. Control groups \
-have never actually been turned on for any real andSons campaign. A question asking "which campaigns \
-show incremental revenue vs a control group" has one true, confident answer: none currently do - no \
-campaign has a control group running, so incremental/uplift attribution genuinely isn't computable for \
-any of them right now. State this plainly and confidently as a verified fact, not a data gap you \
-couldn't find - a query confirming zero rows with a real control group is itself the complete, correct \
-answer.
-  - Campaign_Name is NOT a unique key - the same display name can appear on multiple real rows (a live \
-send and an earlier draft/version, or a genuine re-run); Campaign_ID is the real unique identifier - \
-group/filter by Campaign_ID when counting distinct real campaigns.
-  - Flows_Name links each individual send to the real flow it belongs to - use it for "lifecycle stage" \
-questions by matching against real flow names (e.g. names containing "Winback" are the real winback \
-lifecycle stage - query these tables and report its real revenue-per-send even if other named stages in \
-the same question don't exist, same principle as reporting a partial real answer rather than none at \
-all). There is NO separate "Sale", "Upgrade", or "Edu" lifecycle category anywhere in this real data - if \
-asked about one of those specifically, say plainly that this exact categorization doesn't exist in the \
-real MoEngage setup rather than forcing a different real flow into that label, but ALWAYS query these \
-tables first to check and report what real, named stages DO exist (e.g. Winback) before concluding \
-anything is missing - never conclude "not tracked" from the chart-based tool's own catalog check alone \
-when these real per-campaign tables haven't been queried yet; they are the first, primary place to look \
-for ANY question about campaign performance by name, product line, or channel, ALWAYS before the chart \
-tool and before falling back to a BigQuery order-attribution proxy (e.g. orders_utm_medium share) for \
-something these tables already report directly and exactly (conversion rate, revenue, funnel step \
-rates like open/click/CVR in sequence).
-  - Still use the chart-based MoEngage tool for anything these tables don't cover (day-by-day trend \
-detail, funnel step-by-step breakdowns not captured as a Goal here)."""
+only some of the real campaign-tag variants, undercounting a flow's true revenue by 2-4x. Both failure \
+classes are structurally fixed by using this view's pre-verified columns instead of re-deriving the \
+filter logic per question.
+
+MOENGAGE - THREE REAL, GENUINELY DIFFERENT DATA SURFACES, not one - each covers a different real \
+population and a different kind of fact; use the right one, and don't assume a "verified fact" from one \
+surface generalizes to another (a real mistake this note corrects - see below):
+
+  1. moengage_campaigns_email / moengage_campaigns_whatsapp / moengage_campaigns_push (in \
+crm-mail-automation-dev.crm_analytics_views, same cross-project situation as flow_orders - schema \
+inspection fails, query directly by full name regardless) - REAL PERFORMANCE metrics (Sent, Delivered, \
+Open_rate, CTR, Hard_bounce_rate, Unsubscribe_rate, Complaints_rate, and Goal_N x [Click_Through/ \
+View_Through/In_Session] x [Total_Revenue, CVR, Control_Group_Uplift, Control_Group_CVR] - see the column \
+naming pattern below) - but ONLY for the real Flow-triggered automated touchpoints captured in MoEngage's \
+own "Flows" report (source: a real export, snapshot dated 2026-08-20, static - not live-updating; say so \
+if asked how current it is). moengage_flows_summary (same project) is the one-row-per-flow rollup of the \
+same population: Flow_Name, Flow_Status, Trips_Started_Total_users, Campaign_Control_Group_Percentage.
+     - COLUMN NAMING PATTERN (all 3 campaign-level tables): <Goal_1 or Goal_2> + <Click_Through / \
+View_Through / In_Session> (attribution window - Click_Through is the default/most meaningful for "did \
+this send cause a purchase") + one of: Total_Revenue, CVR, Converted_Users, Conversion_Events, \
+Average_Order_Value, Control_Group_CVR, Control_Group_Uplift, Global_Control_Group_CVR, \
+Global_Control_Group_Uplift, Control_Group_Conversions, Global_Control_Group_Conversions. These ARE real \
+monetary values where the name says Total_Revenue - confirmed live, non-zero for real campaigns; never \
+claim these tables "contain no monetary values" without checking first.
+     - CRITICAL - "users entered/started a flow" (Trips_Started_Total_users) is a DIFFERENT, real, \
+NON-INTERCHANGEABLE metric from "orders attributed to a flow" (flow_orders' COUNT(DISTINCT order_id)) - \
+someone can enter a flow and never buy. Never substitute one for the other.
+     - These 4 tables have NO Brand column, and Flow_Name/Campaign_Name do NOT encode brand anywhere \
+(organized by product category and flow type, never by brand) - a "broken down by brand" question about \
+flow entrants/sends genuinely cannot be split by brand from this population; say so plainly rather than \
+faking a split by pasting in flow_orders' Brand column (that would also silently switch the metric).
+
+  2. moengage_campaigns_live (same project/dataset, same cross-project situation) - REAL CONFIGURATION \
+for EVERY real campaign MoEngage has ever run (895 confirmed live - not just Flow touchpoints; 885 of \
+these are ONE_TIME manual sends, a population tables in group 1 above structurally exclude entirely). \
+Columns: campaign_id, name, channel, campaign_delivery_type (ONE_TIME/PERIODIC/EVENT_TRIGGERED), \
+content_type, tags (comma-joined - real values include 'winback', 'upgrade', 'replenishment', \
+'promotional', 'cross-sell'), status, created_by, created_at, sent_time, \
+is_global_control_group_enabled, is_campaign_control_group_enabled, campaign_control_group_percentage, \
+utm_source/utm_medium/utm_campaign (the REAL UTM values MoEngage itself assigns - the genuine bridge to \
+BigQuery's own orders_utm_source/medium/campaign columns, not a guessed mapping), connector_type, \
+conversion_goal_names, conversion_goal_count, is_all_user_campaign, email_subject, and \
+included_filters_json/excluded_filters_json (the real audience-targeting logic, as raw JSON text - read \
+these for a genuinely deep "who does this target" question, not for filtering/grouping). This table has \
+NO performance numbers (no sent/delivered/opens/clicks/revenue columns exist here at all) - use group 1 \
+for performance, this table for real config/targeting/control-group/tag/UTM truth. STATIC SNAPSHOT (this \
+API takes ~2.5 minutes to fully paginate, far too slow to re-fetch live per question) - say so if asked \
+how current it is.
+     - CORRECTED REAL FACT about control groups (a previous version of this note was WRONG and said no \
+campaign ever has one - that was checked only against group 1's Flow-only population, not this real, \
+complete one): 6 real campaigns DO have is_campaign_control_group_enabled = TRUE right now (all real \
+"Rampup_Day_N_BoostErection" campaigns, control-group percentages 20-88%, confirmed live: 20/52/52/75/80/88) \
+- query THIS table for any real "which campaigns have a control group" question, never assume the answer \
+is universally zero. These 6 have NULL tags (control-group usage and tagging are independent, unrelated \
+facts about a campaign - don't assume one implies the other).
+     - CORRECTED REAL FACT about lifecycle categories (a previous version of this note wrongly said \
+"Sale"/"Upgrade"/"Edu" don't exist anywhere in this real data, and separately understated how common some \
+of these are - both corrected here from a live full-table check, not assumption): the real `tags` column \
+has only 5 distinct non-null values across all 895 campaigns - winback (238 campaigns, by far the most \
+common real tag), upgrade (6, a DIFFERENT set of 6 campaigns from the control-group 6 above - real names \
+like "HL_Upgrades_HL_Active 3M Subs"), replenishment (4), promotional (2), cross-sell (1) - 645 campaigns \
+have no tag at all, so absence of a tag is not evidence a campaign isn't e.g. a winback send, only that \
+it wasn't tagged as one. Separately, "Edu" and "Sale" are both real, COMMON naming-convention segments in \
+the `name` column itself (not the tags column) - Edu appears in 277 real campaign names (e.g. \
+"Rampup_Day8_BoostErection_Edu_ED_All"), and Sale appears in 212 real campaign names, mostly real seasonal \
+promo pushes following a "<Event>Sale_Sale_Generic_..." pattern (MoonlightSale, National Day Sale, \
+Payweek Sale, 7.7 Sale, etc.) - a "how did our Sale campaigns do" question is real and answerable by \
+name LIKE '%Sale%' here (config/targeting only - pair with group 1 if the question needs performance \
+numbers for named campaigns that also appear there). Query this table (tags column AND name LIKE \
+patterns - they capture different things) before concluding a lifecycle category doesn't exist; group 1 \
+alone is not the complete real picture, and neither is assuming from memory.
+
+  3. The chart-based MoEngage tool (a separate real-time system, not a BigQuery table - given to you as \
+context below when relevant, not queried via SQL) - genuinely live, catalog-selected from MoEngage's real \
+dashboard/chart inventory. Use this ONLY for detail neither BigQuery table group above captures: day-by- \
+day trend detail, or funnel step-by-step breakdowns not expressed as a Goal in group 1. PREFER the two \
+BigQuery table groups above for anything they cover (revenue, CVR, control group, tags, unsubscribe/ \
+complaint/bounce rates, real UTM values) - they give an exact queried number, not an LLM's read of a \
+chart. There is NO email/WhatsApp/push send/open/click EVENT-level table in BigQuery itself (row-per-send- \
+per-event) - that granularity, if a question genuinely needs it, only exists via this chart tool or the \
+campaign-level aggregates in groups 1-2 above."""
 
 SYSTEM_PREFIX_TEMPLATE = """You are the andSons analytics assistant. andSons is a men's health telehealth \
 brand (hair loss is the flagship vertical, alongside weight loss and other supplements); all prices are \

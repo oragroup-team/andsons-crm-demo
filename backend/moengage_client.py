@@ -31,6 +31,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
@@ -85,6 +86,121 @@ def _auth_header() -> dict:
         )
     token = base64.b64encode(f"{workspace_id}:{data_api_key}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
+
+
+def campaigns_api_configured() -> bool:
+    """The Campaigns Search API (core-services/v1/campaigns/search) is a
+    REAL, SEPARATE MoEngage surface from the Analytics Dashboards API above
+    - genuinely different data, a different key, and a different auth
+    shape, not just an alternate route to the same thing. It returns real
+    campaign CONFIGURATION (audience targeting/segmentation filters,
+    control-group setup and percentage, the real UTM params MoEngage
+    itself assigns, conversion goal definitions) for EVERY real campaign in
+    the account (confirmed live: 895 real campaigns, 885 of them one-time
+    sends the Analytics Dashboards charts and the Flows report CSV export
+    both structurally exclude - neither of those only ever covered
+    automated Flow-triggered touchpoints). It does NOT return performance
+    numbers (sent/delivered/opens/clicks/revenue) at all - confirmed live,
+    those fields don't exist anywhere in a real response. Needs
+    MOENGAGE_CAMPAIGN_API_KEY (Settings -> Account -> APIs -> "Campaign
+    report/Business events/..." tile - a different key from
+    MOENGAGE_DATA_API_KEY, which only works for the Analytics Dashboards
+    API above)."""
+    return bool(
+        os.environ.get("MOENGAGE_WORKSPACE_ID")
+        and os.environ.get("MOENGAGE_CAMPAIGN_API_KEY")
+        and os.environ.get("MOENGAGE_DC")
+    )
+
+
+def _campaign_auth_headers() -> dict:
+    workspace_id = os.environ.get("MOENGAGE_WORKSPACE_ID", "")
+    campaign_api_key = os.environ.get("MOENGAGE_CAMPAIGN_API_KEY", "")
+    if not workspace_id or not campaign_api_key:
+        raise RuntimeError(
+            "MOENGAGE_WORKSPACE_ID / MOENGAGE_CAMPAIGN_API_KEY are not set. The Campaigns Search API "
+            "requires a separate Campaign API key from Settings -> Account -> APIs in the MoEngage "
+            "dashboard (not the same key as MOENGAGE_DATA_API_KEY)."
+        )
+    token = base64.b64encode(f"{workspace_id}:{campaign_api_key}".encode()).decode()
+    # Real, confirmed-live requirement, not documented anywhere obvious:
+    # this endpoint rejects a request with only the Basic auth header
+    # (401 "MOE-APPKEY missing in Authentication Header") - it also needs
+    # the workspace id repeated as its own MOE-APPKEY header.
+    return {"Authorization": f"Basic {token}", "MOE-APPKEY": workspace_id, "Content-Type": "application/json"}
+
+
+_CAMPAIGNS_CACHE_TTL_SECONDS = 900  # 15 min - same reasoning as the chart snapshot cache
+_campaigns_cache = {"campaigns": None, "fetched_at": 0.0}
+_campaigns_cache_lock = threading.Lock()
+_CAMPAIGN_SEARCH_PAGE_LIMIT = 15  # real, confirmed-live server-side max ("limit value is too long")
+
+
+def search_campaigns(force_refresh: bool = False) -> list:
+    """POST /core-services/v1/campaigns/search - every real campaign in the
+    account (895 confirmed live, far more than either the Analytics
+    Dashboards charts or the Flows report CSV export cover - see
+    campaigns_api_configured()'s docstring for why). Paginated server-side
+    at a real max of 15 per page - confirmed live, a higher limit is
+    rejected outright, not silently capped - so a full fetch is ~60
+    sequential calls; cached for _CAMPAIGNS_CACHE_TTL_SECONDS, same
+    reasoning as get_all_chart_snapshots, so repeated questions in the same
+    session don't re-paginate the whole account every time. Returns the
+    REAL, UNMODIFIED response objects (real campaign config: basic_details,
+    control_group_details, segmentation_details, utm_params,
+    conversion_goal_details, campaign_content, etc.) - callers decide what
+    to extract; this function's only job is getting the real data, not
+    shaping it for a particular downstream use (e.g. the BigQuery loader in
+    moengage_export/ strips the large real HTML email body out of
+    campaign_content before loading, which is a loading-time decision, not
+    a fetching-time one)."""
+    now = time.time()
+    if not force_refresh and _campaigns_cache["campaigns"] is not None and (now - _campaigns_cache["fetched_at"]) < _CAMPAIGNS_CACHE_TTL_SECONDS:
+        return _campaigns_cache["campaigns"]
+
+    with _campaigns_cache_lock:
+        now = time.time()
+        if not force_refresh and _campaigns_cache["campaigns"] is not None and (now - _campaigns_cache["fetched_at"]) < _CAMPAIGNS_CACHE_TTL_SECONDS:
+            return _campaigns_cache["campaigns"]
+
+        url = f"{_base_url()}/core-services/v1/campaigns/search"
+        headers = _campaign_auth_headers()
+        all_campaigns = []
+        page = 1
+        while True:
+            payload = {"page": page, "limit": _CAMPAIGN_SEARCH_PAGE_LIMIT, "request_id": str(uuid.uuid4())}
+            last_exc = None
+            batch = None
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    resp = requests.post(url, headers=headers, json=payload, timeout=_TIMEOUT_SECONDS)
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                    last_exc = exc
+                    if attempt < _MAX_RETRIES:
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    raise
+                if resp.status_code == 401:
+                    raise RuntimeError(
+                        "MoEngage rejected the Campaigns Search request (401) - check "
+                        "MOENGAGE_WORKSPACE_ID/MOENGAGE_CAMPAIGN_API_KEY."
+                    )
+                resp.raise_for_status()
+                batch = resp.json()
+                break
+            if batch is None:
+                raise last_exc  # unreachable, satisfies type checkers
+            if not batch:
+                break
+            all_campaigns.extend(batch)
+            if len(batch) < _CAMPAIGN_SEARCH_PAGE_LIMIT:
+                break
+            page += 1
+
+        _campaigns_cache["campaigns"] = all_campaigns
+        _campaigns_cache["fetched_at"] = now
+        logger.info("Fetched %d real campaigns from the Campaigns Search API (%d pages).", len(all_campaigns), page)
+        return all_campaigns
 
 
 def _get(path: str, params: Optional[dict] = None) -> dict:

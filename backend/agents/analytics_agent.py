@@ -503,6 +503,31 @@ _CREATED_AT_LT_RE = re.compile(r"created_at\s*<\s*DATE\s*'(\d{4}-\d{2}-\d{2})'",
 _REFUND_EXCLUSION_RE = re.compile(r"status\)?\s*\)?\s*NOT\s+LIKE\s*'%refund%'", re.IGNORECASE)
 
 
+def _extract_output_text(raw_output) -> str:
+    """AgentExecutor's `result["output"]` is a plain str on Groq (Groq's
+    message content is always a string), but a real, different shape on
+    Anthropic once adaptive thinking is involved: the underlying AIMessage's
+    .content becomes a LIST of content blocks (a real 'thinking' block plus
+    a real 'text' block, sometimes more than one of each) - confirmed live,
+    caught as `AttributeError: 'list' object has no attribute 'strip'` the
+    moment ANALYTICS_PROVIDER was tried on anthropic with the agent-loop
+    prefill fix (anthropic_agent_loop_patch.py) already in place. Join only
+    the real 'text' blocks (skip 'thinking'/'redacted_thinking' - that's the
+    model's internal reasoning, not the answer meant for the user) in
+    document order; falls back to str() for any other unexpected shape
+    rather than raising."""
+    if isinstance(raw_output, str):
+        return raw_output
+    if isinstance(raw_output, list):
+        text_parts = [
+            block.get("text", "")
+            for block in raw_output
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "".join(text_parts)
+    return str(raw_output) if raw_output is not None else ""
+
+
 def _last(pattern: re.Pattern, text: str):
     """The LAST match, not the first - an exploratory step earlier in the
     trace can mention a different year/keyword than the FINAL aggregation
@@ -1277,7 +1302,7 @@ def ask_analytics(
             "moengage_used": moengage_used,
         }
 
-    raw_output = result.get("output", "").strip()
+    raw_output = _extract_output_text(result.get("output", "")).strip()
     if raw_output.lower().startswith("agent stopped due to") or not raw_output:
         # Blank output is a real, separate way this can go wrong from the
         # "agent stopped due to..." message (e.g. the agent's last step

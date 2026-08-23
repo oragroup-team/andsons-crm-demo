@@ -47,20 +47,31 @@ short enough that a genuine stall gets caught and retried within a normal
 Slack-reply wait, long enough for legitimate slow generations (adaptive
 thinking, a large structured-output schema) to finish normally.
 
-REQUIRED VENDORED PATCH - not tracked by git, must be reapplied if
-backend/vendor/ is ever regenerated/reinstalled: vendor/langchain_anthropic/
-chat_models.py's _format_messages() has a real, confirmed bug for the
-current Claude model family - it deliberately keeps a trailing EMPTY-content
-assistant message as an intentional "prefill" (a real, legitimate technique
-on older Claude models), but the current API (Opus 5, Sonnet 5, and the
-4.6+ family) rejects that outright: "This model does not support assistant
-message prefill. The conversation must end with a user message." Find the
-line `if not content and role == "assistant" and _i < len(merged_messages) - 1:`
-and remove the `and _i < len(merged_messages) - 1` condition so an empty
-assistant message is always dropped, not just when it isn't last. (backend/
-vendor/ is gitignored - a large third-party bundle, not meant to be
-committed - so this fix has to be reapplied by hand if that directory is
-ever refreshed from a clean pip install; there is no other record of it.)
+ASSISTANT-MESSAGE-PREFILL FIX - now a real runtime patch, not a hand-edited
+vendor file: langchain_anthropic's _format_messages() has a real, confirmed
+bug for the current Claude model family - a message list that ends up
+ending in an assistant-role message (either a trailing EMPTY-content
+message kept as an intentional "prefill", a real legitimate technique on
+older Claude models, or - a second, separate real case - create_sql_agent's
+own AgentExecutor re-sending a genuine non-empty reasoning turn as its own
+internal retry continuation) gets sent to the API as-is, and the current
+API (Opus 5, Sonnet 5, and the 4.6+ family) rejects BOTH cases outright:
+"This model does not support assistant message prefill. The conversation
+must end with a user message." A PREVIOUS version of this fix hand-edited
+backend/vendor/langchain_anthropic/chat_models.py directly - that only
+ever covered the empty-content case, AND (a real gap, found later) never
+actually reached production at all: backend/vendor/ is gitignored, and the
+Dockerfile does a clean `pip install` for the deployed image rather than
+copying that directory (see Dockerfile's own comment) - so that edit only
+ever applied to local dev, silently. anthropic_agent_loop_patch.py (this
+same agents/ package) replaces it: a runtime monkeypatch, applied here in
+_anthropic_available() before the first real ChatAnthropic is ever built,
+that wraps _format_messages()'s OUTPUT rather than hand-editing its
+internals - covers both the empty and non-empty trailing-assistant-message
+cases generically, and applies identically in local dev (vendor/) and in
+the deployed container (fresh pip install), since it patches whichever
+langchain_anthropic module is actually importable at runtime rather than
+a specific file on disk.
 """
 import logging
 import os
@@ -94,33 +105,30 @@ DEFAULT_PROVIDERS = {
     # model that will just reject the request shape.
     "VISUAL_QA": "anthropic",
     "SWEEPER": "anthropic",
-    # NOT anthropic, despite this looking like the obvious choice: the
-    # LangChain SQL ReAct agent (create_sql_agent) this agent runs on has a
-    # real, confirmed incompatibility with the current Claude API - caught
-    # live, reproducibly, across every question tried. When the model
-    # writes a plain-text reasoning turn mid-loop instead of a tool call,
-    # AgentExecutor's own retry path re-sends that text as the start of
-    # the NEXT turn (a continuation "prefill") - a pattern the current
-    # Claude model family rejects outright ("This model does not support
-    # assistant message prefill"). This isn't the smaller max_tokens
-    # truncation issue already fixed above (verified: still fails
-    # identically at max_tokens=16000) - it's AgentExecutor's own
-    # scratchpad-continuation logic, which would need a real LangChain-
-    # internals fix, not a config change, to run on Anthropic. Groq has
-    # been reliable for this exact SQL-agent flow all session - stay on
-    # it here rather than ship a "live data" feature that silently fails
-    # every time.
-    #
-    # RE-VERIFIED LIVE (not just carried over from memory): tried flipping
-    # this to anthropic against the deployed service and it failed
-    # immediately with the exact error above, 3/3 retries exhausted, on 2
-    # of 4 real test questions. The module docstring's "REQUIRED VENDORED
-    # PATCH" fix (_format_messages() dropping empty-content trailing
-    # assistant messages) does NOT cover this - the message AgentExecutor
-    # re-sends here has real, non-empty reasoning text in it, a different
-    # case that patch never touched. Confirmed still broken as of this
-    # comment, not resolved by anything shipped since the original finding.
-    "ANALYTICS": "groq",
+    # WAS "groq" for most of this project - the LangChain SQL ReAct agent
+    # (create_sql_agent) this runs on had a real, confirmed incompatibility
+    # with the current Claude API: when the model writes a plain-text
+    # reasoning turn mid-loop instead of a tool call, AgentExecutor's own
+    # retry path re-sends that text as the start of the NEXT turn (a
+    # continuation "prefill"), which the current Claude model family
+    # rejects outright ("This model does not support assistant message
+    # prefill"). RESOLVED, not worked around: anthropic_agent_loop_patch.py
+    # (applied automatically in _anthropic_available()/get_llm() below,
+    # before any real ChatAnthropic call) fixes this at the actual root -
+    # it wraps langchain_anthropic's own message formatting so a message
+    # list that would otherwise end in an assistant turn gets one small
+    # synthetic user nudge appended instead, satisfying the API's real
+    # requirement without dropping any of the model's real reasoning
+    # content. Verified live end-to-end (not just the isolated message-
+    # formatting fix): all 4 of the real questions that previously failed
+    # 3/3 retries now return correct, verified answers running fully on
+    # Anthropic. A second, separate real bug surfaced once the prefill
+    # issue was gone - AgentExecutor's `result["output"]` can be a list of
+    # content blocks (thinking + text) rather than a plain string once
+    # adaptive thinking is involved, which crashed the `.strip()` call in
+    # ask_analytics() - fixed by _extract_output_text() in
+    # analytics_agent.py, which joins only the real 'text' blocks.
+    "ANALYTICS": "anthropic",
 }
 
 _HEALTH_CHECK_TTL = 300  # 5 min - see module docstring
@@ -152,6 +160,10 @@ def _anthropic_available() -> bool:
 
     try:
         from langchain_anthropic import ChatAnthropic
+
+        from .anthropic_agent_loop_patch import apply as _apply_anthropic_agent_loop_patch
+
+        _apply_anthropic_agent_loop_patch()
 
         # No temperature kwarg here - see get_llm()'s Anthropic branch for why.
         probe = ChatAnthropic(

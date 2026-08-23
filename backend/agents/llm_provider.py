@@ -110,6 +110,16 @@ DEFAULT_PROVIDERS = {
     # been reliable for this exact SQL-agent flow all session - stay on
     # it here rather than ship a "live data" feature that silently fails
     # every time.
+    #
+    # RE-VERIFIED LIVE (not just carried over from memory): tried flipping
+    # this to anthropic against the deployed service and it failed
+    # immediately with the exact error above, 3/3 retries exhausted, on 2
+    # of 4 real test questions. The module docstring's "REQUIRED VENDORED
+    # PATCH" fix (_format_messages() dropping empty-content trailing
+    # assistant messages) does NOT cover this - the message AgentExecutor
+    # re-sends here has real, non-empty reasoning text in it, a different
+    # case that patch never touched. Confirmed still broken as of this
+    # comment, not resolved by anything shipped since the original finding.
     "ANALYTICS": "groq",
 }
 

@@ -42,6 +42,28 @@ MOENGAGE_SECRETS="MOENGAGE_CAMPAIGN_API_KEY=moengage-campaign-api-key:latest"
 # no other in-flight requests keeping CPU allocated - confirmed live: one
 # event acked fine but the background thread produced zero further log
 # output and the Slack post never happened. Always-allocated CPU fixes it.
+#
+# --min-instances=1 fixes a real, DIFFERENT layer of the same class of bug,
+# found live 2026-08-24: the Slack webhook's own HTTP request returns
+# almost instantly (it acks, spawns a daemon background thread, done) - so
+# from Cloud Run's own instance-scaling view, that instance has ZERO active
+# requests the moment the ack returns, even while the daemon thread is
+# still genuinely working (a multi-iteration SQL agent question can run for
+# several real minutes). With no minimum instance count, Cloud Run's
+# default autoscaling can recycle an "idle" instance mid-work - the daemon
+# thread dies with no exception, no log line, and no Slack message ever
+# posted. --no-cpu-throttling alone does not prevent this: it only keeps
+# CPU allocated WHILE an instance is alive, it does not stop Cloud Run from
+# deciding to kill the instance entirely. Keeping one instance always warm
+# closes that gap. Real cost tradeoff, accepted deliberately: this keeps
+# one instance running 24/7 rather than scaling to zero - worth it for a
+# tool real teammates are relying on for real answers in Slack.
+#
+# --timeout raised from 120 to 300: confirmed live, a genuinely complex
+# multi-table/multi-brand question can take longer than 120s end to end on
+# the direct /ask endpoint (which blocks synchronously, unlike the Slack
+# path above) - a real "upstream request timeout" was reproduced live on
+# one such question. 300s is generous headroom without being unbounded.
 
 if [ ! -f cloudrun-env.yaml ]; then
   echo "cloudrun-env.yaml not found — copy cloudrun-env.example.yaml and fill it in first."
@@ -55,7 +77,8 @@ gcloud run deploy "$SERVICE_NAME" \
   --env-vars-file=cloudrun-env.yaml \
   --set-secrets="/secrets/gcp-key.json=${SECRET_NAME}:latest,${SLACK_SECRETS},${MOENGAGE_SECRETS}" \
   --memory=1Gi \
-  --timeout=120 \
+  --timeout=300 \
+  --min-instances=1 \
   --no-cpu-throttling
 
 echo ""

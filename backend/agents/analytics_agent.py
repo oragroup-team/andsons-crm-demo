@@ -199,7 +199,20 @@ View_Through/In_Session] x [Total_Revenue, CVR, Control_Group_Uplift, Control_Gr
 naming pattern below) - but ONLY for the real Flow-triggered automated touchpoints captured in MoEngage's \
 own "Flows" report (source: a real export, snapshot dated 2026-08-20, static - not live-updating; say so \
 if asked how current it is). moengage_flows_summary (same project) is the one-row-per-flow rollup of the \
-same population: Flow_Name, Flow_Status, Trips_Started_Total_users, Campaign_Control_Group_Percentage.
+same population (55 real columns, verified live via INFORMATION_SCHEMA - always re-check yourself for \
+any column not listed here, this is not exhaustive): Flow_Name, Flow_Status, Flow_Type, Flows_Id, \
+Flow_Version_Name, Published_at, Flow_Sent_Time, Campaign_Channel, Campaign_Delivery_Type, \
+Attribution_window, Trips_Started_Total_users, Trips_Started_CG_Users, Trips_Started_GCG_Users, \
+Trips_engaged (a REAL, DIFFERENT metric from Trips_Started_Total_users - engaged is a narrower, more \
+active-participation count, not a synonym - never treat them as interchangeable), Global_CG_enabled, \
+Campaign_Control_Group_Percentage, Control_Group_Stickiness_enabled, Custom_Segment_Name/Filters, \
+Tag_Category_Default/Uncategorized, and per-goal condition/definition fields \
+(Conversion_Goal_1/2_Name/Event/Condition/Attribute/Value - what the goal actually measures, not a \
+performance number itself) plus the same Goal_N x Window x Control_Group_CVR/Uplift/Global_ variants as \
+group 1's tables below - but NOTE this table's goal columns stop at CVR/Uplift, it has NO \
+Total_Revenue/Converted_Users/Conversion_Events columns (those exist only in the 3 campaign-level tables, \
+not this flow-level rollup) - query moengage_campaigns_email/whatsapp/push directly for revenue at the \
+individual-send level if a flow-level revenue figure is needed.
      - COLUMN NAMING PATTERN (all 3 campaign-level tables): <Goal_1 or Goal_2> + <Click_Through / \
 View_Through / In_Session> (attribution window - Click_Through is the default/most meaningful for "did \
 this send cause a purchase") + one of: Total_Revenue, CVR, Converted_Users, Conversion_Events, \
@@ -214,6 +227,16 @@ someone can enter a flow and never buy. Never substitute one for the other.
 (organized by product category and flow type, never by brand) - a "broken down by brand" question about \
 flow entrants/sends genuinely cannot be split by brand from this population; say so plainly rather than \
 faking a split by pasting in flow_orders' Brand column (that would also silently switch the metric).
+     - CRITICAL - NO WEEKLY OR DAILY GRAIN EXISTS IN THIS TABLE, a real, live-caught gap: \
+Trips_Started_Total_users/Trips_engaged are LIFETIME CUMULATIVE totals, one number per flow since it was \
+created - there is no dated/weekly/daily breakdown column anywhere in moengage_flows_summary. \
+Flow_Sent_Time and Published_at are single config timestamps (when the flow itself was last \
+published/sent), not a per-period aggregation key. A real "how many users entered our flows LAST WEEK, \
+and how does that compare WoW/MoM" question CANNOT be honestly answered from this table - do not attempt \
+to fake a weekly number by dividing the lifetime total, and do not silently substitute a different, \
+unrelated dated metric. Say plainly that this table only has lifetime-cumulative entrant counts, not a \
+dated series, and that a real per-week source (if one exists) would need to come from wherever that real \
+weekly figure was pulled before - ask, don't guess.
 
   2. moengage_campaigns_live (same project/dataset, same cross-project situation) - REAL CONFIGURATION \
 for EVERY real campaign MoEngage has ever run (895 confirmed live - not just Flow touchpoints; 885 of \
@@ -286,12 +309,61 @@ extra exploratory query. Prefer the table's own Year/Month_Name columns (exact v
 ambiguity) over constructing a created_at BETWEEN/date-range filter when both are available for the same \
 table - simpler and less error-prone.
 
-{schema_notes}
+MANDATORY 6-STEP PROCESS - follow every one of these, in this order, for every question. Skipping a step \
+or jumping straight to writing SQL from memory is exactly how the real, live-caught failures below \
+happened - this process exists because of those specific incidents, not as a formality:
 
-CRITICAL RULE: Every number you state in your final answer MUST come from an actual query result you \
-ran in this conversation. Never estimate, round beyond what you computed, or state a number from prior \
-knowledge or assumption. If you cannot compute an exact number with the available tables, say so \
-explicitly instead of guessing.
+1. UNDERSTAND THE QUESTION FIRST. Before touching any table, restate to yourself precisely what is being \
+asked: which metric (revenue? order count? a rate? users entered vs orders placed - these are different \
+populations, never interchange them), which population/scope (which brand, which country, which time \
+period - resolve "last week"/"this month" against today's real date below, never guess a year for a \
+bare month), and which grouping/breakdown if any. If a word in the question could mean more than one real \
+thing in this data (the clearest real example: "channel" - it means a MARKETPLACE in one table, a PAID AD \
+PLATFORM in another, and a CRM/marketing attribution signal in a third, all under the same column name - \
+see the schema reference below for the real value sets of each), decide explicitly which one the question \
+actually means from its business context before picking a table - a bare "which channels are driving \
+sales" in a CRM/lifecycle-marketing context means the CRM attribution signal (orders_utm_medium), not \
+marketplace or paid-ad channels, unless the question specifically says marketplace/storefront or paid/ads.
+
+2. UNDERSTAND THE SCHEMA THOROUGHLY - VERIFY IT, DO NOT ASSUME IT. For the tables in the connected \
+ora_bigquery_pipeline dataset, use the real schema-inspection tool - never guess a column name from memory. \
+For flow_orders and any moengage_* table (crm-mail-automation-dev.crm_analytics_views - a different \
+project from the one you're connected to), the schema-inspection tool cannot see them at all, so run this \
+real query yourself FIRST, before writing anything that touches one of these tables: \
+`SELECT column_name, data_type FROM crm-mail-automation-dev.crm_analytics_views.INFORMATION_SCHEMA.COLUMNS \
+WHERE table_name = '<table>'` - this genuinely works even though a schema-inspection tool call on the same \
+table would not. The schema reference below is real and was verified at the time it was written, but \
+tables change - a live INFORMATION_SCHEMA check costs one query and removes any doubt; never skip it for a \
+cross-project table just because these notes describe it.
+
+3. IDENTIFY THE EXACT TABLES AND COLUMNS from steps 1 and 2 that answer the ACTUAL question - not a \
+nearby, easier, or more familiar one. If the right table for what's actually being asked doesn't exist or \
+doesn't have the needed grain (e.g. a real, live-caught case: MoEngage's own flow-entrant counts are \
+CUMULATIVE lifetime totals with no weekly/dated breakdown - there is no real way to answer a "last week" \
+or WoW entrant question from that table), say so plainly instead of quietly substituting a different \
+table's number for what was actually asked.
+
+4. WRITE THE SQL using only real, confirmed column names from step 2.
+
+5. EXECUTE THE QUERY AND READ THE ACTUAL RETURNED ROWS before writing one word of your answer.
+
+6. GROUND YOUR ANSWER STRICTLY IN WHAT STEP 5 ACTUALLY RETURNED - THIS IS THE MOST IMPORTANT STEP, NOT A \
+FORMALITY: every number in your final answer must come from the result of a query THAT ACTUALLY MATCHES \
+THE SPECIFIC CLAIM YOU'RE MAKING - the right brand, the right country, the right time period, the right \
+filter. A real, live-caught incident this fixes: an answer stated "SGD 12,719" for andSons Singapore flow \
+revenue, sourced from a real query result - but that number actually came from an EARLIER, DIFFERENT query \
+that had no brand filter at all (all brands combined), which the agent had already moved past and replaced \
+with a correctly-filtered one. The number was real. The label attached to it was not. That is exactly as \
+much a hallucination as inventing a number from nothing, and it is graded exactly as harshly - a real \
+number attached to the wrong scope is not a smaller mistake than a fake number. If you explored several \
+queries before settling on the right filter, RE-RUN the final, correctly-scoped query and read ITS result \
+- never carry forward a number from an earlier, abandoned, or differently-scoped query just because it's \
+still sitting in your context. If you cannot produce an exact, correctly-scoped number for what was asked, \
+say so explicitly instead of guessing, rounding beyond what you computed, or reporting from prior \
+knowledge - an honest "I can't answer this precisely with what's available" is always correct; a wrong \
+number stated confidently is always a failure, no exceptions.
+
+{schema_notes}
 
 PERCENTAGES, RATES, AND COMPARISONS: if your answer is going to state a percentage, rate, ratio, \
 average, or a comparison between two totals, compute that number DIRECTLY in the SQL query itself \
@@ -1318,17 +1390,16 @@ def ask_analytics(
     intermediate_steps = result.get("intermediate_steps", [])
 
     executed_queries = []
-    tool_results_text = ""
+    query_observations = []  # (query_text, observation_text) - real SQL calls only, in run order
     for action, observation in intermediate_steps:
         tool_name = getattr(action, "tool", "")
         tool_input = getattr(action, "tool_input", "")
         obs_text = str(observation)
-        tool_results_text += "\n" + obs_text
         if "query" in tool_name.lower() and "checker" not in tool_name.lower() and "list" not in tool_name.lower() and "schema" not in tool_name.lower():
             query = tool_input.get("query") if isinstance(tool_input, dict) else tool_input
             if query:
                 executed_queries.append(str(query))
-                tool_results_text += "\n" + str(query)
+                query_observations.append((str(query), obs_text))
 
     sql_query = "\n\n".join(executed_queries)
 
@@ -1338,12 +1409,37 @@ def ask_analytics(
     if _contains_pii(raw_answer):
         return {"answer": PII_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": data_source, "moengage_used": moengage_used}
 
+    # Real, live-caught incident this fixes (2026-08-24, "hallucinating the
+    # numbers" flagged directly by a real user): the OLD check below built
+    # its evidence from the ENTIRE exploration trail - every query the agent
+    # ever ran this turn, including early probes it explored and then moved
+    # on from. A real, genuine number from one of those abandoned early
+    # queries (e.g. a total with no Brand filter, run before the agent
+    # settled on the correctly-filtered query it actually displayed) still
+    # legitimately "appears in the tool trace", so the old exists-anywhere
+    # check passed it - even though the final answer misattributed that
+    # number to a different, narrower scope than the query that actually
+    # produced it. That is exactly as much a hallucination as inventing a
+    # number outright: a real number, wrongly labeled. Fix: scope the
+    # PRIMARY grounding evidence to only the most recent query results (the
+    # ones the agent actually converged on), not the full history - a
+    # number that only exists in an early, superseded query no longer
+    # grounds anything. Deliberately no fallback to the full trail on
+    # failure - that would silently reopen the same loophole. Window size:
+    # the later half of however many real queries were run this turn (min
+    # 4) - generous enough that a legitimate answer synthesizing several of
+    # its OWN final queries still passes, narrow enough to exclude early,
+    # abandoned exploration in a longer multi-step trace.
+    recent_window = max(4, -(-len(query_observations) // 2))  # ceil(n/2), floor 4
+    recent_evidence_text = "\n".join(
+        f"{q}\n{obs}" for q, obs in query_observations[-recent_window:]
+    )
     if file_context:
-        tool_results_text += "\n" + file_context
+        recent_evidence_text += "\n" + file_context
     if moengage_used:
-        tool_results_text += "\n" + moengage_context
+        recent_evidence_text += "\n" + moengage_context
 
-    verified = _verify_numbers(raw_answer, tool_results_text)
+    verified = _verify_numbers(raw_answer, recent_evidence_text)
     if verified:
         answer = raw_answer
     else:

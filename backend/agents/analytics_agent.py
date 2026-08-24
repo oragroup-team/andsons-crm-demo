@@ -36,257 +36,115 @@ from .llm_provider import get_llm
 
 logger = logging.getLogger("analytics_agent")
 
-BIGQUERY_SCHEMA_NOTES = """SCHEMA NOTES (this is the real ORA group data warehouse - it holds every ORA \
-brand and country together, so filtering correctly is essential, not optional):
+BIGQUERY_SCHEMA_NOTES = """RAW SCHEMA - every real table this agent can query, every real column, as returned directly by BigQuery's own INFORMATION_SCHEMA.COLUMNS (live-pulled, not summarized or reinterpreted). No business-meaning notes are provided below on purpose - read the real column names, types, and real DISTINCT values yourself (query them) before assuming what any column means or which table a term like "channel" refers to. Two real projects are involved:
 
-TABLE ACCESS: you can now see and query 26 real tables (up from 3) - use the real schema-inspection \
-tools on any of them rather than guessing columns; they have real column names/types you should actually \
-look up, not assume from the notes below. The notes below cover semantic GOTCHAS that column names alone \
-won't tell you - not a substitute for looking at the real schema yourself.
+- ora-bigquery.ora_bigquery_pipeline: the connected project. The schema-inspection tool also works here as a second way to look up the same columns.
+- crm-mail-automation-dev.crm_analytics_views: a DIFFERENT project. The schema-inspection tool CANNOT see these tables at all - that is not a sign they do not exist. Query `crm-mail-automation-dev.crm_analytics_views.INFORMATION_SCHEMA.COLUMNS` yourself, or use the dump below, then query the table directly by its full three-part name (project.dataset.table).
 
-- ALWAYS filter Brand = 'AndSons' AND Country = 'Singapore' by default on any table with those columns, \
-unless the question explicitly asks about another brand (Ova, Modern Molecules, WithJuno) or another \
-country (andSons also has rows for Malaysia and Philippines) - forgetting this filter silently mixes in \
-other brands'/countries' real data. Almost every table below has real Brand and Country columns (check \
-case: some are 'Brand'/'Country', some are lowercase 'brand'/'country' - look up the real casing before \
-filtering, it varies table to table and a case-sensitive equality filter with the wrong case silently \
-returns zero rows, not an error).
+=== ora-bigquery.ora_bigquery_pipeline (connected project - schema-inspection tool also works here) ===
 
-CORE ORDER/REVENUE TABLES:
-- dotcom_plus_marketplace is the primary order-line sales fact table. Use this table for standard \
-revenue/order questions.
-- updated_sales_data is a broader, richer table (customer email/phone, utm_source/utm_campaign, \
-signup_timestamp, cohort/attribution fields) - use it only when a question needs customer-level \
-attribution or cohort data that dotcom_plus_marketplace doesn't have. NEVER sum revenue across both \
-tables together in the same total - that double-counts the same orders. updated_sales_data.email and \
-.phone are real customer PII - never state one in an answer, aggregate only.
-- Revenue is gross; Final_Revenue is net of discounts/cashback (use Final_Revenue for "how much revenue" \
-unless gross is asked for).
-- status values are channel-prefixed, e.g. "[Dotcom] DELIVERED", "[Marketplace] Completed" - match with \
-LIKE '%DELIVERED%' / '%Completed%' style patterns rather than assuming the exact prefix. ALWAYS exclude \
-REFUND/CANCELLED/EXPIRED-style statuses by default on EVERY revenue or order-count question - not only \
-ones phrased like "how much did we sell", but also comparisons, shares, rates, and trends. Only include \
-them if the question explicitly asks about refunds/cancellations, or a gross/all-orders figure.
-- CATEGORY FIELD - a real, verified data-quality trap: this warehouse has BOTH product_category (values \
-like "Hair Loss", "Erectile Dysfunction") AND new_product_category (short codes: "HL", "ED", "PE", \
-"Weight_Loss", etc.) - NOT interchangeable. new_product_category is the more complete, corrected field - \
-verified directly: product_category alone undercounted a real flow-revenue answer by about 5% versus the \
-complete figure. ALWAYS filter on new_product_category for any category-scoped question.
-- Prescription_Type is "Prescription" or "Non-Prescription" - never name the specific prescription \
-medicine even if the data contains it; refer to it only as "the doctor-prescribed plan".
+TABLE dotcom_plus_marketplace (40 columns):
+Country STRING, Brand STRING, Channel STRING, order_id STRING, status STRING, created_at DATETIME, clean_sku STRING, Revenue_Type STRING, Cleaned_Revenue_Type STRING, quantity INT64, product_category STRING, new_product_category STRING, Prescription_Type STRING, Revenue FLOAT64, Final_Revenue FLOAT64, New_COGS FLOAT64, COGS_Less_RND FLOAT64, New_COGS_LCY FLOAT64, COGS_LCY_Less_RND FLOAT64, Order_Baskets INT64, Credit_Card_Expense FLOAT64, Delivery_Fee FLOAT64, Order_Type STRING, Applicable_Discount FLOAT64, Applicable_Cashback FLOAT64, Preponed STRING, Num_Orderlines_AV INT64, revenue_reporting_date DATETIME, sku_for_wms STRING, AV_GM2_Expenses FLOAT64, GM2_expenses FLOAT64, Seller_Discount_USD FLOAT64, Platform_Discount_USD FLOAT64, sku STRING, New_Quantity FLOAT64, Commission_Fee FLOAT64, Transaction_Fee FLOAT64, Service_Fee FLOAT64, Marketing_Fee FLOAT64, Selling_Price_USD FLOAT64
 
-THREE REAL, DIFFERENT "CHANNEL" CONCEPTS - a real, live-caught mistake this guards against (a "which \
-channels are driving sales" question answered with the wrong one of these three, because all three share \
-the literal column name "Channel"): figure out which one a question actually means before picking a table.
-  1. dotcom_plus_marketplace.Channel - the real MARKETPLACE the order was placed on: Dotcom, Shopee, \
-Lazada, Zalora, TikTok. Use for "which marketplace/storefront" questions.
-  2. marketing_data.channel / marketing_clicks_data.Channel / marketing_historical_data.Channel / \
-marketing_spend_data.Channel / creative_data.channel / _staging_consolidated_paid_performance.channel - \
-the real PAID ADVERTISING platform spend went to: Facebook, Google, Bing, TikTok, Quora, Snapchat, Reddit \
-(confirmed live values). Use for "which ad platform/paid channel" questions.
-  3. updated_sales_data.orders_utm_medium / orders_utm_source - the real, order-level CRM/marketing \
-ATTRIBUTION signal: real values include "email", "EMAIL", "crm", "ATM_crm", "ATM_EMAIL", "whatsapp", \
-"WhatsApp", "banner", "cpc", "social", "flow" (case varies, match with LOWER() LIKE). This is the closest \
-real thing to "CRM channel" or "marketing channel" in the plain business sense (not marketplace, not paid \
-ad platform) - use THIS for "channels driving sales" style questions in a CRM/lifecycle-marketing context, \
-unless the question is clearly about marketplaces or paid ads specifically. It's order-attribution, not \
-send/open/click event data - phrase answers as "email-attributed orders/revenue", never as "opens" or \
-"clicks" (that event-level data doesn't exist in BigQuery at all - see the MoEngage section below).
+TABLE updated_sales_data (97 columns):
+order_id INT64, cart_id FLOAT64, status STRING, user_id INT64, product_option_price_id INT64, sku STRING, sku_for_wms STRING, quantity INT64, subscription_id FLOAT64, created_at DATETIME, discount_id FLOAT64, discount_total_amount FLOAT64, orders_utm_source STRING, orders_utm_medium STRING, orders_utm_campaign STRING, orders_utm_term STRING, tp_source STRING, order_platform STRING, Country STRING, Brand STRING, email STRING, trigger_source STRING, payment_method_type STRING, product_category STRING, sku_quantity FLOAT64, Months_Of_Products FLOAT64, Revenue FLOAT64, new_product_category STRING, Prescription_Type STRING, code STRING, Applicable_Discount FLOAT64, Applicable_Cashback FLOAT64, Final_Revenue FLOAT64, Applicable_Refund FLOAT64, Num_Orderlines_AV INT64, Applicable_Shipping_Fee FLOAT64, phone STRING, signup_utm_campaign STRING, signup_utm_term STRING, signup_timestamp DATETIME, signup_category STRING, signup_platform STRING, signup_utm_source STRING, signup_utm_medium STRING, UNC_Check STRING, UNC INT64, Order_Baskets INT64, Order_Type STRING, New_Customer_Revenue FLOAT64, New_Customer_Orderlines INT64, counter FLOAT64, age FLOAT64, First_Age FLOAT64, First_Age_Bucket STRING, first_order_type STRING, first_order_type_clean STRING, Cohort_First_Month STRING, sku_of_first_order STRING, Cat_Of_First_Order STRING, Preponed STRING, discount_offering_id FLOAT64, discount_amount FLOAT64, Product_Driven_Orderlines FLOAT64, source STRING, Product_Driven_Type STRING, is_buy_now_cart FLOAT64, is_plan_changed FLOAT64, plan_changed_by STRING, transaction_type STRING, cod_status STRING, order_number INT64, Payment_Reference STRING, Revenue_Type STRING, Nomenclature STRING, First_SKU_Nomenclature STRING, Active_Price FLOAT64, New_Active_Price FLOAT64, Sub_Discount FLOAT64, Willingness_To_Pay_Customers STRING, Final_Sub_Discount FLOAT64, sku_for_pop_id_mapping STRING, product_option_price_id2 FLOAT64, COGS_LCY FLOAT64, New_COGS FLOAT64, New_COGS_LCY FLOAT64, COGS_Less_RND FLOAT64, COGS_LCY_Less_RND FLOAT64, Cleaned_Revenue_Type STRING, Credit_Card_Expense FLOAT64, Delivery_Fee FLOAT64, Month_Num INT64, Year INT64, Month_Name STRING, Preponed_Label STRING, Preponed_Date DATE, Clean_Next_Payment_Date DATE, revenue_reporting_date DATETIME
 
-REAL FUNNEL DATA IN BIGQUERY - use these instead of guessing from MoEngage charts or from order-count \
-proxies whenever a question is about signup/consultation/purchase funnel stages, not email engagement \
-funnels specifically (opens/clicks - those live only in MoEngage, see below):
-  - sg_regs_funnel, user_level_funnel, latest_funnel_view, consult_cats_sg_regs_funnel, \
-sg_regs_funnel_with_cohort_view - real signup-to-order funnel tables (near-identical shape): UTM signup \
-attribution, appointment timestamps, first-order timestamp, Brand, Country. Several very similar tables \
-exist (real historical iterations) - latest_funnel_view is the most likely current/canonical one unless a \
-question specifically needs the cohort-status fields only in sg_regs_funnel_with_cohort_view.
-  - ATC_aggregated, Signups_ATC_Funnel - real PRE-AGGREGATED funnel tables, already summed by day/brand/ \
-country/category: total_unique_users -> total_users_with_appt -> total_final_orders (ATC_aggregated), or \
-total_unique_users -> total_carts -> total_orders (Signups_ATC_Funnel). Prefer these over building your \
-own funnel from the row-level tables when the question just needs stage-to-stage counts/rates - the \
-aggregation is already done and verified.
-  - automation_testing_ova_sg_funnel - same funnel shape, Ova/Singapore-specific - the name suggests a \
-test/staging table, not confirmed production; say so if citing it for anything Ova-specific.
+TABLE marketing_spend_data (12 columns):
+Country STRING, Brand STRING, Channel STRING, Year INT64, Month_Num INT64, Month_Name STRING, Date DATETIME, Spends FLOAT64, Clicks STRING, Impressions STRING, Classification STRING, Category STRING
 
-REAL CONSULTATION DATA - use for P1/P2-style questions about doctor consultations, no-shows, treatment \
-plan purchases:
-  - doctor_consultation_sg, doctor_consultation_all, doctor_consultation_my - real per-consultation rows: \
-consult_status, ATTENDED_DR (the real no-show/attendance signal), charge_tp_button_clicked/ \
-charge_tp_success (real treatment-plan purchase signal), cancel_reason, dr_email, brand, country.
-  - order_to_consultation_my - order-to-consultation timing specifically: attended_dr, \
-adjusted_order_to_consult_hours, adjusted_consult_time_bucket.
+TABLE sg_regs_funnel (18 columns):
+user_id STRING, phone STRING, created_at TIMESTAMP, utm_campaign_signups STRING, utm_term_signups STRING, signup_category STRING, utm_source_signups STRING, utm_medium_signups STRING, Context STRING, new_product_category STRING, Flow STRING, instance_id INT64, bmi FLOAT64, appt_date_time TIMESTAMP, appt_created_at TIMESTAMP, first_order_timestamp TIMESTAMP, Country STRING, Brand STRING
 
-REAL PAID MARKETING DATA (separate from marketing_spend_data, which stays the default for simple spend \
-questions - see its own note below): marketing_data, marketing_clicks_data, marketing_historical_data, \
-_staging_consolidated_paid_performance, creative_data - campaign/adset/creative-level spend, impressions, \
-clicks, revenue, brand/country. creative_data goes down to individual ad/creative level. \
-marketplace_marketing_spends is a separate, simpler spend table (Spends, UNC, Traffic) - check which one \
-a question actually needs before picking; don't assume they're interchangeable or summable together.
+TABLE user_level_funnel (20 columns):
+instance_id STRING, user_id STRING, created_at STRING, provider STRING, utm_source_signups STRING, utm_medium_signups STRING, utm_campaign_signups STRING, utm_term_signups STRING, signup_category STRING, new_product_category STRING, UNC STRING, Context STRING, bmi STRING, utm_source_bmi STRING, utm_medium_bmi STRING, utm_campaign_bmi STRING, utm_term_bmi STRING, Country STRING, Brand STRING, Semaglutide_Checker STRING
 
-REAL CUSTOMER/COHORT DATA: customer_analysis_data and signups_purchase_time (per-customer first-purchase- \
-by-category timestamps, Ever_Bought_Subs), utm_cohort_data (cohort revenue/return-rate by acquisition \
-UTM), subs_only_cohort_data (subscription cohort ARPU/AOV/return-rate). Use for lifetime-value/cohort/ \
-retention questions, not simple period revenue questions.
+TABLE latest_funnel_view (20 columns):
+user_id STRING, phone STRING, created_at DATETIME, utm_campaign_signups STRING, utm_term_signups STRING, signup_category STRING, utm_source_signups STRING, utm_medium_signups STRING, Context STRING, new_product_category STRING, Flow STRING, instance_id INT64, Is_Normal_Consult FLOAT64, Journey_Stage STRING, Journey_Stage_Rank FLOAT64, appt_date_time DATETIME, appt_created_at DATETIME, first_order_timestamp DATETIME, Country STRING, Brand STRING
 
-marketing_spend_data holds spend by Country, Brand, Channel (paid ad platform - see the Channel \
-disambiguation above), and month, at several Classification levels: "Category-Level" (paired with a \
-Category like 'HL'), "Overall-Level" (whole-account spend on that channel), "Middle-Tier". NEVER sum \
-different Classification levels together - that double-counts spend. Default to Category-Level rows for \
-a category-specific spend question; ask/clarify or use Overall-Level for whole-account questions.
+TABLE consult_cats_sg_regs_funnel (18 columns):
+user_id STRING, phone STRING, created_at TIMESTAMP, utm_campaign_signups STRING, utm_term_signups STRING, signup_category STRING, utm_source_signups STRING, utm_medium_signups STRING, Context STRING, new_product_category STRING, Flow STRING, instance_id INT64, bmi FLOAT64, appt_date_time TIMESTAMP, appt_created_at TIMESTAMP, first_order_timestamp TIMESTAMP, Country STRING, Brand STRING
 
-projection holds real forward-looking revenue/customer forecasts by year/month/brand/country/category - \
-use only when a question explicitly asks about projected/forecast numbers, never as a substitute for an \
-actual historical total.
+TABLE sg_regs_funnel_with_cohort_view (21 columns):
+user_id STRING, phone STRING, created_at DATETIME, utm_campaign_signups STRING, utm_term_signups STRING, signup_category STRING, utm_source_signups STRING, utm_medium_signups STRING, Context STRING, new_product_category STRING, Flow STRING, instance_id INT64, bmi FLOAT64, Cohort_Status STRING, Final_Cohort_Status_Marker FLOAT64, Final_Cohort_Status_2_Marker FLOAT64, appt_date_time DATETIME, appt_created_at DATETIME, first_order_timestamp DATETIME, Country STRING, Brand STRING
 
-Tables that exist in this dataset but are deliberately NOT included above (so don't be surprised they're \
-invisible to schema inspection - this is intentional, not a gap to work around): 4 tables ending in \
-"_test" (marketing_clicks_data_test, marketing_data_all_test, marketing_impressions_data_test, \
-marketing_spend_data_test - dev/staging duplicates of real tables already listed above); 3 "mm_*" tables \
-(mm_production_data, mm_staging_data, mm_test_updated_sales_data - Modern Molecules, a different real ORA \
-brand's own Shopify data, out of scope here); a handful of confirmed-empty/dead tables (doctor-consultation- \
-sg, order_to_consultation_my_new, dod_campaign_data); and point-in-time snapshot tables (dated suffixes on \
-dotcom_plus_marketplace/updated_sales_data/marketing_spend_data - historical backups, not needed for a \
-current-state question).
+TABLE ATC_aggregated (11 columns):
+created_at DATE, brand STRING, country STRING, category_name STRING, total_same_day_signups INT64, total_unique_users INT64, total_users_rx INT64, total_users_with_appt INT64, total_final_orders INT64, total_final_orders_rx INT64, new_category_name STRING
 
-CRM/FLOW QUESTIONS - USE THE VERIFIED VIEW, NOT RAW orders_utm_campaign MATCHING: for ANY question about \
-a named CRM lifecycle flow (winback, abandoned cart, welcome, treatment-plan email, order confirmation, \
-no-show consultation, prescription renewal, cross-sell) or about "flows"/"automation" as a whole, query \
-`crm-mail-automation-dev.crm_analytics_views.flow_orders` (a view over the real updated_sales_data, same \
-columns, same Brand/Country/Year/Month_Name/Final_Revenue/status you already know, plus three extra \
-pre-verified columns - use it exactly like updated_sales_data with these three added). This view lives in \
-a different project from the one you're connected to, so it will NOT appear in a table-list lookup and a \
-schema-inspection tool call on it will fail (not a sign it doesn't exist, and not a sign the query itself \
-will fail) - do not attempt to inspect it, and do not give up or report no data just because that lookup \
-errors. Query it directly with a real SELECT using its full name and the same column names/types as \
-updated_sales_data (which you already know from these schema notes) plus the three documented below - \
-that SELECT will succeed even though a schema/table-list lookup on this specific table would not:
-  - is_flow_attributed (BOOL): TRUE for any order attributed to an automated/orchestrated CRM flow (the \
-real orders_utm_campaign "ATM_" prefix convention, already resolved for you). Use this ONLY for "all \
-flows/automation as a whole" questions that don't name one specific flow.
-  - flow_family (STRING or NULL): one of 'winback', 'abandoned_cart', 'welcome_onboarding', \
-'treatment_plan_email', 'order_confirmation', 'no_show_consultation', 'prescription_renewal', 'cross_sell', \
-or NULL if the order isn't attributed to one of these named lifecycle flows. This already accounts for \
-the real sprawl of hundreds of dated/product-specific exact campaign-tag variants sharing a family name - \
-filter on flow_family = 'winback' directly; never try to rebuild this with your own LIKE '%keyword%' guess.
-  CRITICAL - these two are DIFFERENT signals, do not combine them for a named-flow question: a question \
-about ONE named flow ("how much did winback drive") filters on flow_family ALONE - do NOT also require \
-is_flow_attributed, because plenty of real winback (and other named-flow) orders don't happen to carry the \
-ATM_ prefix, so adding that condition silently drops most of the real matching orders down to a tiny \
-sliver (a real, verified case: combining both conditions for a winback question kept only 1 of 88 real \
-matching orders, understating a SGD 3,912 answer as SGD 65). is_flow_attributed is reserved for aggregate \
-"all flows" questions where no single flow_family is named.
-  - is_excluded_status (BOOL): TRUE for refund/cancelled/expired-style statuses - filter WHERE NOT \
-is_excluded_status for the normal case, or include everyone regardless when a question explicitly asks for \
-a gross/all-orders figure.
-This view exists because two real, verified incidents were caught and corrected this way: (1) a query \
-that skipped the ATM_ automation filter answered "how did flows perform" with the whole hair-loss \
-category's revenue (SGD 258,194) instead of flow-attributed revenue (the real figure, SGD 1,005.51 for \
-that month) - a ~257x overstatement; (2) a guessed LIKE '%keyword%' pattern for a specific flow matched \
-only some of the real campaign-tag variants, undercounting a flow's true revenue by 2-4x. Both failure \
-classes are structurally fixed by using this view's pre-verified columns instead of re-deriving the \
-filter logic per question.
+TABLE Signups_ATC_Funnel (8 columns):
+Country STRING, Brand STRING, user_category_name STRING, signup_date DATE, total_unique_users INT64, same_day_carts INT64, total_carts INT64, total_orders INT64
 
-MOENGAGE - THREE REAL, GENUINELY DIFFERENT DATA SURFACES, not one - each covers a different real \
-population and a different kind of fact; use the right one, and don't assume a "verified fact" from one \
-surface generalizes to another (a real mistake this note corrects - see below):
+TABLE automation_testing_ova_sg_funnel (22 columns):
+instance_id STRING, user_id STRING, answer STRING, created_at STRING, provider STRING, utm_source_signups STRING, utm_medium_signups STRING, utm_campaign_signups STRING, utm_term_signups STRING, signup_category STRING, new_product_category STRING, UNC STRING, Context STRING, source STRING, bmi STRING, utm_source_bmi STRING, utm_medium_bmi STRING, utm_campaign_bmi STRING, utm_term_bmi STRING, Purchaser_Country STRING, Country STRING, Brand STRING
 
-  1. moengage_campaigns_email / moengage_campaigns_whatsapp / moengage_campaigns_push (in \
-crm-mail-automation-dev.crm_analytics_views, same cross-project situation as flow_orders - schema \
-inspection fails, query directly by full name regardless) - REAL PERFORMANCE metrics (Sent, Delivered, \
-Open_rate, CTR, Hard_bounce_rate, Unsubscribe_rate, Complaints_rate, and Goal_N x [Click_Through/ \
-View_Through/In_Session] x [Total_Revenue, CVR, Control_Group_Uplift, Control_Group_CVR] - see the column \
-naming pattern below) - but ONLY for the real Flow-triggered automated touchpoints captured in MoEngage's \
-own "Flows" report (source: a real export, snapshot dated 2026-08-20, static - not live-updating; say so \
-if asked how current it is). moengage_flows_summary (same project) is the one-row-per-flow rollup of the \
-same population (55 real columns, verified live via INFORMATION_SCHEMA - always re-check yourself for \
-any column not listed here, this is not exhaustive): Flow_Name, Flow_Status, Flow_Type, Flows_Id, \
-Flow_Version_Name, Published_at, Flow_Sent_Time, Campaign_Channel, Campaign_Delivery_Type, \
-Attribution_window, Trips_Started_Total_users, Trips_Started_CG_Users, Trips_Started_GCG_Users, \
-Trips_engaged (a REAL, DIFFERENT metric from Trips_Started_Total_users - engaged is a narrower, more \
-active-participation count, not a synonym - never treat them as interchangeable), Global_CG_enabled, \
-Campaign_Control_Group_Percentage, Control_Group_Stickiness_enabled, Custom_Segment_Name/Filters, \
-Tag_Category_Default/Uncategorized, and per-goal condition/definition fields \
-(Conversion_Goal_1/2_Name/Event/Condition/Attribute/Value - what the goal actually measures, not a \
-performance number itself) plus the same Goal_N x Window x Control_Group_CVR/Uplift/Global_ variants as \
-group 1's tables below - but NOTE this table's goal columns stop at CVR/Uplift, it has NO \
-Total_Revenue/Converted_Users/Conversion_Events columns (those exist only in the 3 campaign-level tables, \
-not this flow-level rollup) - query moengage_campaigns_email/whatsapp/push directly for revenue at the \
-individual-send level if a flow-level revenue figure is needed.
-     - COLUMN NAMING PATTERN (all 3 campaign-level tables): <Goal_1 or Goal_2> + <Click_Through / \
-View_Through / In_Session> (attribution window - Click_Through is the default/most meaningful for "did \
-this send cause a purchase") + one of: Total_Revenue, CVR, Converted_Users, Conversion_Events, \
-Average_Order_Value, Control_Group_CVR, Control_Group_Uplift, Global_Control_Group_CVR, \
-Global_Control_Group_Uplift, Control_Group_Conversions, Global_Control_Group_Conversions. These ARE real \
-monetary values where the name says Total_Revenue - confirmed live, non-zero for real campaigns; never \
-claim these tables "contain no monetary values" without checking first.
-     - CRITICAL - "users entered/started a flow" (Trips_Started_Total_users) is a DIFFERENT, real, \
-NON-INTERCHANGEABLE metric from "orders attributed to a flow" (flow_orders' COUNT(DISTINCT order_id)) - \
-someone can enter a flow and never buy. Never substitute one for the other.
-     - These 4 tables have NO Brand column, and Flow_Name/Campaign_Name do NOT encode brand anywhere \
-(organized by product category and flow type, never by brand) - a "broken down by brand" question about \
-flow entrants/sends genuinely cannot be split by brand from this population; say so plainly rather than \
-faking a split by pasting in flow_orders' Brand column (that would also silently switch the metric).
-     - CRITICAL - NO WEEKLY OR DAILY GRAIN EXISTS IN THIS TABLE, a real, live-caught gap: \
-Trips_Started_Total_users/Trips_engaged are LIFETIME CUMULATIVE totals, one number per flow since it was \
-created - there is no dated/weekly/daily breakdown column anywhere in moengage_flows_summary. \
-Flow_Sent_Time and Published_at are single config timestamps (when the flow itself was last \
-published/sent), not a per-period aggregation key. A real "how many users entered our flows LAST WEEK, \
-and how does that compare WoW/MoM" question CANNOT be honestly answered from this table - do not attempt \
-to fake a weekly number by dividing the lifetime total, and do not silently substitute a different, \
-unrelated dated metric. Say plainly that this table only has lifetime-cumulative entrant counts, not a \
-dated series, and that a real per-week source (if one exists) would need to come from wherever that real \
-weekly figure was pulled before - ask, don't guess.
+TABLE marketing_data (21 columns):
+day DATE, campaign_name STRING, impressions INT64, clicks INT64, category STRING, campaign_type STRING, campaign_type_clean STRING, country STRING, brand STRING, spends FLOAT64, order_level_nur FLOAT64, signup_level_nur FLOAT64, channel STRING, order_level_unc INT64, signup_level_unc INT64, signups INT64, order_level_total_revenue FLOAT64, signup_level_total_revenue FLOAT64, dotcom_vs_marketplace STRING, source STRING, load_ts TIMESTAMP
 
-  2. moengage_campaigns_live (same project/dataset, same cross-project situation) - REAL CONFIGURATION \
-for EVERY real campaign MoEngage has ever run (895 confirmed live - not just Flow touchpoints; 885 of \
-these are ONE_TIME manual sends, a population tables in group 1 above structurally exclude entirely). \
-Columns: campaign_id, name, channel, campaign_delivery_type (ONE_TIME/PERIODIC/EVENT_TRIGGERED), \
-content_type, tags (comma-joined - real values include 'winback', 'upgrade', 'replenishment', \
-'promotional', 'cross-sell'), status, created_by, created_at, sent_time, \
-is_global_control_group_enabled, is_campaign_control_group_enabled, campaign_control_group_percentage, \
-utm_source/utm_medium/utm_campaign (the REAL UTM values MoEngage itself assigns - the genuine bridge to \
-BigQuery's own orders_utm_source/medium/campaign columns, not a guessed mapping), connector_type, \
-conversion_goal_names, conversion_goal_count, is_all_user_campaign, email_subject, and \
-included_filters_json/excluded_filters_json (the real audience-targeting logic, as raw JSON text - read \
-these for a genuinely deep "who does this target" question, not for filtering/grouping). This table has \
-NO performance numbers (no sent/delivered/opens/clicks/revenue columns exist here at all) - use group 1 \
-for performance, this table for real config/targeting/control-group/tag/UTM truth. STATIC SNAPSHOT (this \
-API takes ~2.5 minutes to fully paginate, far too slow to re-fetch live per question) - say so if asked \
-how current it is.
-     - CORRECTED REAL FACT about control groups (a previous version of this note was WRONG and said no \
-campaign ever has one - that was checked only against group 1's Flow-only population, not this real, \
-complete one): 6 real campaigns DO have is_campaign_control_group_enabled = TRUE right now (all real \
-"Rampup_Day_N_BoostErection" campaigns, control-group percentages 20-88%, confirmed live: 20/52/52/75/80/88) \
-- query THIS table for any real "which campaigns have a control group" question, never assume the answer \
-is universally zero. These 6 have NULL tags (control-group usage and tagging are independent, unrelated \
-facts about a campaign - don't assume one implies the other).
-     - CORRECTED REAL FACT about lifecycle categories (a previous version of this note wrongly said \
-"Sale"/"Upgrade"/"Edu" don't exist anywhere in this real data, and separately understated how common some \
-of these are - both corrected here from a live full-table check, not assumption): the real `tags` column \
-has only 5 distinct non-null values across all 895 campaigns - winback (238 campaigns, by far the most \
-common real tag), upgrade (6, a DIFFERENT set of 6 campaigns from the control-group 6 above - real names \
-like "HL_Upgrades_HL_Active 3M Subs"), replenishment (4), promotional (2), cross-sell (1) - 645 campaigns \
-have no tag at all, so absence of a tag is not evidence a campaign isn't e.g. a winback send, only that \
-it wasn't tagged as one. Separately, "Edu" and "Sale" are both real, COMMON naming-convention segments in \
-the `name` column itself (not the tags column) - Edu appears in 277 real campaign names (e.g. \
-"Rampup_Day8_BoostErection_Edu_ED_All"), and Sale appears in 212 real campaign names, mostly real seasonal \
-promo pushes following a "<Event>Sale_Sale_Generic_..." pattern (MoonlightSale, National Day Sale, \
-Payweek Sale, 7.7 Sale, etc.) - a "how did our Sale campaigns do" question is real and answerable by \
-name LIKE '%Sale%' here (config/targeting only - pair with group 1 if the question needs performance \
-numbers for named campaigns that also appear there). Query this table (tags column AND name LIKE \
-patterns - they capture different things) before concluding a lifecycle category doesn't exist; group 1 \
-alone is not the complete real picture, and neither is assuming from memory.
+TABLE marketing_clicks_data (12 columns):
+Country STRING, Brand STRING, Channel STRING, Year INT64, Month_Num INT64, Month_Name STRING, Date DATETIME, Search STRING, PMax STRING, Total_Clicks INT64, Classification STRING, Category STRING
 
-  3. The chart-based MoEngage tool (a separate real-time system, not a BigQuery table - given to you as \
-context below when relevant, not queried via SQL) - genuinely live, catalog-selected from MoEngage's real \
-dashboard/chart inventory. Use this ONLY for detail neither BigQuery table group above captures: day-by- \
-day trend detail, or funnel step-by-step breakdowns not expressed as a Goal in group 1. PREFER the two \
-BigQuery table groups above for anything they cover (revenue, CVR, control group, tags, unsubscribe/ \
-complaint/bounce rates, real UTM values) - they give an exact queried number, not an LLM's read of a \
-chart. There is NO email/WhatsApp/push send/open/click EVENT-level table in BigQuery itself (row-per-send- \
-per-event) - that granularity, if a question genuinely needs it, only exists via this chart tool or the \
-campaign-level aggregates in groups 1-2 above."""
+TABLE marketing_historical_data (11 columns):
+Country STRING, Brand STRING, Adset STRING, Date DATETIME, Category STRING, Campaign_Type STRING, Campaign_Type_Clean STRING, Spends FLOAT64, Total_Clicks STRING, Impressions STRING, Channel STRING
+
+TABLE _staging_consolidated_paid_performance (21 columns):
+day DATE, campaign_name STRING, impressions INT64, clicks INT64, category STRING, campaign_type STRING, campaign_type_clean STRING, country STRING, brand STRING, spends FLOAT64, order_level_nur FLOAT64, signup_level_nur FLOAT64, channel STRING, order_level_unc INT64, signup_level_unc INT64, signups INT64, order_level_total_revenue FLOAT64, signup_level_total_revenue FLOAT64, dotcom_vs_marketplace STRING, source STRING, load_ts TIMESTAMP
+
+TABLE creative_data (24 columns):
+campaign_name STRING, impressions INT64, link_clicks FLOAT64, amount_spent FLOAT64, account_name STRING, day DATETIME, ad_name STRING, cid_name STRING, category STRING, campaign_type STRING, campaign_type_clean STRING, mm_country_temp STRING, brand STRING, country STRING, spends FLOAT64, order_level_nur FLOAT64, signup_level_nur FLOAT64, channel STRING, order_level_unc FLOAT64, signup_level_unc FLOAT64, signups FLOAT64, order_level_total_revenue FLOAT64, signup_level_total_revenue FLOAT64, dotcom_v_s_marketplace STRING
+
+TABLE marketplace_marketing_spends (8 columns):
+Date DATETIME, Spends INT64, UNC INT64, Traffic STRING, Country STRING, Brand STRING, Channel STRING, Category STRING
+
+TABLE doctor_consultation_sg (42 columns):
+consult_id INT64, order_id INT64, user_id FLOAT64, consult_status STRING, consult_reason STRING, rx_id FLOAT64, rx_status STRING, subs_status FLOAT64, cancel_reason STRING, cancelled_at DATETIME, consult_day STRING, consult_day_with_number STRING, order_status STRING, reconsult INT64, bmi FLOAT64, subs_order_id FLOAT64, subs_order_status STRING, subs_order_created_at DATETIME, subs_order_updated_at DATETIME, order_update_flag STRING, charge_tp_button_clicked INT64, charge_tp_success INT64, reason_type STRING, reason STRING, consult_date DATETIME, consult_source STRING, dr_email STRING, subscription_id FLOAT64, product_id FLOAT64, latest_sku STRING, category_name STRING, cart_cat_name STRING, first_order_category STRING, final_category STRING, utm_campaign STRING, user_email STRING, name STRING, age FLOAT64, gender STRING, ATTENDED_DR STRING, brand STRING, country STRING
+
+TABLE doctor_consultation_all (44 columns):
+consult_id INT64, order_id INT64, user_id INT64, consult_status STRING, consult_reason STRING, rx_id FLOAT64, rx_status STRING, subs_status FLOAT64, cancel_reason STRING, cancelled_at DATETIME, consult_day STRING, consult_day_with_number STRING, order_status STRING, reconsult INT64, bmi FLOAT64, subs_order_id FLOAT64, subs_order_status STRING, subs_order_created_at DATETIME, subs_order_updated_at DATETIME, order_update_flag STRING, charge_tp_button_clicked INT64, charge_tp_success INT64, reason_type STRING, reason STRING, consult_date DATETIME, consult_source STRING, dr_email STRING, subscription_id FLOAT64, product_id FLOAT64, latest_sku STRING, ori_sku STRING, final_sku STRING, category_name STRING, cart_cat_name STRING, first_order_category STRING, final_category STRING, utm_campaign STRING, user_email STRING, name STRING, age FLOAT64, gender STRING, ATTENDED_DR STRING, brand STRING, country STRING
+
+TABLE doctor_consultation_my (43 columns):
+consult_id INT64, order_id INT64, user_id FLOAT64, consult_status STRING, consult_reason STRING, rx_id FLOAT64, rx_status STRING, subs_status FLOAT64, cancel_reason STRING, cancelled_at DATETIME, consult_day STRING, consult_day_with_number STRING, order_status STRING, reconsult INT64, bmi FLOAT64, subs_order_id FLOAT64, subs_order_status STRING, subs_order_created_at DATETIME, subs_order_updated_at DATETIME, order_update_flag STRING, charge_tp_button_clicked INT64, charge_tp_success INT64, reason_type STRING, reason STRING, consult_date DATETIME, consult_source STRING, dr_email STRING, subscription_id FLOAT64, product_id FLOAT64, latest_sku STRING, category_name STRING, cart_cat_name STRING, first_order_category STRING, final_category STRING, utm_campaign STRING, user_email STRING, name STRING, dob DATE, age FLOAT64, gender STRING, ATTENDED_DR STRING, brand STRING, country STRING
+
+TABLE order_to_consultation_my (15 columns):
+trigger_source STRING, order_id INT64, cart_id INT64, dr_email STRING, attended_dr STRING, name STRING, reconsultation INT64, user_id INT64, cart_created DATETIME, order_created DATETIME, consult_datetime DATETIME, adjusted_order_to_consult_hours FLOAT64, adjusted_consult_time_bucket STRING, brand STRING, country STRING
+
+TABLE customer_analysis_data (42 columns):
+Country STRING, age FLOAT64, Cohort_First_Month STRING, sku_of_first_order STRING, Cat_Of_First_Order STRING, Brand2 STRING, Full_Phone STRING, signup_timestamp STRING, Num_Purchases_Order_ID FLOAT64, Num_Categories FLOAT64, First_Non_Consult_SKU_Purchase_Date STRING, Second_Non_Consult_SKU_Purchase_Date STRING, Third_Non_Consult_SKU_Purchase_Date STRING, First_Non_Consult_Cat_Purchase_Date STRING, Second_Non_Consult_Cat_Purchase_Date STRING, Third_Non_Consult_Cat_Purchase_Date STRING, First_Purchase_Date STRING, First_Non_Consult_Purchase_Date STRING, literal_sku_of_first_order STRING, First_Non_Consult_Purchase_Type STRING, Ever_Bought_Subs STRING, Second_Purchase_Date STRING, Second_Non_Consult_Purchase_Date STRING, First_EC_Purchase_Date STRING, First_BC_Purchase_Date STRING, First_ED_Purchase_Date STRING, First_PE_Purchase_Date STRING, First_HL_Purchase_Date STRING, First_Well_Being_Purchase_Date STRING, First_Weight_Loss_Purchase_Date STRING, First_Weight_Loss_Program_Purchase_Date STRING, First_Period_Delay_Purchase_Date STRING, First_SC_Purchase_Date STRING, Detailed_First_Non_Consult_Purchase_Type STRING, First_OneOff_Purchase_Date STRING, First_1Msub_Purchase_Date STRING, First_3Msub_Purchase_Date STRING, First_6Msub_Purchase_Date STRING, Date_Of_UNC DATETIME, Last_Purchase_Date DATETIME, Num_Purchases_Order_Baskets FLOAT64, Num_NC_Categories FLOAT64
+
+TABLE utm_cohort_data (27 columns):
+Country STRING, Brand STRING, Cat_Of_First_Order STRING, Cohort_First_Month INT64, Cohort_Order_Month INT64, utm STRING, Acquisition_Product_Type STRING, Cohort_Size FLOAT64, Customers INT64, Orders INT64, Revenue INT64, Actionable_Weighted_Average FLOAT64, Actionable_Weighted_Average_Revenue FLOAT64, Customer_Projection FLOAT64, Revenue_Projection FLOAT64, Repeat_Customer_Actuals FLOAT64, Repeat_Revenue_Actuals FLOAT64, Percentage_Return_Rate FLOAT64, Percentage_Return_Rate_Revenue FLOAT64, Month_Of_Acquisition STRING, Days_Elapsed INT64, Days_In_Month INT64, Current_Month STRING, Latest_Month STRING, Cohort_Ref STRING, Extrapolated_Customer_Actuals FLOAT64, Extrapolated_Revenue_Actuals FLOAT64
+
+TABLE subs_only_cohort_data (20 columns):
+Country STRING, Brand STRING, Cat_Of_First_Order STRING, Cohort_First_Month INT64, Cohort_Order_Month INT64, Cohort_Size FLOAT64, Cohort_Size_Revenue FLOAT64, Customers INT64, Orders INT64, Revenue INT64, Actionable_Weighted_Average FLOAT64, Weighted_Average_Cumulative_Orders FLOAT64, Percentage_Return_Rate FLOAT64, Percentage_Return_Rate_Revenue FLOAT64, ARPU FLOAT64, AOV FLOAT64, Cumulative_Orders_Per_Cohort_Member FLOAT64, Cumulative_Revenue_Per_Cohort_Member FLOAT64, Weighted_Average_ARPU FLOAT64, Month_Of_Acquisition STRING
+
+TABLE signups_purchase_time (23 columns):
+Full_Phone STRING, Country STRING, Brand STRING, signed_up_date STRING, Age INT64, First_Purchase_Date STRING, First_Non_Consult_Purchase_Date STRING, literal_sku_of_first_order STRING, sku_of_first_order STRING, Cat_Of_First_Order STRING, First_Non_Consult_Purchase_Type STRING, Ever_Bought_Subs STRING, Second_Purchase_Date STRING, Second_Non_Consult_Purchase_Date STRING, First_EC_Purchase_Date STRING, First_BC_Purchase_Date STRING, First_ED_Purchase_Date STRING, First_PE_Purchase_Date STRING, First_HL_Purchase_Date STRING, First_SUP_Purchase_Date STRING, First_WL_Purchase_Date STRING, First_WL_Program_Purchase_Date STRING, First_PD_Purchase_Date STRING
+
+TABLE mom (19 columns):
+order_id INT64, Order_Baskets INT64, created_at DATETIME, user_id INT64, phone STRING, new_product_category STRING, sku STRING, Country STRING, Brand STRING, Value FLOAT64, age FLOAT64, Prescription_Type STRING, Cohort_First_Month STRING, Cat_Of_First_Order STRING, sku_of_first_order STRING, status STRING, Order_Type STRING, Preponed STRING, Metric STRING
+
+TABLE projection (16 columns):
+year INT64, month_of_year STRING, Country STRING, Brand STRING, new_product_category STRING, Final_Revenue FLOAT64, New_Customer_Revenue FLOAT64, Total_Customers FLOAT64, New_Customers FLOAT64, Context STRING, Brand-Country STRING, Month_Number STRING, Day STRING, Date DATETIME, Repeat_Customer_Revenue FLOAT64, Repeat_Customers FLOAT64
+
+
+=== crm-mail-automation-dev.crm_analytics_views (DIFFERENT project - schema-inspection tool CANNOT see these, query them directly by full name) ===
+
+TABLE flow_orders (100 columns):
+order_id INT64, cart_id FLOAT64, status STRING, user_id INT64, product_option_price_id INT64, sku STRING, sku_for_wms STRING, quantity INT64, subscription_id FLOAT64, created_at DATETIME, discount_id FLOAT64, discount_total_amount FLOAT64, orders_utm_source STRING, orders_utm_medium STRING, orders_utm_campaign STRING, orders_utm_term STRING, tp_source STRING, order_platform STRING, Country STRING, Brand STRING, email STRING, trigger_source STRING, payment_method_type STRING, product_category STRING, sku_quantity FLOAT64, Months_Of_Products FLOAT64, Revenue FLOAT64, new_product_category STRING, Prescription_Type STRING, code STRING, Applicable_Discount FLOAT64, Applicable_Cashback FLOAT64, Final_Revenue FLOAT64, Applicable_Refund FLOAT64, Num_Orderlines_AV INT64, Applicable_Shipping_Fee FLOAT64, phone STRING, signup_utm_campaign STRING, signup_utm_term STRING, signup_timestamp DATETIME, signup_category STRING, signup_platform STRING, signup_utm_source STRING, signup_utm_medium STRING, UNC_Check STRING, UNC INT64, Order_Baskets INT64, Order_Type STRING, New_Customer_Revenue FLOAT64, New_Customer_Orderlines INT64, counter FLOAT64, age FLOAT64, First_Age FLOAT64, First_Age_Bucket STRING, first_order_type STRING, first_order_type_clean STRING, Cohort_First_Month STRING, sku_of_first_order STRING, Cat_Of_First_Order STRING, Preponed STRING, discount_offering_id FLOAT64, discount_amount FLOAT64, Product_Driven_Orderlines FLOAT64, source STRING, Product_Driven_Type STRING, is_buy_now_cart FLOAT64, is_plan_changed FLOAT64, plan_changed_by STRING, transaction_type STRING, cod_status STRING, order_number INT64, Payment_Reference STRING, Revenue_Type STRING, Nomenclature STRING, First_SKU_Nomenclature STRING, Active_Price FLOAT64, New_Active_Price FLOAT64, Sub_Discount FLOAT64, Willingness_To_Pay_Customers STRING, Final_Sub_Discount FLOAT64, sku_for_pop_id_mapping STRING, product_option_price_id2 FLOAT64, COGS_LCY FLOAT64, New_COGS FLOAT64, New_COGS_LCY FLOAT64, COGS_Less_RND FLOAT64, COGS_LCY_Less_RND FLOAT64, Cleaned_Revenue_Type STRING, Credit_Card_Expense FLOAT64, Delivery_Fee FLOAT64, Month_Num INT64, Year INT64, Month_Name STRING, Preponed_Label STRING, Preponed_Date DATE, Clean_Next_Payment_Date DATE, revenue_reporting_date DATETIME, is_flow_attributed BOOL, is_excluded_status BOOL, flow_family STRING
+
+TABLE moengage_flows_summary (55 columns):
+Goal_2_In_Session_Global_Control_Group_CVR FLOAT64, Goal_1_In_Session_Global_Control_Group_CVR FLOAT64, Goal_2_In_Session_Control_Group_CVR FLOAT64, Goal_2_In_Session_Global_Control_Group_Uplift FLOAT64, Goal_1_In_Session_Global_Control_Group_Uplift FLOAT64, Goal_2_In_Session_Control_Group_Uplift FLOAT64, Goal_1_View_Through_Global_Control_Group_CVR FLOAT64, Custom_Segment_Filters STRING, Conversion_Goal_1_Value STRING, Goal_2_View_Through_Control_Group_CVR FLOAT64, Goal_1_View_Through_Control_Group_CVR FLOAT64, Goal_2_View_Through_Global_Control_Group_CVR FLOAT64, Goal_2_View_Through_Global_Control_Group_Uplift FLOAT64, Global_CG_enabled BOOL, Goal_1_Click_Through_Global_Control_Group_Uplift FLOAT64, Goal_1_View_Through_Global_Control_Group_Uplift FLOAT64, Goal_1_In_Session_Control_Group_Uplift FLOAT64, Conversion_Goal_2_Event STRING, Goal_2_View_Through_Control_Group_Uplift FLOAT64, Goal_1_View_Through_Control_Group_Uplift FLOAT64, Goal_2_Click_Through_Control_Group_CVR FLOAT64, Goal_1_Click_Through_Control_Group_CVR FLOAT64, Flow_Name STRING, Trips_Started_Total_users INT64, Flow_Status STRING, Conversion_Goal_1_Condition STRING, Goal_1_In_Session_Control_Group_CVR FLOAT64, Flow_Type STRING, Published_at TIMESTAMP, Conversion_Goal_2_Name STRING, Custom_Segment_Name STRING, Conversion_Goal_1_Name STRING, Campaign_Channel STRING, Control_Group_Stickiness_enabled BOOL, Trips_engaged INT64, Campaign_Control_Group_Percentage INT64, Tag_Category_Uncategorized STRING, Goal_2_Click_Through_Global_Control_Group_Uplift FLOAT64, Conversion_Goal_1_Attribute STRING, Conversion_Goal_2_Condition STRING, Conversion_Goal_2_Value STRING, Flow_Sent_Time TIMESTAMP, Goal_1_Click_Through_Control_Group_Uplift FLOAT64, Campaign_Delivery_Type STRING, Attribution_window INT64, Goal_2_Click_Through_Global_Control_Group_CVR FLOAT64, Conversion_Goal_2_Attribute STRING, Goal_1_Click_Through_Global_Control_Group_CVR FLOAT64, Conversion_Goal_1_Event STRING, Tag_Category_Default STRING, Goal_2_Click_Through_Control_Group_Uplift FLOAT64, Flow_Version_Name STRING, Trips_Started_GCG_Users INT64, Trips_Started_CG_Users INT64, Flows_Id STRING
+
+TABLE moengage_campaigns_email (86 columns):
+Goal_1_In_Session_Global_Control_Group_Conversions INT64, Goal_1_In_Session_Global_Control_Group_CVR INT64, Goal_1_In_Session_Control_Group_Uplift INT64, Goal_1_In_Session_CVR FLOAT64, Goal_1_In_Session_Total_Revenue FLOAT64, Goal_1_Click_Through_Global_Control_Group_CVR INT64, Goal_1_Click_Through_Total_Revenue FLOAT64, Goal_1_Click_Through_Conversion_Events INT64, Goal_1_Click_Through_Converted_Users INT64, Goal_1_Click_Through_Global_Control_Group_Uplift INT64, Goal_1_View_Through_Global_Control_Group_Uplift INT64, Goal_1_View_Through_Control_Group_Uplift INT64, Goal_1_View_Through_Control_Group_Conversions INT64, Goal_1_View_Through_Control_Group_CVR INT64, Goal_1_View_Through_CVR FLOAT64, Goal_1_In_Session_Global_Control_Group_Uplift INT64, Goal_1_View_Through_Total_Revenue FLOAT64, Goal_1_View_Through_Conversion_Events INT64, After_Duplicates_Removed INT64, After_B_U_C_Removed INT64, Goal_1_In_Session_Control_Group_Conversions INT64, Goal_1_Click_Through_Control_Group_Uplift INT64, Complaints INT64, Unsubscribe_rate FLOAT64, Goal_1_In_Session_Conversion_Events INT64, CTR FLOAT64, Total_Soft_bounces INT64, Open_rate FLOAT64, Delivery_rate FLOAT64, Complaints_rate FLOAT64, Campaign_Type STRING, Trigger_Delay STRING, Total_clicks INT64, Goal_1_Click_Through_Control_Group_Conversions INT64, Goal_1_View_Through_Converted_Users INT64, Soft_bounce_rate FLOAT64, Drops INT64, Delivered INT64, Total_Sent INT64, Hard_bounce_rate FLOAT64, Active_Target_Global_Control_Group INT64, Conversion_Goal_1_Name STRING, Sent INT64, Template_Name STRING, Campaign_Sending_Type STRING, Unique_clicks INT64, Goal_1_Click_Through_CVR FLOAT64, Campaign_Sent_Time STRING, From_Email_Address STRING, Active_Target_Control_Group INT64, Conversion_Goal_1_Condition STRING, Reply_To_Email_Address STRING, Goal_1_Click_Through_Global_Control_Group_Conversions INT64, Template_ID STRING, Tag_Category_Uncategorized STRING, Total_Hard_bounces INT64, Parent_Campaign_ID STRING, Email_Subject STRING, Campaign_Segment_Filters STRING, Total_Open INT64, Custom_Segment_Name STRING, Total_Delivered INT64, Flows_Name STRING, Conversion_Goal_1_Value STRING, Soft_bounces INT64, Campaign_ID STRING, Campaign_Status STRING, Goal_1_View_Through_Global_Control_Group_Conversions INT64, Campaign_Channel STRING, Campaign_CG INT64, Goal_1_In_Session_Control_Group_CVR INT64, Email_Attribute STRING, Goal_1_View_Through_Global_Control_Group_CVR INT64, After_Invalid_Emails_Removed INT64, Unsubscribes INT64, Unique_opens INT64, Created_By STRING, Goal_1_In_Session_Converted_Users INT64, Tag_Category_Default STRING, Campaign_Content_Type STRING, Goal_1_Click_Through_Control_Group_CVR INT64, Hard_bounces INT64, Campaign_Name STRING, Conversion_Goal_1_Attribute STRING, Campaign_Delivery_Type STRING, Conversion_Goal_1_Event STRING
+
+TABLE moengage_campaigns_whatsapp (108 columns):
+Goal_1_In_Session_Global_Control_Group_CVR INT64, Goal_2_In_Session_Control_Group_Conversions INT64, Goal_1_In_Session_CVR INT64, Goal_2_In_Session_Average_Order_Value INT64, Sent INT64, Goal_1_In_Session_Average_Order_Value INT64, Goal_1_In_Session_Total_Revenue INT64, Goal_1_In_Session_Global_Control_Group_Conversions INT64, Goal_2_In_Session_Total_Revenue INT64, Goal_2_In_Session_Conversion_Events INT64, Goal_1_View_Through_Global_Control_Group_CVR INT64, Read INT64, Goal_2_View_Through_Control_Group_Conversions INT64, Goal_1_Click_Through_Average_Order_Value INT64, Goal_1_View_Through_Control_Group_Conversions INT64, Goal_2_View_Through_Global_Control_Group_CVR INT64, Goal_1_View_Through_CVR FLOAT64, Goal_2_View_Through_Conversion_Events INT64, Goal_2_Click_Through_Total_Revenue INT64, Goal_1_Click_Through_Global_Control_Group_CVR INT64, Header STRING, Goal_2_Click_Through_Control_Group_Conversions INT64, Goal_1_Click_Through_CVR INT64, Goal_1_View_Through_Converted_Users INT64, Goal_2_Click_Through_Global_Control_Group_Conversions INT64, Goal_1_Click_Through_Control_Group_Conversions INT64, Goal_1_Click_Through_Global_Control_Group_Uplift INT64, Goal_2_Click_Through_Global_Control_Group_Uplift INT64, Goal_1_View_Through_Global_Control_Group_Uplift INT64, Goal_2_Click_Through_CVR INT64, Goal_1_View_Through_Total_Revenue FLOAT64, Goal_2_Click_Through_Average_Order_Value INT64, Campaign_Status STRING, Goal_1_Click_Through_Total_Revenue INT64, Goal_2_Click_Through_Conversion_Events INT64, Goal_1_Click_Through_Conversion_Events INT64, Tag_Category_Default STRING, Goal_1_View_Through_Average_Order_Value FLOAT64, Goal_1_View_Through_Conversion_Events INT64, Goal_1_Click_Through_Global_Control_Group_Conversions INT64, Whatsapp_Button_1_Action STRING, Goal_2_Click_Through_Converted_Users INT64, Goal_2_View_Through_Global_Control_Group_Conversions INT64, Goal_1_Click_Through_Converted_Users INT64, Goal_2_Revenue INT64, Footer STRING, Goal_2_CVR FLOAT64, CTOR FLOAT64, Goal_2_View_Through_Global_Control_Group_Uplift INT64, Campaign_Type STRING, Goal_2_In_Session_Global_Control_Group_Conversions INT64, Trigger_Delay STRING, Total_clicks INT64, Read_Rate FLOAT64, Delivered INT64, Total_Sent INT64, Goal_2_In_Session_Global_Control_Group_Uplift INT64, Conversion_Goal_1_Name STRING, Template_Name STRING, Goal_1_In_Session_Control_Group_Conversions INT64, Tag_Category_Uncategorized STRING, Campaign_Sending_Type STRING, Campaign_Sent_Time STRING, Whatsapp_Button_2_Text STRING, Goal_1_CVR FLOAT64, Goal_2_In_Session_Global_Control_Group_CVR INT64, Created_By STRING, Whatsapp_Button_1_Text STRING, Whatsapp_Button_2_Type STRING, Goal_1_In_Session_Conversion_Events INT64, Goal_2_View_Through_CVR FLOAT64, CTR FLOAT64, Whatsapp_Button_1_Type STRING, Goal_2_View_Through_Converted_Users INT64, Goal_2_View_Through_Average_Order_Value FLOAT64, Sender_Number INT64, Conversion_Goal_1_Value STRING, Custom_Segment_Filters STRING, Goal_2_In_Session_CVR INT64, Conversion_Goal_1_Event STRING, Campaign_ID STRING, Conversion_Goal_2_Value STRING, Unique_clicks INT64, Goal_1_Revenue FLOAT64, Total_Delivered INT64, Flows_Name STRING, Conversion_Goal_1_Condition STRING, Conversion_Goal_2_Name STRING, Custom_Segment_Name STRING, Goal_2_View_Through_Total_Revenue INT64, Conversion_Goal_2_Event STRING, Goal_1_In_Session_Global_Control_Group_Uplift INT64, Delivery_Rate FLOAT64, Goal_1_View_Through_Global_Control_Group_Conversions INT64, Campaign_Channel STRING, Total_Read INT64, Goal_2_Click_Through_Global_Control_Group_CVR INT64, Body STRING, Goal_2_In_Session_Converted_Users INT64, Conversion_Goal_1_Attribute STRING, Conversion_Goal_2_Condition STRING, Campaign_Name STRING, Conversion_Goal_2_Attribute STRING, Campaign_Delivery_Type STRING, Parent_Campaign_ID STRING, Sender_Name STRING, Whatsapp_Button_2_Action STRING, Goal_1_In_Session_Converted_Users INT64
+
+TABLE moengage_campaigns_push (393 columns):
+All_Platform_FCM_Delivery_Rate FLOAT64, Web_FCM_Delivery_Rate INT64, Android_FCM_Delivery_Rate FLOAT64, Web_Uplift_Percentage INT64, Ios_Uplift_Percentage INT64, All_Platform_Push_Amp_Plus_Impressions INT64, All_Platform_Push_Amp_Plus_Clicks INT64, Ios_Push_Amp_Plus_Clicks INT64, Goal_1_In_Session_Global_Control_Group_Uplift_All_Platform INT64, Goal_1_In_Session_Global_Control_Group_Uplift_Web INT64, Goal_2_In_Session_Global_Control_Group_Uplift_Ios INT64, Goal_1_In_Session_Global_Control_Group_Uplift_Ios INT64, Goal_1_In_Session_Control_Group_Uplift_Web INT64, Goal_1_In_Session_Control_Group_Uplift_Android INT64, Goal_1_In_Session_Global_Control_Group_CVR_All_Platform INT64, Goal_2_In_Session_Global_Control_Group_CVR_Ios INT64, Goal_2_In_Session_Global_Control_Group_CVR_Android INT64, Goal_1_In_Session_Global_Control_Group_CVR_Android INT64, Goal_1_In_Session_Control_Group_CVR_Web INT64, Goal_1_In_Session_Control_Group_CVR_Ios INT64, Goal_1_In_Session_CVR_Ios FLOAT64, Goal_1_In_Session_CVR_Android INT64, Goal_2_In_Session_Average_Order_Value_All_Platform INT64, Goal_1_In_Session_Average_Order_Value_All_Platform FLOAT64, Goal_2_In_Session_Average_Order_Value_Web INT64, Goal_2_In_Session_Average_Order_Value_Android INT64, Goal_1_In_Session_Control_Group_CVR_All_Platform INT64, Goal_2_In_Session_Total_Revenue_All_Platform INT64, Goal_1_In_Session_Total_Revenue_All_Platform FLOAT64, Goal_2_In_Session_Total_Revenue_Ios INT64, Goal_2_In_Session_Total_Revenue_Android INT64, Goal_1_In_Session_Total_Revenue_Android INT64, Goal_1_In_Session_Conversion_Events_All_Platform INT64, Goal_2_In_Session_Conversion_Events_Web INT64, Goal_2_In_Session_Conversion_Events_Ios INT64, Ios_FCM_Delivery_Rate INT64, Goal_1_In_Session_Conversion_Events_Android INT64, Goal_2_In_Session_Converted_Users_All_Platform INT64, Goal_2_In_Session_Converted_Users_Web INT64, Goal_2_In_Session_Converted_Users_Ios INT64, Goal_2_View_Through_Global_Control_Group_Conversions_All_Platform INT64, Goal_1_View_Through_Global_Control_Group_Conversions_All_Platform INT64, Goal_1_In_Session_Global_Control_Group_Uplift_Android INT64, Goal_2_View_Through_Global_Control_Group_Conversions_Web INT64, Goal_1_View_Through_Global_Control_Group_Conversions_Ios INT64, Goal_1_View_Through_Global_Control_Group_Conversions_Android INT64, Goal_2_View_Through_Control_Group_Conversions_All_Platform INT64, Goal_2_In_Session_Converted_Users_Android INT64, Goal_1_View_Through_Control_Group_Conversions_Android INT64, Goal_1_View_Through_Control_Group_Conversions_Web INT64, Goal_1_View_Through_Control_Group_Conversions_Ios INT64, Goal_2_View_Through_Global_Control_Group_Uplift_All_Platform INT64, Android_Push_Amp_Plus_Impressions INT64, Goal_2_View_Through_Global_Control_Group_Uplift_Web INT64, Goal_1_View_Through_Global_Control_Group_Uplift_Android INT64, Goal_1_In_Session_Converted_Users_All_Platform INT64, Goal_2_View_Through_Control_Group_Uplift_All_Platform INT64, Goal_1_View_Through_Control_Group_Uplift_All_Platform INT64, Goal_1_In_Session_Total_Revenue_Web INT64, Goal_2_View_Through_Control_Group_Uplift_Web INT64, Goal_1_View_Through_Control_Group_Uplift_Web INT64, Goal_1_View_Through_Control_Group_Uplift_Ios INT64, Goal_2_View_Through_Control_Group_Uplift_Android INT64, Goal_1_View_Through_Global_Control_Group_CVR_All_Platform INT64, Goal_2_View_Through_Global_Control_Group_CVR_Ios INT64, Goal_1_View_Through_Global_Control_Group_Uplift_Web INT64, Goal_1_View_Through_Global_Control_Group_CVR_Ios INT64, Goal_2_In_Session_Control_Group_CVR_Ios INT64, Goal_2_View_Through_Global_Control_Group_CVR_Web INT64, Goal_2_View_Through_Global_Control_Group_CVR_Android INT64, Goal_2_View_Through_Control_Group_CVR_All_Platform INT64, Goal_1_In_Session_Converted_Users_Ios INT64, Goal_1_View_Through_Control_Group_CVR_All_Platform INT64, Goal_2_View_Through_Control_Group_CVR_Web INT64, Goal_1_View_Through_Control_Group_CVR_Web INT64, Goal_2_View_Through_Control_Group_CVR_Ios INT64, Goal_2_View_Through_Control_Group_CVR_Android INT64, Goal_1_View_Through_Control_Group_CVR_Android INT64, Goal_1_In_Session_Total_Revenue_Ios FLOAT64, Goal_1_In_Session_Converted_Users_Android INT64, Goal_2_View_Through_CVR_Web INT64, Goal_1_In_Session_Global_Control_Group_CVR_Web INT64, Goal_1_View_Through_CVR_Web INT64, Goal_2_View_Through_CVR_Ios INT64, Goal_1_View_Through_CVR_Ios FLOAT64, Goal_2_View_Through_CVR_Android INT64, Goal_1_View_Through_Control_Group_CVR_Ios INT64, Goal_2_View_Through_Average_Order_Value_All_Platform INT64, Goal_1_View_Through_Average_Order_Value_All_Platform FLOAT64, Goal_2_View_Through_Average_Order_Value_Web INT64, Goal_1_View_Through_Average_Order_Value_Web INT64, Goal_2_View_Through_Average_Order_Value_Ios INT64, Goal_1_View_Through_Average_Order_Value_Ios FLOAT64, Goal_2_View_Through_Average_Order_Value_Android INT64, Goal_2_In_Session_Control_Group_CVR_Web INT64, Goal_1_View_Through_Average_Order_Value_Android INT64, Goal_1_In_Session_Control_Group_Uplift_All_Platform INT64, Goal_1_View_Through_Total_Revenue_All_Platform FLOAT64, Goal_2_In_Session_Control_Group_Uplift_All_Platform INT64, Goal_2_View_Through_Total_Revenue_Web INT64, Goal_2_View_Through_Total_Revenue_Ios INT64, Goal_1_In_Session_Average_Order_Value_Android INT64, Goal_1_View_Through_Total_Revenue_Android INT64, Goal_2_View_Through_Conversion_Events_All_Platform INT64, Goal_1_View_Through_Conversion_Events_All_Platform INT64, Web_Push_Amp_Plus_Clicks INT64, Goal_2_View_Through_Conversion_Events_Web INT64, All_Platform_Uplift_Percentage INT64, Goal_1_View_Through_Conversion_Events_Web INT64, Goal_2_In_Session_Control_Group_Uplift_Ios INT64, Goal_1_View_Through_Conversion_Events_Ios INT64, Goal_1_View_Through_Conversion_Events_Android INT64, Goal_2_View_Through_Converted_Users_Web INT64, Goal_1_View_Through_Converted_Users_Web INT64, Goal_2_In_Session_Global_Control_Group_Uplift_Web INT64, Goal_1_View_Through_Converted_Users_Ios INT64, Goal_1_View_Through_Control_Group_Uplift_Android INT64, Goal_2_View_Through_Converted_Users_Android INT64, Goal_2_Click_Through_Global_Control_Group_Conversions_All_Platform INT64, Goal_1_In_Session_CVR_All_Platform FLOAT64, Goal_1_Click_Through_Global_Control_Group_Conversions_All_Platform INT64, Goal_1_Click_Through_Global_Control_Group_Conversions_Web INT64, Goal_1_Click_Through_Global_Control_Group_Conversions_Ios INT64, Goal_1_Click_Through_Global_Control_Group_Conversions_Android INT64, Goal_2_Click_Through_Control_Group_Conversions_All_Platform INT64, Goal_1_Click_Through_Control_Group_Conversions_Web INT64, Goal_2_Click_Through_Control_Group_Conversions_Ios INT64, Goal_2_In_Session_Global_Control_Group_Uplift_Android INT64, Goal_2_In_Session_Control_Group_Uplift_Android INT64, Goal_1_Click_Through_Control_Group_Conversions_Android INT64, Goal_2_Click_Through_Global_Control_Group_Uplift_All_Platform INT64, Goal_1_Click_Through_Global_Control_Group_Uplift_Web INT64, Goal_2_Click_Through_Global_Control_Group_Uplift_Ios INT64, Goal_1_Click_Through_Control_Group_Uplift_Web INT64, Goal_2_Click_Through_Control_Group_Uplift_Ios INT64, Goal_1_Click_Through_Conversion_Events_Web INT64, Goal_1_Click_Through_Global_Control_Group_Uplift_Android INT64, Goal_1_Click_Through_Conversion_Events_Android INT64, Goal_1_Click_Through_Global_Control_Group_CVR_All_Platform INT64, Goal_1_Click_Through_Global_Control_Group_CVR_Web INT64, Goal_2_Click_Through_Global_Control_Group_CVR_Web INT64, Goal_2_In_Session_CVR_All_Platform INT64, Goal_1_Click_Through_Global_Control_Group_CVR_Android INT64, Goal_2_View_Through_Control_Group_Conversions_Android INT64, Goal_1_View_Through_Total_Revenue_Web INT64, Goal_2_Click_Through_Control_Group_CVR_All_Platform INT64, Goal_1_Click_Through_Control_Group_CVR_All_Platform INT64, Goal_2_Click_Through_Control_Group_CVR_Android INT64, Goal_2_View_Through_Conversion_Events_Android INT64, Goal_2_Click_Through_Control_Group_CVR_Web INT64, Ios_Active_device_tokens INT64, Goal_2_Click_Through_CVR_All_Platform INT64, Goal_1_Click_Through_CVR_All_Platform FLOAT64, Goal_1_View_Through_Global_Control_Group_Uplift_Ios INT64, All_Platform_Active_Target_Global_Control_Group INT64, Goal_2_Click_Through_CVR_Web INT64, Goal_1_Click_Through_CVR_Web INT64, Goal_1_In_Session_Conversion_Events_Web INT64, Goal_2_View_Through_Global_Control_Group_Uplift_Android INT64, Goal_1_Click_Through_CVR_Ios FLOAT64, Goal_2_Click_Through_CVR_Android INT64, Goal_2_Click_Through_CVR_Ios INT64, Goal_1_Click_Through_Average_Order_Value_All_Platform FLOAT64, Goal_2_Click_Through_Average_Order_Value_Web INT64, Goal_2_Click_Through_Total_Revenue_Ios INT64, Goal_1_Click_Through_Average_Order_Value_Web INT64, Goal_2_Click_Through_Control_Group_Uplift_All_Platform INT64, Goal_2_Click_Through_Total_Revenue_All_Platform INT64, Ios_Sent_Rate FLOAT64, Goal_1_Click_Through_Total_Revenue_Web INT64, Goal_2_Click_Through_Total_Revenue_Android INT64, Goal_2_In_Session_Conversion_Events_Android INT64, Goal_2_Click_Through_Control_Group_Conversions_Web INT64, Android_Message_Android_Web_Subtitle_iOS STRING, Goal_2_Click_Through_Conversion_Events_Web INT64, Goal_2_In_Session_CVR_Ios INT64, Goal_1_Click_Through_Conversion_Events_Ios INT64, Goal_2_Click_Through_Conversion_Events_Android INT64, Goal_2_Click_Through_Converted_Users_All_Platform INT64, Goal_1_Click_Through_Converted_Users_All_Platform INT64, Goal_2_Click_Through_Converted_Users_Web INT64, Android_Failure_Rate FLOAT64, Goal_1_Click_Through_Converted_Users_Web INT64, Goal_2_Click_Through_Converted_Users_Ios INT64, Ios_Push_Amp_Plus_Impressions INT64, Web_Installed_Users_in_segment INT64, Goal_2_Click_Through_Converted_Users_Android INT64, Goal_2_Click_Through_Average_Order_Value_Android INT64, Goal_1_Click_Through_Control_Group_CVR_Ios INT64, Android_Impression_Rate FLOAT64, Goal_1_Click_Through_Converted_Users_Android INT64, Ios_CTR FLOAT64, Goal_2_Click_Through_Average_Order_Value_Ios INT64, Android_CTR FLOAT64, Goal_1_In_Session_Control_Group_CVR_Android INT64, Goal_1_Click_Through_Control_Group_CVR_Android INT64, All_Platform_Clicks INT64, Goal_1_Click_Through_Total_Revenue_Android INT64, Web_Clicks INT64, Android_Clicks INT64, Ios_Impression_Rate FLOAT64, Goal_2_In_Session_Global_Control_Group_CVR_All_Platform INT64, Android_Template_Name STRING, All_Platform_Impressions INT64, Goal_2_Click_Through_Global_Control_Group_Uplift_Web INT64, Goal_2_Click_Through_Global_Control_Group_CVR_Ios INT64, Web_Impressions INT64, Ios_Failure_Rate FLOAT64, Android_Active_device_tokens INT64, All_Platform_Failed INT64, Goal_1_Click_Through_Control_Group_Conversions_Ios INT64, Goal_1_Click_Through_Global_Control_Group_CVR_Ios INT64, Goal_1_Click_Through_Total_Revenue_All_Platform FLOAT64, Goal_2_View_Through_Global_Control_Group_Conversions_Android INT64, Campaign_Channel STRING, Ios_Failed INT64, Goal_2_Click_Through_Control_Group_Uplift_Android INT64, All_Platform_Sent_Rate FLOAT64, Goal_1_Click_Through_Control_Group_CVR_Web INT64, Goal_2_Click_Through_Total_Revenue_Web INT64, Web_After_FC_Removal INT64, Ios_After_FC_Removal INT64, Conversion_Goal_2_Name STRING, Android_Uplift_Percentage FLOAT64, Goal_2_Click_Through_Global_Control_Group_Conversions_Ios INT64, Android_After_FC_Removal INT64, Goal_2_Click_Through_Global_Control_Group_Conversions_Web INT64, Ios_Active_Target_Global_Control_Group INT64, Web_Active_Target_Control_Group INT64, Android_Message_Summary STRING, Goal_2_In_Session_Conversion_Events_All_Platform INT64, Goal_1_View_Through_Converted_Users_Android INT64, Platforms STRING, All_Platform_After_FC_Removal INT64, Ios_Clicks INT64, Android_Sent INT64, Goal_1_View_Through_Global_Control_Group_Conversions_Web INT64, All_Platform_Installed_Users_in_segment INT64, Goal_2_Click_Through_Global_Control_Group_Uplift_Android INT64, Android_Impressions INT64, Ios_Installed_Users_in_segment INT64, Goal_1_In_Session_Conversion_Events_Ios INT64, Web_Failed INT64, Campaign_Name STRING, Android_Installed_Users_in_segment INT64, Web_User_Devices INT64, Ios_User_Devices INT64, Goal_1_View_Through_Control_Group_Conversions_All_Platform INT64, All_Platform_Sent INT64, Ios_Impressions INT64, Ios_IOS_Subtitle STRING, Goal_2_In_Session_Global_Control_Group_Uplift_All_Platform INT64, Ios_Default_Button_Click_Action_Dropdown STRING, Goal_2_Click_Through_Conversion_Events_Ios INT64, Campaign_Delivery_Type STRING, Ios_Fallback_Default_Button_screen_name_Deeplinking_URL_Richlanding_URL STRING, Goal_2_View_Through_Converted_Users_Ios INT64, Conversion_Goal_2_Condition STRING, Goal_1_In_Session_Control_Group_Uplift_Ios INT64, Android_Fallback_Default_Button_screen_name_Deeplinking_URL_Richlanding_URL STRING, Conversion_Goal_2_Value STRING, Ios_Fallback_Default_Button_Default_Click_Action_Dropdown STRING, Goal_2_Click_Through_Control_Group_Uplift_Web INT64, Android_Active_Target_Control_Group INT64, Android_Fall_back_Notification_Channel STRING, Ios_Attempted INT64, Campaign_ID STRING, Android_Fall_back_Template_Name STRING, Web_Rich_Content_Image_URL STRING, Ios_Fall_back_Template_Name STRING, Goal_2_In_Session_Control_Group_Uplift_Web INT64, Android_Notification_Channel STRING, Android_Attempted INT64, Goal_2_In_Session_Control_Group_CVR_Android INT64, Goal_2_Click_Through_Global_Control_Group_CVR_All_Platform INT64, Conversion_Goal_1_Name STRING, Ios_Template_Name STRING, Ios_Campaign_Control_Group_Percentage INT64, Web_CTR INT64, Android_Campaign_Control_Group_Percentage INT64, Conversion_Goal_1_Event STRING, Ios_Fall_back_Message_Android_Web_Subtitle_iOS STRING, Goal_1_Click_Through_Control_Group_Conversions_All_Platform INT64, Ios_Message_Android_Web_Subtitle_iOS STRING, Web_Fall_back_rich_content_Sound_Filename STRING, Conversion_Goal_2_Event STRING, Goal_2_View_Through_Control_Group_Conversions_Web INT64, Android_User_Devices INT64, Ios_Fall_back_rich_content_Image_URL STRING, Android_Failed INT64, Goal_1_Click_Through_Conversion_Events_All_Platform INT64, Goal_1_In_Session_Average_Order_Value_Web INT64, Ios_Default_Button_screen_name_Deeplinking_URL_Richlanding_URL STRING, Goal_2_View_Through_Global_Control_Group_Uplift_Ios INT64, Web_Fall_back_Message_Android_Web_Subtitle_iOS STRING, Created_By STRING, Goal_2_View_Through_Conversion_Events_Ios INT64, Web_Campaign_Control_Group_Percentage INT64, Goal_1_Click_Through_Converted_Users_Ios INT64, Ios_Rich_Content_Image_URL STRING, Goal_2_View_Through_Total_Revenue_Android INT64, Android_Fall_back_Message_Android_Web_Subtitle_iOS STRING, Android_Rich_Content_Image_URL STRING, Goal_1_Click_Through_Control_Group_Uplift_Ios INT64, Goal_1_In_Session_Converted_Users_Web INT64, Goal_1_View_Through_Converted_Users_All_Platform INT64, Android_Default_Button_Click_Action_Dropdown STRING, Android_Active_Target_Global_Control_Group INT64, Android_Sent_Rate FLOAT64, Ios_Fall_back_Message_Title_Android_Web_Title_iOS STRING, Web_Push_Amp_Plus_Impressions INT64, Web_Attempted INT64, Goal_1_View_Through_Global_Control_Group_Uplift_All_Platform INT64, Android_Fall_back_rich_content_Image_URL STRING, Android_Fall_back_Message_Summary STRING, Goal_1_In_Session_CVR_Web INT64, Ios_Fall_back_rich_content_Sound_Filename STRING, Web_Message_Android_Web_Subtitle_iOS STRING, Goal_1_In_Session_Average_Order_Value_Ios FLOAT64, All_Platform_User_Devices INT64, Ios_Fall_back_IOS_Subtitle STRING, Goal_2_In_Session_CVR_Android INT64, Tag_Category_Default STRING, Web_Message_Title_Android_Web_Title_iOS STRING, Goal_2_In_Session_Total_Revenue_Web INT64, Goal_2_Click_Through_Global_Control_Group_Conversions_Android INT64, Goal_1_Click_Through_CVR_Android INT64, Goal_1_View_Through_Total_Revenue_Ios FLOAT64, Tag_Category_Uncategorized STRING, Campaign_Sending_Type STRING, All_Platform_Impression_Rate FLOAT64, Goal_1_In_Session_Global_Control_Group_CVR_Ios INT64, Goal_1_View_Through_Global_Control_Group_CVR_Web INT64, All_Platform_Failure_Rate FLOAT64, Android_Push_Amp_Plus_Clicks INT64, Goal_1_View_Through_CVR_Android INT64, Web_Active_Target_Global_Control_Group INT64, Web_Fall_back_Message_Title_Android_Web_Title_iOS STRING, Campaign_Sent_Time STRING, Goal_2_View_Through_CVR_All_Platform INT64, Goal_1_Click_Through_Control_Group_Uplift_All_Platform INT64, Goal_1_Click_Through_Control_Group_Uplift_Android INT64, Goal_2_View_Through_Global_Control_Group_Conversions_Ios INT64, Web_Sent INT64, Android_Fallback_Default_Button_Default_Click_Action_Dropdown STRING, Web_Impression_Rate FLOAT64, Android_Message_Title_Android_Web_Title_iOS STRING, Goal_2_In_Session_CVR_Web INT64, Goal_2_View_Through_Converted_Users_All_Platform INT64, All_Platform_Attempted INT64, Custom_Segment_Name STRING, All_Platform_Active_device_tokens INT64, Ios_Message_Title_Android_Web_Title_iOS STRING, Conversion_Goal_1_Value STRING, Web_Sent_Rate INT64, Custom_Segment_Filters STRING, Campaign_Status STRING, Goal_2_Click_Through_Conversion_Events_All_Platform INT64, Goal_2_In_Session_Global_Control_Group_CVR_Web INT64, Goal_2_View_Through_Total_Revenue_All_Platform INT64, Ios_Active_Target_Control_Group INT64, Flows_Name STRING, Ios_Sent INT64, Campaign_Type STRING, Conversion_Goal_1_Attribute STRING, Goal_1_Click_Through_Average_Order_Value_Android INT64, Goal_2_In_Session_Average_Order_Value_Ios INT64, Goal_2_View_Through_Control_Group_Uplift_Ios INT64, Goal_1_Click_Through_Average_Order_Value_Ios FLOAT64, Goal_2_In_Session_Control_Group_CVR_All_Platform INT64, Conversion_Goal_1_Condition STRING, Goal_1_Click_Through_Total_Revenue_Ios FLOAT64, Android_Default_Button_screen_name_Deeplinking_URL_Richlanding_URL STRING, All_Platform_CTR FLOAT64, Goal_2_View_Through_Global_Control_Group_CVR_All_Platform INT64, Goal_1_View_Through_CVR_All_Platform FLOAT64, Goal_1_Click_Through_Global_Control_Group_Uplift_All_Platform INT64, Web_Failure_Rate INT64, Push_Amp_Plus_Enabled BOOL, Goal_2_Click_Through_Average_Order_Value_All_Platform INT64, All_Platform_Active_Target_Control_Group INT64, Goal_2_Click_Through_Global_Control_Group_CVR_Android INT64, Goal_2_Click_Through_Control_Group_CVR_Ios INT64, Goal_2_Click_Through_Control_Group_Conversions_Android INT64, Web_Fall_back_rich_content_Image_URL STRING, Goal_1_Click_Through_Global_Control_Group_Uplift_Ios INT64, Parent_Campaign_ID STRING, Android_Fall_back_rich_content_Sound_Filename STRING, Conversion_Goal_2_Attribute STRING, Web_Active_device_tokens INT64, Goal_2_View_Through_Control_Group_Conversions_Ios INT64, Goal_1_View_Through_Global_Control_Group_CVR_Android INT64, Android_Fall_back_Message_Title_Android_Web_Title_iOS STRING
+
+TABLE moengage_campaigns_live (24 columns):
+excluded_filters_json STRING, is_all_user_campaign BOOL, connector_name STRING, utm_campaign STRING, utm_medium STRING, email_subject STRING, name STRING, conversion_goal_names STRING, utm_source STRING, campaign_id STRING, campaign_control_group_percentage FLOAT64, tags STRING, sent_time TIMESTAMP, is_campaign_control_group_enabled BOOL, connector_type STRING, is_global_control_group_enabled BOOL, created_at TIMESTAMP, conversion_goal_count INT64, status STRING, campaign_delivery_type STRING, channel STRING, content_type STRING, created_by STRING, included_filters_json STRING
+"""
 
 SYSTEM_PREFIX_TEMPLATE = """You are the andSons analytics assistant. andSons is a men's health telehealth \
 brand (hair loss is the flagship vertical, alongside weight loss and other supplements); all prices are \
@@ -318,12 +176,11 @@ asked: which metric (revenue? order count? a rate? users entered vs orders place
 populations, never interchange them), which population/scope (which brand, which country, which time \
 period - resolve "last week"/"this month" against today's real date below, never guess a year for a \
 bare month), and which grouping/breakdown if any. If a word in the question could mean more than one real \
-thing in this data (the clearest real example: "channel" - it means a MARKETPLACE in one table, a PAID AD \
-PLATFORM in another, and a CRM/marketing attribution signal in a third, all under the same column name - \
-see the schema reference below for the real value sets of each), decide explicitly which one the question \
-actually means from its business context before picking a table - a bare "which channels are driving \
-sales" in a CRM/lifecycle-marketing context means the CRM attribution signal (orders_utm_medium), not \
-marketplace or paid-ad channels, unless the question specifically says marketplace/storefront or paid/ads.
+thing in this data (a real example: a column named "channel" or "Channel" exists in several different \
+tables in the schema reference below, and nothing here tells you in advance whether they hold the same \
+kind of value - query SELECT DISTINCT on the actual column in each candidate table and read the real \
+values back before deciding which table the question means; never assume from the column name alone, and \
+never assume two same-named columns in different tables mean the same thing just because the name matches).
 
 2. UNDERSTAND THE SCHEMA THOROUGHLY - VERIFY IT, DO NOT ASSUME IT. For the tables in the connected \
 ora_bigquery_pipeline dataset, use the real schema-inspection tool - never guess a column name from memory. \
@@ -337,11 +194,12 @@ tables change - a live INFORMATION_SCHEMA check costs one query and removes any 
 cross-project table just because these notes describe it.
 
 3. IDENTIFY THE EXACT TABLES AND COLUMNS from steps 1 and 2 that answer the ACTUAL question - not a \
-nearby, easier, or more familiar one. If the right table for what's actually being asked doesn't exist or \
-doesn't have the needed grain (e.g. a real, live-caught case: MoEngage's own flow-entrant counts are \
-CUMULATIVE lifetime totals with no weekly/dated breakdown - there is no real way to answer a "last week" \
-or WoW entrant question from that table), say so plainly instead of quietly substituting a different \
-table's number for what was actually asked.
+nearby, easier, or more familiar one. Check whether the table actually has the grain the question needs \
+(e.g. a dated/weekly column, not just a lifetime-cumulative one) before assuming it can answer a \
+time-sliced question - a real, live-caught case: a "last week" entrant question was asked against a table \
+that turned out to only hold lifetime cumulative totals, no dated breakdown at all. If the right \
+table/grain genuinely doesn't exist, say so plainly instead of quietly substituting a different table's \
+number for what was actually asked.
 
 4. WRITE THE SQL using only real, confirmed column names from step 2.
 

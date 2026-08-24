@@ -198,6 +198,7 @@ MOENGAGE - THREE REAL, GENUINELY DIFFERENT DATA SURFACES, not one - each covers 
   1. moengage_campaigns_email / moengage_campaigns_whatsapp / moengage_campaigns_push (in crm-mail-automation-dev.crm_analytics_views, same cross-project situation as flow_orders - schema inspection fails, query directly by full name regardless) - REAL PERFORMANCE metrics (Sent, Delivered, Open_rate, CTR, Hard_bounce_rate, Unsubscribe_rate, Complaints_rate, and Goal_N x [Click_Through/ View_Through/In_Session] x [Total_Revenue, CVR, Control_Group_Uplift, Control_Group_CVR] - see the column naming pattern below) - but ONLY for the real Flow-triggered automated touchpoints captured in MoEngage's own "Flows" report (source: a real export, snapshot dated 2026-08-20, static - not live-updating; say so if asked how current it is). moengage_flows_summary (same project) is the one-row-per-flow rollup of the same population (55 real columns, verified live via INFORMATION_SCHEMA - always re-check yourself for any column not listed here, this is not exhaustive): Flow_Name, Flow_Status, Flow_Type, Flows_Id, Flow_Version_Name, Published_at, Flow_Sent_Time, Campaign_Channel, Campaign_Delivery_Type, Attribution_window, Trips_Started_Total_users, Trips_Started_CG_Users, Trips_Started_GCG_Users, Trips_engaged (a REAL, DIFFERENT metric from Trips_Started_Total_users - engaged is a narrower, more active-participation count, not a synonym - never treat them as interchangeable), Global_CG_enabled, Campaign_Control_Group_Percentage, Control_Group_Stickiness_enabled, Custom_Segment_Name/Filters, Tag_Category_Default/Uncategorized, and per-goal condition/definition fields (Conversion_Goal_1/2_Name/Event/Condition/Attribute/Value - what the goal actually measures, not a performance number itself) plus the same Goal_N x Window x Control_Group_CVR/Uplift/Global_ variants as group 1's tables below - but NOTE this table's goal columns stop at CVR/Uplift, it has NO Total_Revenue/Converted_Users/Conversion_Events columns (those exist only in the 3 campaign-level tables, not this flow-level rollup) - query moengage_campaigns_email/whatsapp/push directly for revenue at the individual-send level if a flow-level revenue figure is needed.
      - COLUMN NAMING PATTERN (all 3 campaign-level tables): <Goal_1 or Goal_2> + <Click_Through / View_Through / In_Session> (attribution window - Click_Through is the default/most meaningful for "did this send cause a purchase") + one of: Total_Revenue, CVR, Converted_Users, Conversion_Events, Average_Order_Value, Control_Group_CVR, Control_Group_Uplift, Global_Control_Group_CVR, Global_Control_Group_Uplift, Control_Group_Conversions, Global_Control_Group_Conversions. These ARE real monetary values where the name says Total_Revenue - confirmed live, non-zero for real campaigns; never claim these tables "contain no monetary values" without checking first.
      - CRITICAL - "users entered/started a flow" (Trips_Started_Total_users) is a DIFFERENT, real, NON-INTERCHANGEABLE metric from "orders attributed to a flow" (flow_orders' COUNT(DISTINCT order_id)) - someone can enter a flow and never buy. Never substitute one for the other.
+     - REAL, VERIFIED WAY TO DATE THESE SENDS FOR A TREND (a real, live-caught gap this fixes - a prior run wrongly concluded "there's no way to build a trend" and gave up): moengage_campaigns_email/whatsapp/push's own Campaign_Sent_Time column is a real, confirmed-live BLANK (empty string, not SQL NULL - a plain `IS NOT NULL` check will wrongly say it has a value) for every row, genuinely useless for dating a send. But Template_Name DOES carry a real embedded date on most rows (confirmed live: 809 of 821 real rows in moengage_campaigns_email, format YYYY-MM-DD) - extract it with `REGEXP_EXTRACT(Template_Name, r'(\d{{4}}-\d{{2}}-\d{{2}})')` and GROUP BY month to build a genuine month-by-month trend (unsubscribe rate, hard bounce rate, complaint rate, open rate, etc. all trend this way) - confirmed live and produces real numbers. Always try this before concluding a date-based question can't be answered from these tables.
      - These 4 tables have NO Brand column, and Flow_Name/Campaign_Name do NOT encode brand anywhere (organized by product category and flow type, never by brand) - a "broken down by brand" question about flow entrants/sends genuinely cannot be split by brand from this population; say so plainly rather than faking a split by pasting in flow_orders' Brand column (that would also silently switch the metric).
      - CRITICAL - NO WEEKLY OR DAILY GRAIN EXISTS IN THIS TABLE, a real, live-caught gap: Trips_Started_Total_users/Trips_engaged are LIFETIME CUMULATIVE totals, one number per flow since it was created - there is no dated/weekly/daily breakdown column anywhere in moengage_flows_summary. Flow_Sent_Time and Published_at are single config timestamps (when the flow itself was last published/sent), not a per-period aggregation key. A real "how many users entered our flows LAST WEEK, and how does that compare WoW/MoM" question CANNOT be honestly answered from this table - do not attempt to fake a weekly number by dividing the lifetime total, and do not silently substitute a different, unrelated dated metric. Say plainly that this table only has lifetime-cumulative entrant counts, not a dated series, and that a real per-week source (if one exists) would need to come from wherever that real weekly figure was pulled before - ask, don't guess.
 
@@ -1088,6 +1089,85 @@ def _is_moengage_exclusive(question: str, llm) -> bool:
         return False
 
 
+class _ChannelIntent(BaseModel):
+    channel_meaning: Literal["marketplace", "paid_ad_platform", "crm_attribution", "not_a_channel_question"] = Field(
+        description="Which real, different thing the word 'channel'/'Channel' means in THIS question, if it "
+        "uses that word at all. 'marketplace' - which storefront/platform an order was physically placed on "
+        "(Dotcom's own site vs Shopee vs Lazada vs Zalora vs TikTok Shop) - use when the question is about "
+        "where things are SOLD, sales channels, storefronts, or marketplaces by name. 'paid_ad_platform' - "
+        "which paid advertising platform spend/clicks went to (Facebook, Google, Bing, TikTok, Quora, "
+        "Snapchat, Reddit) - use when the question is explicitly about ad spend, paid acquisition, or names "
+        "an ad platform. 'crm_attribution' - the order-level CRM/lifecycle-marketing attribution signal "
+        "(email, WhatsApp, CRM sends, banners, organic/direct, paid search/social by medium) - use for a "
+        "bare 'which channels are driving sales/revenue' question in a CRM, lifecycle-marketing, or "
+        "cross-brand/cross-market comparison context, which is the default reading unless the question "
+        "specifically names marketplaces or paid ads. 'not_a_channel_question' if the question doesn't turn "
+        "on this word's meaning at all."
+    )
+
+
+def _resolve_channel_intent(question: str) -> str:
+    """Deterministic pre-classifier for the single most repeated real bug
+    this whole project has hit: a bare 'channel' question answered from the
+    wrong one of three genuinely different real tables/columns that happen
+    to share that column name. A prompt note describing the disambiguation
+    was NOT enough on its own - confirmed live, repeatedly, the SAME exact
+    question text landing on a different (sometimes wrong) table across
+    different runs, because a 25-iteration free-form ReAct loop doesn't
+    reliably re-apply one paragraph of guidance every single time. This
+    mirrors the existing _resolve_metric_intent/wants_breakdown pattern:
+    make ONE focused, structured-output classifier call resolve the
+    ambiguity ONCE, deterministically, before the SQL agent ever starts,
+    then hand it the answer as a direct instruction instead of hoping it
+    re-derives the same judgment call correctly mid-exploration. Returns
+    'not_a_channel_question' (i.e. no injection needed) on any resolution
+    failure - fails open, never blocks or forces a table choice it isn't
+    confident about."""
+    llm = get_llm("ANALYTICS")
+    structured_llm = llm.with_structured_output(_ChannelIntent)
+    prompt = ChatPromptTemplate.from_messages([
+        (
+            "system",
+            "Determine which real meaning of 'channel' (if any) this question about andSons business data "
+            "is actually asking about.",
+        ),
+        ("human", "Question: {question}"),
+    ])
+    chain = prompt | structured_llm
+    try:
+        result = _invoke_with_retry(chain, {"question": question}, label="Channel-intent resolution call")
+        return result.channel_meaning
+    except Exception as exc:  # noqa: BLE001 - fail open, no injection rather than block the question
+        logger.warning("Channel-intent resolution failed for %r: %s - leaving unresolved.", question, exc)
+        return "not_a_channel_question"
+
+
+_CHANNEL_MEANING_INSTRUCTIONS = {
+    "marketplace": (
+        "CHANNEL MEANING RESOLVED FOR THIS QUESTION: 'channel' here means the real MARKETPLACE/storefront an "
+        "order was placed on. Use dotcom_plus_marketplace.Channel (or updated_sales_data.Channel) - real "
+        "values: Dotcom, Shopee, Lazada, Zalora, TikTok. Do not use marketing_data/marketing_clicks_data/"
+        "marketing_spend_data's Channel (paid ad platforms) or orders_utm_medium (CRM attribution) for this "
+        "specific question - those answer a different question."
+    ),
+    "paid_ad_platform": (
+        "CHANNEL MEANING RESOLVED FOR THIS QUESTION: 'channel' here means the real PAID ADVERTISING PLATFORM "
+        "spend/clicks went to. Use marketing_data/marketing_clicks_data/marketing_spend_data.Channel - real "
+        "values: Facebook, Google, Bing, TikTok, Quora, Snapchat, Reddit. Do not use "
+        "dotcom_plus_marketplace.Channel (marketplaces) or orders_utm_medium (CRM attribution) for this "
+        "specific question - those answer a different question."
+    ),
+    "crm_attribution": (
+        "CHANNEL MEANING RESOLVED FOR THIS QUESTION: 'channel' here means the real CRM/lifecycle-marketing "
+        "attribution signal. Use updated_sales_data.orders_utm_medium (or flow_orders' same column for a "
+        "flow-specific question) - real values include email, whatsapp, crm, banner, cpc, social, direct/"
+        "organic (case varies, match with LOWER()). Do not use dotcom_plus_marketplace.Channel "
+        "(marketplaces) or marketing_data's Channel (paid ad platforms) for this specific question - those "
+        "answer a different question, even though they share the same column name."
+    ),
+}
+
+
 def ask_analytics(
     question: str, conversation_history: Optional[list] = None, file_context: Optional[str] = None
 ) -> dict:
@@ -1204,6 +1284,11 @@ def ask_analytics(
         "Never copy a number from prior knowledge - always compute the answer with a fresh query:\n"
         + effective_question
     )
+
+    channel_meaning = _resolve_channel_intent(effective_question)
+    if channel_meaning in _CHANNEL_MEANING_INSTRUCTIONS:
+        agent_input = _CHANNEL_MEANING_INSTRUCTIONS[channel_meaning] + "\n\n" + agent_input
+
     if file_context:
         agent_input = (
             "A file was uploaded alongside this question - real data, safe to cite directly if it "

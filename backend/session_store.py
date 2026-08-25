@@ -22,12 +22,31 @@ everything on every redeploy).
 Collection layout: one document per (channel, thread_ts) pair, in
 `email_sessions` or `analytics_sessions`, with the doc ID built from both
 so it's directly addressable without a query.
+
+REST, NOT the google-cloud-firestore client library (found live, 2026-08-25):
+every single call through google.cloud.firestore.Client - get, set, and
+delete alike - was failing with "400 Invalid database id %28default%29"
+(the URL-encoded form of "(default)", this project's real, correctly-
+provisioned database - confirmed via `gcloud firestore databases list`).
+Root-caused by direct comparison: a raw REST call to the exact same
+document path, same project, same credentials, works perfectly (confirmed
+locally with a real get/set/delete round-trip); only the Python client
+library's gRPC transport mishandles the "(default)" database segment when
+building the x-goog-request-params request metadata. Every function below
+was silently degrading to its safe fallback (no session, no history, no
+rules) on EVERY call, in production, not just in local testing - this is
+the real cause behind "the bot has no memory of what we already said in
+this thread" reports. Talking to the Firestore REST API directly via
+google-auth's AuthorizedSession (still using the exact same Application
+Default Credentials resolution and FIRESTORE_PROJECT_ID override as
+before) sidesteps the broken gRPC path entirely.
 """
 import logging
 import os
 from typing import Optional
 
-from google.cloud import firestore
+import google.auth
+from google.auth.transport.requests import AuthorizedSession
 
 logger = logging.getLogger("session_store")
 
@@ -43,15 +62,23 @@ _ANALYTICS_HISTORY_LIMIT = 6
 # relying on that inference. Defaults to this app's own Cloud Run project.
 _DEFAULT_PROJECT = "crm-mail-automation-dev"
 
-_client: Optional[firestore.Client] = None
+_session: Optional[AuthorizedSession] = None
+_base_url: Optional[str] = None
 
 
-def _get_client() -> firestore.Client:
-    global _client
-    if _client is None:
+def _get_session() -> AuthorizedSession:
+    global _session, _base_url
+    if _session is None:
         project = os.environ.get("FIRESTORE_PROJECT_ID", _DEFAULT_PROJECT)
-        _client = firestore.Client(project=project)
-    return _client
+        credentials, _ = google.auth.default()
+        _session = AuthorizedSession(credentials)
+        _base_url = f"https://firestore.googleapis.com/v1/projects/{project}/databases/(default)/documents"
+    return _session
+
+
+def _doc_url(collection: str, doc_id: str) -> str:
+    _get_session()  # ensures _base_url is populated
+    return f"{_base_url}/{collection}/{doc_id}"
 
 
 def _doc_id(channel: str, thread_ts: str) -> str:
@@ -60,10 +87,82 @@ def _doc_id(channel: str, thread_ts: str) -> str:
     return f"{channel}__{thread_ts}".replace("/", "_")
 
 
+# --- Firestore REST <-> plain Python value conversion ------------------
+# The REST API represents every field as a typed wrapper object
+# ({"stringValue": ...}, {"arrayValue": {"values": [...]}}, etc.) instead
+# of a plain JSON value - the google-cloud-firestore client normally hides
+# this. These two functions are the whole of that translation, recursively,
+# for the plain str/int/float/bool/None/list/dict shapes this app's
+# sessions actually use.
+
+
+def _to_value(v):
+    if v is None:
+        return {"nullValue": None}
+    if isinstance(v, bool):
+        return {"booleanValue": v}
+    if isinstance(v, int):
+        return {"integerValue": str(v)}
+    if isinstance(v, float):
+        return {"doubleValue": v}
+    if isinstance(v, str):
+        return {"stringValue": v}
+    if isinstance(v, list):
+        return {"arrayValue": {"values": [_to_value(x) for x in v]}}
+    if isinstance(v, dict):
+        return {"mapValue": {"fields": {k: _to_value(x) for k, x in v.items()}}}
+    return {"stringValue": str(v)}  # last resort - never raise on an odd type
+
+
+def _from_value(v: dict):
+    if "nullValue" in v:
+        return None
+    if "booleanValue" in v:
+        return v["booleanValue"]
+    if "integerValue" in v:
+        return int(v["integerValue"])
+    if "doubleValue" in v:
+        return v["doubleValue"]
+    if "stringValue" in v:
+        return v["stringValue"]
+    if "arrayValue" in v:
+        return [_from_value(x) for x in v.get("arrayValue", {}).get("values", [])]
+    if "mapValue" in v:
+        return {k: _from_value(x) for k, x in v.get("mapValue", {}).get("fields", {}).items()}
+    if "timestampValue" in v:
+        return v["timestampValue"]
+    return None
+
+
+def _get_doc(collection: str, doc_id: str) -> Optional[dict]:
+    """Real GET - returns the doc's fields as a plain dict, or None if it
+    doesn't exist. Raises on any other real error (caller's try/except
+    handles logging + fallback, same pattern as every function below)."""
+    resp = _get_session().get(_doc_url(collection, doc_id))
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    fields = resp.json().get("fields", {})
+    return {k: _from_value(v) for k, v in fields.items()}
+
+
+def _set_doc(collection: str, doc_id: str, data: dict) -> None:
+    """Real PATCH with no updateMask - this fully replaces the document's
+    fields, the same overwrite semantics as the old client's .set()."""
+    payload = {"fields": {k: _to_value(v) for k, v in data.items()}}
+    resp = _get_session().patch(_doc_url(collection, doc_id), json=payload)
+    resp.raise_for_status()
+
+
+def _delete_doc(collection: str, doc_id: str) -> None:
+    resp = _get_session().delete(_doc_url(collection, doc_id))
+    if resp.status_code != 404:  # already gone is fine, not an error
+        resp.raise_for_status()
+
+
 def get_email_session(channel: str, thread_ts: str) -> Optional[dict]:
     try:
-        doc = _get_client().collection("email_sessions").document(_doc_id(channel, thread_ts)).get()
-        return doc.to_dict() if doc.exists else None
+        return _get_doc("email_sessions", _doc_id(channel, thread_ts))
     except Exception:
         logger.exception("Failed to read email session from Firestore - treating as no session.")
         return None
@@ -71,15 +170,15 @@ def get_email_session(channel: str, thread_ts: str) -> Optional[dict]:
 
 def save_email_session(channel: str, thread_ts: str, session: dict) -> None:
     try:
-        _get_client().collection("email_sessions").document(_doc_id(channel, thread_ts)).set(session)
+        _set_doc("email_sessions", _doc_id(channel, thread_ts), session)
     except Exception:
         logger.exception("Failed to save email session to Firestore - this draft's feedback thread will not persist.")
 
 
 def get_analytics_history(channel: str, thread_ts: str) -> list:
     try:
-        doc = _get_client().collection("analytics_sessions").document(_doc_id(channel, thread_ts)).get()
-        return doc.to_dict().get("history", []) if doc.exists else []
+        doc = _get_doc("analytics_sessions", _doc_id(channel, thread_ts))
+        return (doc or {}).get("history", [])
     except Exception:
         logger.exception("Failed to read analytics history from Firestore - treating as no history.")
         return []
@@ -87,10 +186,9 @@ def get_analytics_history(channel: str, thread_ts: str) -> list:
 
 def append_analytics_exchange(channel: str, thread_ts: str, question: str, answer: str) -> None:
     try:
-        ref = _get_client().collection("analytics_sessions").document(_doc_id(channel, thread_ts))
         history = get_analytics_history(channel, thread_ts)
         history.append({"question": question, "answer": answer})
-        ref.set({"history": history[-_ANALYTICS_HISTORY_LIMIT:]})
+        _set_doc("analytics_sessions", _doc_id(channel, thread_ts), {"history": history[-_ANALYTICS_HISTORY_LIMIT:]})
     except Exception:
         logger.exception("Failed to save analytics exchange to Firestore - this thread's context will not persist.")
 
@@ -107,8 +205,8 @@ def append_analytics_exchange(channel: str, thread_ts: str, question: str, answe
 
 def get_pending_email_request(channel: str, thread_ts: str) -> list:
     try:
-        doc = _get_client().collection("pending_email_requests").document(_doc_id(channel, thread_ts)).get()
-        return doc.to_dict().get("texts", []) if doc.exists else []
+        doc = _get_doc("pending_email_requests", _doc_id(channel, thread_ts))
+        return (doc or {}).get("texts", [])
     except Exception:
         logger.exception("Failed to read pending email request from Firestore - treating as no prior context.")
         return []
@@ -116,14 +214,14 @@ def get_pending_email_request(channel: str, thread_ts: str) -> list:
 
 def save_pending_email_request(channel: str, thread_ts: str, texts: list) -> None:
     try:
-        _get_client().collection("pending_email_requests").document(_doc_id(channel, thread_ts)).set({"texts": texts})
+        _set_doc("pending_email_requests", _doc_id(channel, thread_ts), {"texts": texts})
     except Exception:
         logger.exception("Failed to save pending email request to Firestore - this thread may re-ask for info already given.")
 
 
 def clear_pending_email_request(channel: str, thread_ts: str) -> None:
     try:
-        _get_client().collection("pending_email_requests").document(_doc_id(channel, thread_ts)).delete()
+        _delete_doc("pending_email_requests", _doc_id(channel, thread_ts))
     except Exception:
         logger.exception("Failed to clear pending email request from Firestore (non-fatal - it'll just get overwritten next time).")
 
@@ -143,8 +241,8 @@ _MAX_LEARNED_RULES = 50  # oldest evicted first - keeps the prompt injection bou
 
 def get_learned_rules() -> list:
     try:
-        doc = _get_client().collection("learned_rules").document(_LEARNED_RULES_DOC).get()
-        return doc.to_dict().get("rules", []) if doc.exists else []
+        doc = _get_doc("learned_rules", _LEARNED_RULES_DOC)
+        return (doc or {}).get("rules", [])
     except Exception:
         logger.exception("Failed to read learned rules from Firestore - treating as no standing rules yet.")
         return []
@@ -152,10 +250,9 @@ def get_learned_rules() -> list:
 
 def add_learned_rule(rule: str) -> None:
     try:
-        ref = _get_client().collection("learned_rules").document(_LEARNED_RULES_DOC)
         rules = get_learned_rules()
         rules.append(rule)
-        ref.set({"rules": rules[-_MAX_LEARNED_RULES:]})
+        _set_doc("learned_rules", _LEARNED_RULES_DOC, {"rules": rules[-_MAX_LEARNED_RULES:]})
     except Exception:
         logger.exception("Failed to save a learned rule to Firestore - this correction won't carry forward to future runs.")
 
@@ -165,7 +262,6 @@ def set_learned_rules(rules: list) -> None:
     (removing a bad/dead/duplicate rule) rather than the normal one-at-a-
     time append add_learned_rule() does."""
     try:
-        ref = _get_client().collection("learned_rules").document(_LEARNED_RULES_DOC)
-        ref.set({"rules": rules[-_MAX_LEARNED_RULES:]})
+        _set_doc("learned_rules", _LEARNED_RULES_DOC, {"rules": rules[-_MAX_LEARNED_RULES:]})
     except Exception:
         logger.exception("Failed to overwrite learned rules in Firestore.")

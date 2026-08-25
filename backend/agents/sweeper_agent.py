@@ -12,6 +12,7 @@ from typing import List, Literal, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from categories import DEFAULT_CATEGORY, category_notes_text
 from flows import FLOW_BY_SLUG
 from image_bank import HERO_BANK
 
@@ -37,6 +38,12 @@ instead of "[name]" - "NAME" is correct and expected everywhere in the live syst
 You will always be told the candidate's flow and its track (rx / otc / neutral) in the human message. \
 The price rule is PER-FLOW - read it carefully, it is the single most common mistake to get wrong:
 {price_rule}
+
+CATEGORY FOR THIS CANDIDATE:
+{category_notes}
+Hard-fail any candidate that violates this category's own compliance notes above, in addition to every \
+rule below - e.g. a Weight Loss candidate using before/after or body-comparison framing, or a Sexual \
+Health candidate that isn't discreet enough for a lock-screen preview.
 
 A) COMPLIANCE (hard-fail any of these):
 1. Any prescription medicine named anywhere (Minoxidil, Finasteride, or any drug name) - Rx treatment \
@@ -162,6 +169,11 @@ itself pastes an actual URL or names a second, different action beyond the one C
 The price rule is PER-FLOW:
 {price_rule}
 
+CATEGORY FOR THIS CANDIDATE:
+{category_notes}
+Hard-fail any candidate that violates this category's own compliance notes above, in addition to every \
+rule below.
+
 A) COMPLIANCE (hard-fail any of these):
 1. Any prescription medicine named anywhere - Rx treatment must only ever be "your doctor's plan" / \
 "treatment plan" / "prescription options" / "doctor-guided treatment".
@@ -214,13 +226,25 @@ severity to "none" if it passes, "minor" for small copy issues, or "major" for a
 """
 
 
-def _price_rule_text(flow_name: str) -> str:
+def _price_rule_text(flow_name: str, category: str = DEFAULT_CATEGORY) -> str:
     flow = FLOW_BY_SLUG.get(flow_name)
     if flow is None:
         return (
             "Unknown flow - treat conservatively: FAIL any price, dollar amount, or discount code "
             "unless it is clearly grounded in the approved OTC catalogue (Redensyl serum $42, Intense "
-            "Hair Growth Trio $78, Intense Hair Growth Kit $78)."
+            "Hair Growth Trio $78, Intense Hair Growth Kit $78), and only for category = hair_loss."
+        )
+    # Same category gate as copywriter_agent._build_flow_brief() - the real
+    # OTC catalogue is verified for hair_loss only (see that function's own
+    # comment). A price permitted on this flow for hair_loss is a hard
+    # FAIL for every other category, since no real product/price exists
+    # there to ground it in.
+    if flow["allow_price"] and category != "hair_loss":
+        return (
+            f"Flow = {flow_name} ({flow['label']}, {flow['track']} track), category = {category} -> "
+            "this flow normally permits a price for hair_loss, but there is NO real, verified OTC "
+            "product or price for this category. FAIL any price, dollar amount, discount code, or named "
+            "product for this candidate - it would be invented."
         )
     if flow["allow_price"]:
         return (
@@ -238,11 +262,18 @@ def _price_rule_text(flow_name: str) -> str:
     )
 
 
-def _hero_deterministic_issues(hero_info: Optional[dict]) -> List[str]:
+def _hero_deterministic_issues(hero_info: Optional[dict], category: str = DEFAULT_CATEGORY) -> List[str]:
     """Python-level ground-truth checks the LLM shouldn't have to infer: is
     the hero URL a real approved bank photo, never an invented placeholder,
-    and is a baked hero free of a redundant headline. Selection is
-    bank-only, so any non-bank, non-"none" source is itself a fail."""
+    is a baked hero free of a redundant headline, AND (added 2026-08-25)
+    does the chosen hero's own category tag actually match this email's
+    category - EmailContent.hero's Pydantic Literal is built from the
+    FULL, all-category HERO_KEYS list (it has to be, since it's one static
+    class shared by every category), so nothing at the schema-validation
+    level stops the model from naming a real bank key that belongs to a
+    DIFFERENT category than the one it was actually shown in its
+    catalogue. Selection is bank-only, so any non-bank, non-"none" source
+    is itself a fail."""
     if not hero_info:
         return []
     issues = []
@@ -256,6 +287,12 @@ def _hero_deterministic_issues(hero_info: Optional[dict]) -> List[str]:
             issues.append(
                 f"Hero '{hero}' claims to be a bank photo but its URL does not match the approved "
                 "image bank - this looks like an invented or altered URL."
+            )
+        elif bank_entry["category"] not in (category, "general") or category in bank_entry.get("exclude_categories", []):
+            issues.append(
+                f"Hero '{hero}' belongs to the '{bank_entry['category']}' category's photo bank, not "
+                f"this email's '{category}' category - using it here is a real content mismatch, not "
+                "just a style choice."
             )
         elif bank_entry["baked_headline"] is not None and hero_info.get("hero_headline") not in (
             None, bank_entry["baked_headline"],
@@ -297,6 +334,7 @@ def sweep_email(
     hero_info: Optional[dict] = None,
     other_heroes: Optional[List[str]] = None,
     human_feedback: Optional[str] = None,
+    category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """`other_heroes`, when given (from feedback_node.py's flow-level sweep),
     lists heroes already used by OTHER touchpoints in the same flow, so the
@@ -313,9 +351,10 @@ def sweep_email(
 
     system_text = SYSTEM_PROMPT.format(
         golden_reference=GOLDEN_P1_REFERENCE,
-        price_rule=_price_rule_text(flow_name),
+        price_rule=_price_rule_text(flow_name, category),
         learned_rules=learned_rules_text(),
-        flow_spec=_build_flow_brief(flow_name),
+        flow_spec=_build_flow_brief(flow_name, category),
+        category_notes=category_notes_text(category),
         other_heroes=", ".join(other_heroes) if other_heroes else "(none - this is the only email touchpoint, or the first one)",
     )
     include_address = hero_info.get("include_address", True) if hero_info else True
@@ -356,7 +395,7 @@ def sweep_email(
     passed = result.pass_ == "yes"
     severity = result.severity
 
-    hero_issues = _hero_deterministic_issues(hero_info)
+    hero_issues = _hero_deterministic_issues(hero_info, category)
     if hero_issues:
         reasons = hero_issues + reasons
         passed = False
@@ -369,7 +408,10 @@ def sweep_email(
     }
 
 
-def sweep_whatsapp(message_text: str, flow_name: str = "p1_plan_not_purchased", human_feedback: Optional[str] = None) -> dict:
+def sweep_whatsapp(
+    message_text: str, flow_name: str = "p1_plan_not_purchased", human_feedback: Optional[str] = None,
+    category: str = DEFAULT_CATEGORY,
+) -> dict:
     """Same QA gate as sweep_email(), but with WhatsApp's own real shape
     rules (short plain-text chat message, one link, no HTML/hero/footer) -
     see WHATSAPP_SYSTEM_PROMPT. Real Sweeper rule this reuses (from the
@@ -382,9 +424,10 @@ def sweep_whatsapp(message_text: str, flow_name: str = "p1_plan_not_purchased", 
     structured_llm = llm.with_structured_output(SweeperResult)
 
     system_text = WHATSAPP_SYSTEM_PROMPT.format(
-        price_rule=_price_rule_text(flow_name),
+        price_rule=_price_rule_text(flow_name, category),
         learned_rules=learned_rules_text(),
-        flow_spec=_build_flow_brief(flow_name),
+        flow_spec=_build_flow_brief(flow_name, category),
+        category_notes=category_notes_text(category),
     )
     feedback_note = (
         f"THE ACTUAL REVIEWER REQUEST THAT PRODUCED THIS CANDIDATE: {human_feedback.strip()}\n"
@@ -425,6 +468,11 @@ the entire notification - nothing else should be present.
 
 The price rule is PER-FLOW:
 {price_rule}
+
+CATEGORY FOR THIS CANDIDATE:
+{category_notes}
+Hard-fail any candidate that violates this category's own compliance notes above, in addition to every \
+rule below.
 
 A) COMPLIANCE (hard-fail any of these):
 1. Any prescription medicine named anywhere - Rx treatment must only ever be "your doctor's plan" / \
@@ -468,7 +516,10 @@ severity to "none" if it passes, "minor" for small copy issues, or "major" for a
 """
 
 
-def sweep_push(notification_text: str, flow_name: str = "p1_plan_not_purchased", human_feedback: Optional[str] = None) -> dict:
+def sweep_push(
+    notification_text: str, flow_name: str = "p1_plan_not_purchased", human_feedback: Optional[str] = None,
+    category: str = DEFAULT_CATEGORY,
+) -> dict:
     """Same QA gate as sweep_email()/sweep_whatsapp(), but with a push
     notification's own real shape rules (title + body only, no link, no
     CTA, character-limited) - see PUSH_SYSTEM_PROMPT.
@@ -477,7 +528,11 @@ def sweep_push(notification_text: str, flow_name: str = "p1_plan_not_purchased",
     llm = get_llm("SWEEPER")
     structured_llm = llm.with_structured_output(SweeperResult)
 
-    system_text = PUSH_SYSTEM_PROMPT.format(price_rule=_price_rule_text(flow_name), learned_rules=learned_rules_text())
+    system_text = PUSH_SYSTEM_PROMPT.format(
+        price_rule=_price_rule_text(flow_name, category),
+        learned_rules=learned_rules_text(),
+        category_notes=category_notes_text(category),
+    )
     feedback_note = (
         f"THE ACTUAL REVIEWER REQUEST THAT PRODUCED THIS CANDIDATE: {human_feedback.strip()}\n"
         "Use this to correctly judge any LEARNED CHECK below phrased as \"only when a reviewer explicitly "

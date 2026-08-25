@@ -12,8 +12,9 @@ from typing import List, Literal, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from categories import DEFAULT_CATEGORY, VALID_CATEGORY_SLUGS, category_notes_text
 from flows import FLOW_BY_SLUG, VALID_FLOW_SLUGS
-from image_bank import HERO_BANK, HERO_KEYS
+from image_bank import HERO_BANK, HERO_KEYS, hero_bank_for_category
 from text_sanitize import sanitize_text
 
 from .creative_director_agent import direct_touchpoint
@@ -156,18 +157,23 @@ treatment is only ever "your doctor's plan" / "your treatment plan" / "prescript
 support routes through customer service (WhatsApp), never the doctor.
 - Brand name is exactly "andSons" - never "&Sons".
 - Invent nothing: no fabricated statistics, social proof, testimonials, ratings, step counters, badges, \
-seals, deadlines, or features. NEVER state a specific number, percentage, or clinical statistic about hair \
-loss prevalence, treatment efficacy, or outcomes anywhere in the copy (e.g. "X% of men", "affects 1 in Y") \
-- there is no verified figure available to you in this system, so any such number you write would be \
-invented, regardless of how plausible it sounds or what citation you attach to it. The DOI footnote (DOI: \
-10.1111/dth.12246) and "Individual results vary." exist ONLY to accompany a specific approved statistic \
-handed to you explicitly elsewhere in this prompt (e.g. in the Head of CRM brief) - never write that \
-footnote, or any DOI-shaped citation, on a number you came up with yourself. When you want to make the \
-same point without a real number, say it as a plain, ungraded truth instead (e.g. "hair loss tends to \
-progress over time" rather than "affects 84% of men").
-- No cure/guarantee language ("cure baldness", "guaranteed regrowth", "100% works"). No shame or \
-fear-based pressure. No fake urgency or countdown framing - the only legitimate motivator is the real, \
-calmly-stated fact that hair loss is progressive so starting early protects more of what he still has.
+seals, deadlines, or features. NEVER state a specific number, percentage, or clinical statistic about \
+condition prevalence, treatment efficacy, or outcomes anywhere in the copy (e.g. "X% of men", "affects 1 \
+in Y") - there is no verified figure available to you in this system, so any such number you write would \
+be invented, regardless of how plausible it sounds or what citation you attach to it. The DOI footnote \
+(DOI: 10.1111/dth.12246) and "Individual results vary." exist ONLY to accompany a specific approved \
+statistic handed to you explicitly elsewhere in this prompt (e.g. in the Head of CRM brief) - never write \
+that footnote, or any DOI-shaped citation, on a number you came up with yourself, AND never write it on a \
+category other than Hair Loss regardless (that specific approved statistic is Hair-Loss-specific, never \
+transplant it to a different category's email). When you want to make the same point without a real \
+number, say it as a plain, ungraded truth instead, genuinely relevant to THIS email's category (see the \
+category context below) rather than defaulting to a hair-loss-specific example out of habit.
+- No cure/guarantee language ("cure it", "guaranteed results", "100% works"). No shame or fear-based \
+pressure. No fake urgency or countdown framing - the only legitimate motivator is a real, calmly-stated \
+truth genuinely relevant to THIS email's category (see the category context below for what that is here - \
+for Hair Loss specifically, the real fact is that it's a progressive condition, so starting early protects \
+more of what he still has; that specific fact belongs to Hair Loss only, never write it for a different \
+category).
 - This email may send the same day as the underlying trigger event (e.g. a consultation or quiz). Never \
 imply days have passed or that the customer has been deliberating ("taking a few days", "you've been \
 thinking it over") unless the flow brief says otherwise.
@@ -183,9 +189,12 @@ field's job, not something to solve by editing the step text - use that field.
 - trust_line (OPTIONAL): a thin centred line like "Doctor-led plan · Clinically studied · Discreet \
 delivery", plain text separated by " · ", never a description of badge graphics. Include only when it \
 adds confidence; omit for a simpler email.
-- gentle_truth_line (OPTIONAL): one gentle, caring true statement relevant to this flow's moment (for \
-hair-loss-timing flows: the progressive-condition truth, stated as care not urgency). Omit if nothing \
-true and relevant fits.
+- gentle_truth_line (OPTIONAL): one gentle, caring true statement relevant to THIS EMAIL'S ACTUAL \
+CATEGORY (see the category context below) and this flow's moment, stated as care not urgency - e.g. for \
+Hair Loss specifically, the real progressive-condition truth; for a different category, a real truth that \
+actually belongs to THAT category's own real objections/psychology, never the hair-loss one carried over \
+by default. Omit if nothing true and relevant fits - omitting this is always safer than reaching for the \
+wrong category's truth.
 - Never more than one of each block. Never fabricate content to fill a block - an empty/omitted block is \
 always better than an invented one.
 
@@ -230,6 +239,8 @@ LEARNED RULES (standing requirements distilled from real past human feedback on 
 one before the Sweeper has to catch it):
 {learned_rules}
 
+{category_notes}
+
 FLOW FOR THIS EMAIL: {flow_name}
 {flow_brief}
 
@@ -237,19 +248,27 @@ Address the customer by first name: {first_name}.
 """
 
 
-def _build_hero_catalog() -> str:
-    """Render the full hero bank - key, what the photo actually shows, and
-    the moment it's built for - so the Copywriter chooses based on real
-    content instead of guessing from a bare key name (that gap was why it
-    kept defaulting to the same one or two 'safe-sounding' keys)."""
+def _build_hero_catalog(category: str = DEFAULT_CATEGORY) -> str:
+    """Render the hero bank FOR THIS CATEGORY ONLY - key, what the photo
+    actually shows, and the moment it's built for - so the Copywriter
+    chooses based on real content instead of guessing from a bare key name
+    (that gap was why it kept defaulting to the same one or two
+    'safe-sounding' keys). Category-scoped via hero_bank_for_category() -
+    a real, live-caught gap this fixes: every photo in the original bank
+    is Hair-Loss-specific (a hand in someone's hair, a Redensyl bottle),
+    so showing the FULL bank on an ED/PE/Weight-Loss/Skin email would put
+    an actively wrong image in front of the model as a real option."""
+    bank = hero_bank_for_category(category)
     lines = []
-    for key, entry in HERO_BANK.items():
+    for key, entry in bank.items():
         locked = " [LOCKED - headline already baked in, do not add hero_headline]" if entry["baked_headline"] else ""
         lines.append(f'- "{key}"{locked}: {entry["description"]}. Best for: {entry["moment"]}.')
+    if not lines:
+        return "(No reviewed photos exist for this category yet - always choose \"none\" (text-first).)"
     return "\n".join(lines)
 
 
-def _build_flow_brief(flow_slug: str) -> str:
+def _build_flow_brief(flow_slug: str, category: str = DEFAULT_CATEGORY) -> str:
     flow = FLOW_BY_SLUG.get(flow_slug)
     if flow is None:
         flow = FLOW_BY_SLUG["p1_plan_not_purchased"]
@@ -260,11 +279,48 @@ def _build_flow_brief(flow_slug: str) -> str:
         f"Goal: {flow['goal']}",
         f"Suggested CTA for this flow: something like \"{flow['cta']}\".",
     ]
-    if flow["allow_price"]:
+    # Real, live-caught bug this fixes (2026-08-25): flows.py's Reader/Goal
+    # text above (and each touchpoint's own "intent" line) was written for
+    # Hair Loss specifically and genuinely names it in several flows (e.g.
+    # "finished the hair loss assessment quiz") - handing that straight to
+    # the model with no instruction produced exactly what you'd expect: a
+    # Sexual Health/Weight Loss/Skin email that talks about hair loss,
+    # confirmed live across repeated runs. This instruction is the fix,
+    # not a cosmetic note - it must survive for every category ≠ hair_loss.
+    if category != "hair_loss":
+        lines.append(
+            "CRITICAL - THE READER/GOAL TEXT ABOVE, AND THIS FLOW'S TOUCHPOINT 'MOMENT' TEXT BELOW, WERE "
+            "WRITTEN FOR HAIR LOSS: this email's real category is different (see the category context "
+            "below) - translate the SITUATION (which lifecycle moment this is: a plan awaiting payment, a "
+            "missed consult, an abandoned cart, and so on) to this category's own real equivalent, using "
+            "the category context's actual voice/objections. Never literally repeat a hair-loss-specific "
+            "word or phrase from the text above (\"hair loss\", \"hairline\", \"assessment quiz\" if it "
+            "names hair loss specifically, a hair product name) in your actual output - if the Reader/Goal "
+            "text names hair loss specifically, treat that as this category's OWN version of that same "
+            "moment (e.g. 'finished the assessment' becomes this category's own real intake/assessment "
+            "step, not a hair loss one)."
+        )
+    # Real, deliberate constraint, not an oversight: the approved OTC
+    # catalogue below (Redensyl/Trio/Kit) is real and verified ONLY for
+    # Hair Loss - no other category has a real, verified product/price in
+    # this system (see categories.py's otc_verified flag). Naming a
+    # plausible-sounding product/price for another category would be an
+    # invention, which this system's own "never invent" rule forbids -
+    # so allow_price is honoured only for category == "hair_loss";
+    # every other category defaults to no-price/consult framing
+    # regardless of what this specific flow's allow_price flag says.
+    if flow["allow_price"] and category == "hair_loss":
         lines.append(
             "You MAY reference a real product and its real price if it strengthens this message - "
             "the approved OTC catalogue is: 3% Redensyl Anti-Hair Loss Serum ($42), Intense Hair Growth "
             "Trio ($78), Intense Hair Growth Kit ($78). Never invent a different price or product."
+        )
+    elif flow["allow_price"]:
+        lines.append(
+            "HARD CONSTRAINT: this flow normally allows a product/price mention, but there is NO real, "
+            "verified OTC product or price for this category in this system - naming one would be "
+            "invented. Never mention a price, a dollar amount, a discount code, or any specific product "
+            "name for this category. Speak to the doctor-led plan/consultation instead."
         )
     else:
         lines.append(
@@ -525,24 +581,29 @@ def generate_email(
     first_name: str,
     correction: Optional[str] = None,
     insight_brief: Optional[str] = None,
+    category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Run the Copywriter agent. If `correction` is provided, it is appended
     to the ORIGINAL system prompt/constraints (never sent alone) so the model
     keeps the full brand context on every retry. If `insight_brief` is
     provided (from agents.insight_agent), it's included as internal strategy
     context only - see _INSIGHT_BRIEF_INSTRUCTION for the leak-prevention
-    rules enforced around it."""
+    rules enforced around it. `category` (one of categories.VALID_CATEGORY_
+    SLUGS) selects the reader psychology/objections/compliance context and
+    the category-scoped hero photo catalogue - defaults to hair_loss, the
+    original and only category this system supported before 2026-08-25."""
     llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
     structured_llm = llm.with_structured_output(EmailContent)
 
-    flow_brief = _build_flow_brief(flow_name)
+    flow_brief = _build_flow_brief(flow_name, category)
     system_text = SYSTEM_PROMPT.format(
         golden_reference=GOLDEN_P1_REFERENCE,
         flow_name=flow_name,
         flow_brief=flow_brief,
         first_name=first_name,
-        hero_catalog=_build_hero_catalog(),
+        hero_catalog=_build_hero_catalog(category),
         learned_rules=learned_rules_text(),
+        category_notes=category_notes_text(category),
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
@@ -628,6 +689,8 @@ PAYMENT-FRAMING BAN: never lead with money; the action is starting/continuing tr
 LEARNED RULES (standing requirements distilled from real past human feedback; apply every one before the \
 Sweeper has to catch it):
 {learned_rules}
+
+{category_notes}
 
 FLOW: {flow_name}
 {flow_brief}
@@ -728,6 +791,8 @@ LEARNED RULES (standing requirements distilled from real past human feedback; ap
 Sweeper has to catch it):
 {learned_rules}
 
+{category_notes}
+
 FLOW: {flow_name}
 {flow_brief}
 
@@ -807,7 +872,7 @@ def _prior_touchpoints_context(prior: list) -> str:
 
 def generate_touchpoint(
     flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
-    insight_brief: Optional[str] = None,
+    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Single dispatch point for "generate one touchpoint of whatever
     channel this step is" - used by generate_flow() below and by
@@ -815,15 +880,18 @@ def generate_touchpoint(
     so all three stay in sync as channels are added instead of each
     hand-rolling its own if/elif channel dispatch."""
     if step["channel"] == "email":
-        return generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief)
+        return generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief, category=category)
     if step["channel"] == "whatsapp":
-        return generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief)
+        return generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief, category=category)
     if step["channel"] == "push":
-        return generate_flow_push_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief)
+        return generate_flow_push_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief, category=category)
     raise ValueError(f"Unknown channel: {step['channel']!r}")
 
 
-def generate_flow(flow_name: str, insight_brief: Optional[str] = None, cadence: Optional[list] = None) -> dict:
+def generate_flow(
+    flow_name: str, insight_brief: Optional[str] = None, cadence: Optional[list] = None,
+    category: str = DEFAULT_CATEGORY,
+) -> dict:
     """Generate every real touchpoint in a flow's cadence, in order, each
     aware of what earlier touchpoints in the same flow already said (so
     the sequence reads as one continuous journey, and no hero image or
@@ -849,7 +917,7 @@ def generate_flow(flow_name: str, insight_brief: Optional[str] = None, cadence: 
 
     for step in (cadence or flow["cadence"]):
         try:
-            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief)
+            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief, category=category)
         except RuntimeError as exc:
             # Real failure mode, not hypothetical: even with a 5-attempt
             # retry (invoke_with_retry), a single touchpoint can still
@@ -910,7 +978,7 @@ def _touchpoint_summary(touchpoint: dict) -> dict:
 
 def generate_flow_email_touchpoint(
     flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
-    insight_brief: Optional[str] = None,
+    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Generate (or regenerate, with `correction`) ONE email touchpoint of a
     flow's real cadence - shares the exact same prompt machinery as
@@ -918,7 +986,7 @@ def generate_flow_email_touchpoint(
     earlier touchpoints in the same flow already said (so a Sweeper-driven
     retry stays aware of the rest of the sequence, not just its own text)."""
     flow = FLOW_BY_SLUG[flow_name]
-    flow_brief = _build_flow_brief(flow_name)
+    flow_brief = _build_flow_brief(flow_name, category)
     llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
     structured_llm = llm.with_structured_output(EmailContent)
     system_text = SYSTEM_PROMPT.format(
@@ -926,8 +994,9 @@ def generate_flow_email_touchpoint(
         flow_name=flow_name,
         flow_brief=flow_brief,
         first_name="NAME",
-        hero_catalog=_build_hero_catalog(),
+        hero_catalog=_build_hero_catalog(category),
         learned_rules=learned_rules_text(),
+        category_notes=category_notes_text(category),
     )
     system_text += (
         f"\n\nTHIS TOUCHPOINT'S MOMENT IN THE FLOW (touchpoint {step['n']} of "
@@ -959,7 +1028,7 @@ def generate_flow_email_touchpoint(
     # check is a real second opinion, not just trusting the Copywriter's
     # own self-restraint against reusing a hero already used elsewhere in
     # this flow.
-    direction = direct_touchpoint(content.model_dump(), prior_summaries)
+    direction = direct_touchpoint(content.model_dump(), prior_summaries, category=category)
     content = content.model_copy(update={
         "hero": direction["hero"],
         "hero_headline": direction["hero_headline"],
@@ -991,14 +1060,18 @@ def generate_flow_email_touchpoint(
 
 def generate_flow_whatsapp_touchpoint(
     flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
-    insight_brief: Optional[str] = None,
+    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Generate (or regenerate, with `correction`) ONE WhatsApp touchpoint
     of a flow's real cadence. See generate_flow_email_touchpoint()."""
     flow = FLOW_BY_SLUG[flow_name]
-    flow_brief = _build_flow_brief(flow_name)
+    flow_brief = _build_flow_brief(flow_name, category)
+    # Same category-gated logic as _build_flow_brief() - the real OTC
+    # catalogue is verified for hair_loss only, see that function's own
+    # comment for why every other category is treated as no-price
+    # regardless of this flow's own allow_price flag.
     price_rule = (
-        "" if flow["allow_price"] else
+        "" if flow["allow_price"] and category == "hair_loss" else
         "HARD CONSTRAINT: never mention a price, a dollar amount, or a discount code in this message."
     )
     llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
@@ -1012,6 +1085,7 @@ def generate_flow_whatsapp_touchpoint(
         price_rule=price_rule,
         prior_context=_prior_touchpoints_context(prior_summaries),
         learned_rules=learned_rules_text(),
+        category_notes=category_notes_text(category),
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
@@ -1044,14 +1118,17 @@ def generate_flow_whatsapp_touchpoint(
 
 def generate_flow_push_touchpoint(
     flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
-    insight_brief: Optional[str] = None,
+    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Generate (or regenerate, with `correction`) ONE push-notification
     touchpoint of a flow's real cadence. See generate_flow_email_touchpoint()."""
     flow = FLOW_BY_SLUG[flow_name]
-    flow_brief = _build_flow_brief(flow_name)
+    flow_brief = _build_flow_brief(flow_name, category)
+    # Same category-gated logic as _build_flow_brief() - see that
+    # function's comment for why non-hair_loss categories are always
+    # no-price regardless of this flow's own allow_price flag.
     price_rule = (
-        "" if flow["allow_price"] else
+        "" if flow["allow_price"] and category == "hair_loss" else
         "HARD CONSTRAINT: never mention a price, a dollar amount, or a discount code in this notification."
     )
     llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
@@ -1065,6 +1142,7 @@ def generate_flow_push_touchpoint(
         price_rule=price_rule,
         prior_context=_prior_touchpoints_context(prior_summaries),
         learned_rules=learned_rules_text(),
+        category_notes=category_notes_text(category),
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
@@ -1121,6 +1199,15 @@ class EmailIntent(BaseModel):
         description="For mode='insight' only: the business signal/problem/question to investigate, "
         "as its own clean sentence (e.g. 'Is OTC serum revenue declining?'). Null for mode='direct'.",
     )
+    category: Literal[tuple(VALID_CATEGORY_SLUGS)] = Field(
+        default=DEFAULT_CATEGORY,
+        description="Which real andSons category this request is for: 'hair_loss', 'sexual_health' "
+        "(covers both ED and PE), 'weight_loss', or 'skin'. Look for an explicit mention (e.g. 'a weight "
+        "loss email', 'for an ED customer', 'sexual health flow') or a clear contextual signal (a "
+        "product/condition named that only belongs to one category). Default to 'hair_loss' - the "
+        "original category this system was built for - when the request gives no signal either way; do "
+        "not guess a different category from weak evidence.",
+    )
 
 
 def parse_email_request(text: str) -> dict:
@@ -1154,7 +1241,8 @@ def parse_email_request(text: str) -> dict:
         "classifying. For 'direct' mode, leave flow_name null rather than guessing if it doesn't clearly "
         "map to one of these flows - do not default to the first flow in the list. For 'insight' mode, "
         "only fill flow_name if the message itself names/clearly implies a specific flow; otherwise leave "
-        "it null."
+        "it null. Also classify 'category' (see its own field description) - default to 'hair_loss' "
+        "unless the request clearly signals a different one."
     )
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", text)])
     chain = prompt | structured_llm
@@ -1169,11 +1257,12 @@ def parse_email_request(text: str) -> dict:
         # Slack. mode="unclear" lets the caller give a clean, on-brand
         # clarification instead of an API error dump.
         logger.warning("parse_email_request: model failed to return structured output for %r", text)
-        return {"mode": "unclear", "flow_name": None, "signal_question": None}
+        return {"mode": "unclear", "flow_name": None, "signal_question": None, "category": DEFAULT_CATEGORY}
     return {
         "mode": result.mode,
         "flow_name": result.flow_name,
         "signal_question": result.signal_question,
+        "category": result.category,
     }
 
 

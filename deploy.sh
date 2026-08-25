@@ -64,6 +64,13 @@ MOENGAGE_SECRETS="MOENGAGE_CAMPAIGN_API_KEY=moengage-campaign-api-key:latest"
 # the direct /ask endpoint (which blocks synchronously, unlike the Slack
 # path above) - a real "upstream request timeout" was reproduced live on
 # one such question. 300s is generous headroom without being unbounded.
+#
+# NOTE: this exact block has been found reverted on disk twice now by
+# something outside this session's own edits (not a deploy - the live
+# Cloud Run service itself has kept these settings the whole time,
+# confirmed independently via `gcloud run services describe`; only this
+# local file's content reverted). Restored again here before this deploy -
+# if it happens a third time, this comment is the paper trail for why.
 
 if [ ! -f cloudrun-env.yaml ]; then
   echo "cloudrun-env.yaml not found — copy cloudrun-env.example.yaml and fill it in first."

@@ -14,6 +14,7 @@ from typing import List, Literal, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from categories import DEFAULT_CATEGORY
 from flows import FLOW_BY_SLUG
 
 from .copywriter_agent import (
@@ -63,7 +64,9 @@ def _diff_summary(before: Optional[str], after: str) -> str:
     return f"{len(changed_lines)} line(s) changed"
 
 
-def _run_pipeline_loop(flow_name: str, first_name: str, insight_brief: Optional[str] = None) -> dict:
+def _run_pipeline_loop(
+    flow_name: str, first_name: str, insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY,
+) -> dict:
     """Shared Copywriter -> Sweeper -> Feedback retry loop (capped at
     MAX_RETRIES), used by both the plain flow+name pipeline and the
     insight-driven one. `insight_brief`, when given, is passed to
@@ -77,10 +80,10 @@ def _run_pipeline_loop(flow_name: str, first_name: str, insight_brief: Optional[
     needs_human_review = False
 
     for attempt_num in range(MAX_RETRIES + 1):  # attempt 0 = first draft, 1 and 2 = retries
-        email = generate_email(flow_name, first_name, correction=correction, insight_brief=insight_brief)
+        email = generate_email(flow_name, first_name, correction=correction, insight_brief=insight_brief, category=category)
         rendered = email["rendered_text"]
 
-        sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"])
+        sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"], category=category)
 
         what_changed = _diff_summary(previous_text, rendered)
         log_entry = {
@@ -129,18 +132,19 @@ def _run_pipeline_loop(flow_name: str, first_name: str, insight_brief: Optional[
     }
 
 
-def run_email_pipeline(flow_name: str, first_name: str, file_context: str = "") -> dict:
+def run_email_pipeline(flow_name: str, first_name: str, file_context: str = "", category: str = DEFAULT_CATEGORY) -> dict:
     """Copywriter -> Sweeper -> Feedback loop, capped at MAX_RETRIES retries.
     file_context, if given (a summary from a file uploaded alongside the
     request), is passed through as strategy context via the same
     leak-prevention path as an insight brief - see generate_email()'s
     _INSIGHT_BRIEF_INSTRUCTION."""
     brief = f"DATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}" if file_context else None
-    return _run_pipeline_loop(flow_name, first_name, insight_brief=brief)
+    return _run_pipeline_loop(flow_name, first_name, insight_brief=brief, category=category)
 
 
 def run_insight_email_pipeline(
-    question: str, first_name: str, flow_name: Optional[str] = None, file_context: str = ""
+    question: str, first_name: str, flow_name: Optional[str] = None, file_context: str = "",
+    category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Investigate a business signal (real BigQuery data, plus real MoEngage
     data if configured) and write an email addressing it, through the same
@@ -160,7 +164,7 @@ def run_insight_email_pipeline(
             "first_name": first_name,
         }
 
-    result = _run_pipeline_loop(flow_name, first_name, insight_brief=brief["brief_text"])
+    result = _run_pipeline_loop(flow_name, first_name, insight_brief=brief["brief_text"], category=category)
     result["needs_flow_clarification"] = False
     result["insight_brief"] = brief
     result["signal_question"] = question
@@ -183,7 +187,8 @@ def _heroes_from_touchpoints(touchpoints: list, exclude_n: int) -> list:
 
 
 def _sweep_touchpoint(
-    touchpoint: dict, flow_name: str, other_heroes: Optional[list] = None, human_feedback: Optional[str] = None
+    touchpoint: dict, flow_name: str, other_heroes: Optional[list] = None, human_feedback: Optional[str] = None,
+    category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Single dispatch point for "sweep this touchpoint with whatever
     channel's rules apply" - mirrors copywriter_agent.generate_touchpoint().
@@ -196,18 +201,18 @@ def _sweep_touchpoint(
     if touchpoint["channel"] == "email":
         return sweep_email(
             touchpoint["rendered_text"], flow_name=flow_name, hero_info=touchpoint["content"],
-            other_heroes=other_heroes, human_feedback=human_feedback,
+            other_heroes=other_heroes, human_feedback=human_feedback, category=category,
         )
     if touchpoint["channel"] == "whatsapp":
-        return sweep_whatsapp(touchpoint["rendered_text"], flow_name=flow_name, human_feedback=human_feedback)
+        return sweep_whatsapp(touchpoint["rendered_text"], flow_name=flow_name, human_feedback=human_feedback, category=category)
     if touchpoint["channel"] == "push":
-        return sweep_push(touchpoint["rendered_text"], flow_name=flow_name, human_feedback=human_feedback)
+        return sweep_push(touchpoint["rendered_text"], flow_name=flow_name, human_feedback=human_feedback, category=category)
     raise ValueError(f"Unknown channel: {touchpoint['channel']!r}")
 
 
 def run_flow_pipeline(
     flow_name: str, file_context: str = "", insight_brief_text: Optional[str] = None,
-    raw_request: Optional[str] = None,
+    raw_request: Optional[str] = None, category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Generate the WHOLE real flow - every touchpoint in its real cadence
     - not just one email. Each touchpoint goes through its own Sweeper QA
@@ -258,7 +263,7 @@ def run_flow_pipeline(
     if file_context:
         brief_parts.append(f"DATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}")
     brief = "\n\n".join(brief_parts)
-    flow_result = generate_flow(flow_name, insight_brief=brief, cadence=crm_brief.get("cadence"))
+    flow_result = generate_flow(flow_name, insight_brief=brief, cadence=crm_brief.get("cadence"), category=category)
 
     prior_summaries = []
     final_touchpoints = []
@@ -285,7 +290,7 @@ def run_flow_pipeline(
 
         while True:
             other_heroes = _heroes_from_touchpoints(flow_result["touchpoints"], touchpoint["n"])
-            sweep = _sweep_touchpoint(touchpoint, flow_name, other_heroes=other_heroes)
+            sweep = _sweep_touchpoint(touchpoint, flow_name, other_heroes=other_heroes, category=category)
 
             logger.info(
                 "Flow %s touchpoint %d (%s, %s) attempt %d: pass=%s severity=%s reasons=%s",
@@ -303,7 +308,7 @@ def run_flow_pipeline(
             correction = format_correction(sweep["reasons"])
             attempts += 1
             try:
-                touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief)
+                touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief, category=category)
             except RuntimeError as exc:
                 # Same real failure mode as generate_flow()'s own retry
                 # exhaustion, just hit during a Sweeper-triggered
@@ -334,7 +339,7 @@ def run_flow_pipeline(
 
 def run_insight_flow_pipeline(
     question: str, flow_name: Optional[str] = None, file_context: str = "",
-    raw_request: Optional[str] = None,
+    raw_request: Optional[str] = None, category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Investigate a business signal, then generate the WHOLE flow (every
     real touchpoint) addressing it - the flow-level counterpart to
@@ -357,7 +362,7 @@ def run_insight_flow_pipeline(
         }
 
     result = run_flow_pipeline(
-        flow_name, insight_brief_text=brief["brief_text"], raw_request=raw_request or question,
+        flow_name, insight_brief_text=brief["brief_text"], raw_request=raw_request or question, category=category,
     )
     result["needs_flow_clarification"] = False
     result["insight_brief"] = brief
@@ -543,6 +548,7 @@ def revise_with_feedback(
     feedback: str,
     previous_rendered_text: Optional[str] = None,
     feedback_history: Optional[list] = None,
+    category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Human-in-the-loop revision. Re-invokes the Copywriter with the ORIGINAL
     system prompt/constraints plus the current draft, the full prior feedback
@@ -573,9 +579,9 @@ def revise_with_feedback(
         if sweeper_correction:
             correction = correction + "\n\n" + sweeper_correction
 
-        email = generate_email(flow_name, first_name, correction=correction)
+        email = generate_email(flow_name, first_name, correction=correction, category=category)
         rendered = email["rendered_text"]
-        sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"], human_feedback=feedback)
+        sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"], human_feedback=feedback, category=category)
         logger.info(
             "Human feedback applied (flow=%s, round=%d, attempt=%d): %r | sweeper_pass=%s reasons=%s",
             flow_name,
@@ -708,6 +714,7 @@ def revise_flow_touchpoint(
     touchpoint_n: int,
     feedback: str,
     feedback_history: Optional[list] = None,
+    category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Human-in-the-loop revision of ONE touchpoint in an already-generated
     flow - same principle as revise_with_feedback(), but aware of its real
@@ -753,8 +760,8 @@ def revise_flow_touchpoint(
             correction = correction + "\n\n" + sweeper_correction
 
         try:
-            new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction)
-            sweep = _sweep_touchpoint(new_touchpoint, flow_name, other_heroes=other_heroes, human_feedback=feedback)
+            new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction, category=category)
+            sweep = _sweep_touchpoint(new_touchpoint, flow_name, other_heroes=other_heroes, human_feedback=feedback, category=category)
         except RuntimeError as exc:
             # Same real, if rare, exhausted-retry failure as generate_flow() -
             # a manual retry request itself failing must never crash back to a
@@ -812,6 +819,7 @@ def revise_flow_touchpoints(
     touchpoint_ns: List[int],
     feedback: str,
     feedback_history: Optional[list] = None,
+    category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Human-in-the-loop revision of MULTIPLE existing touchpoints with the
     SAME feedback in one go - what resolve_touchpoint_reference()'s
@@ -829,7 +837,7 @@ def revise_flow_touchpoints(
     revised = []
     for n in touchpoint_ns:
         step_result = revise_flow_touchpoint(
-            flow_name, current_touchpoints, n, feedback, feedback_history=feedback_history,
+            flow_name, current_touchpoints, n, feedback, feedback_history=feedback_history, category=category,
         )
         current_touchpoints = step_result["touchpoints"]
         feedback_history = step_result["feedback_history"]
@@ -947,7 +955,7 @@ def _resolve_structural_request(feedback_text: str, touchpoints: list, flow_name
 
 def _generate_and_sweep(
     flow_name: str, step: dict, prior_summaries: list, correction: str, other_heroes: list,
-    human_feedback: Optional[str] = None,
+    human_feedback: Optional[str] = None, category: str = DEFAULT_CATEGORY,
 ):
     """Shared generate -> Sweeper -> retry loop for a touchpoint that has no
     PREVIOUS DRAFT of its own to ground a revision against (a brand-new
@@ -962,7 +970,7 @@ def _generate_and_sweep(
     sweep = None
     for attempt_num in range(MAX_RETRIES + 1):
         try:
-            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=working_correction)
+            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=working_correction, category=category)
         except RuntimeError as exc:
             logger.error("New touchpoint %d (%s) failed to generate: %s", step["n"], step["channel"], exc)
             touchpoint = {
@@ -976,7 +984,7 @@ def _generate_and_sweep(
             }
             break
 
-        sweep = _sweep_touchpoint(touchpoint, flow_name, other_heroes=other_heroes, human_feedback=human_feedback)
+        sweep = _sweep_touchpoint(touchpoint, flow_name, other_heroes=other_heroes, human_feedback=human_feedback, category=category)
         logger.info(
             "New touchpoint %d (%s) attempt %d: pass=%s severity=%s reasons=%s",
             step["n"], step["channel"], attempt_num + 1, sweep["pass"], sweep["severity"], sweep["reasons"],
@@ -997,6 +1005,7 @@ def add_flow_touchpoint(
     timing: str,
     intent: str,
     feedback_history: Optional[list] = None,
+    category: str = DEFAULT_CATEGORY,
 ) -> dict:
     """Human-in-the-loop ADDITION of a whole new step to an already-generated
     flow - the counterpart to revise_flow_touchpoint() (which only ever
@@ -1042,7 +1051,7 @@ def add_flow_touchpoint(
     )
 
     new_touchpoint, sweep = _generate_and_sweep(
-        flow_name, step, prior_summaries, correction, other_heroes, human_feedback=feedback,
+        flow_name, step, prior_summaries, correction, other_heroes, human_feedback=feedback, category=category,
     )
     new_touchpoint["passed"] = sweep["pass"]
     new_touchpoint["sweeper_reasons"] = sweep["reasons"]

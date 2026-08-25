@@ -24,13 +24,14 @@ from typing import List, Literal, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from image_bank import HERO_BANK, HERO_KEYS
+from categories import DEFAULT_CATEGORY
+from image_bank import HERO_BANK, HERO_KEYS, hero_bank_for_category
 
 from .llm_provider import get_llm, invoke_with_retry
 
 logger = logging.getLogger("creative_director_agent")
 
-SYSTEM_PROMPT = """You are the EMAIL CREATIVE DIRECTOR for andSons Singapore (men's health / hair loss). \
+SYSTEM_PROMPT = """You are the EMAIL CREATIVE DIRECTOR for andSons Singapore (men's health telehealth). \
 The copywriter has already written the words below - you do NOT rewrite the copy. You own the art \
 direction: which hero image (if any), and whether an optional short display headline sits above the body.
 
@@ -79,15 +80,22 @@ class CreativeDirection(BaseModel):
     art_rationale: str = Field(description="One short line: why this hero (or 'none') fits this specific moment.")
 
 
-def _hero_catalog_text() -> str:
+def _hero_catalog_text(category: str = DEFAULT_CATEGORY) -> str:
+    """Category-scoped, same reasoning as copywriter_agent._build_hero_
+    catalog() - showing the Creative Director the FULL bank regardless of
+    category would let it override a Copywriter's correct 'none' choice
+    with a Hair-Loss-only photo on a Weight-Loss/ED-PE/Skin email."""
+    bank = hero_bank_for_category(category)
     lines = []
-    for key, entry in HERO_BANK.items():
+    for key, entry in bank.items():
         locked = " [LOCKED]" if entry["baked_headline"] else ""
         lines.append(f'- "{key}"{locked}: {entry["description"]}. Best for: {entry["moment"]}.')
+    if not lines:
+        return "(No reviewed photos exist for this category yet - always choose \"none\".)"
     return "\n".join(lines)
 
 
-def direct_touchpoint(content: dict, prior_summaries: List[dict]) -> dict:
+def direct_touchpoint(content: dict, prior_summaries: List[dict], category: str = DEFAULT_CATEGORY) -> dict:
     """Reviews one email touchpoint's copy + the Copywriter's proposed
     hero, and returns the FINAL art-direction decision (hero,
     hero_headline, headline, art_rationale). Fails safe: if the LLM call
@@ -104,7 +112,7 @@ def direct_touchpoint(content: dict, prior_summaries: List[dict]) -> dict:
     llm = get_llm("CREATIVE_DIRECTOR", temperature=0.4)
     structured_llm = llm.with_structured_output(CreativeDirection)
     system_text = SYSTEM_PROMPT.format(
-        hero_catalog=_hero_catalog_text(),
+        hero_catalog=_hero_catalog_text(category),
         subject=content.get("subject", ""),
         opening_line=(content.get("opening_lines") or [""])[0],
         proposed_hero=content.get("hero", "none"),

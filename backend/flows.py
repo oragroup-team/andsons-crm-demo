@@ -1,4 +1,30 @@
-"""Canonical andSons Hair Loss lifecycle flow definitions.
+"""Canonical andSons lifecycle flow definitions - the real, verified
+Hair Loss data below, now reused across every category (Hair Loss, Sexual
+Health ED/PE, Weight Loss, Skin) as the LIFECYCLE-STAGE SHAPE.
+
+CROSS-CATEGORY REUSE MODEL (added 2026-08-25, per explicit instruction to
+support every category, not just Hair Loss): these 13 flows encode real,
+audited CRM lifecycle MOMENTS (a plan created but not paid for, a missed
+consult, an abandoned cart, the low-motivation window before results show,
+a lapsed subscriber) - the STRUCTURE (trigger type, touchpoint count,
+timing, channel mix) is a genuine, portable CRM pattern that plausibly
+applies to any of andSons' categories, not something specific to hair
+loss. The CONTENT below (audience/goal wording, and especially any named
+product - Redensyl, Trio, the Kit) IS Hair-Loss-specific and real,
+verified against actual live MoEngage data (see the cadence-correction
+note further down) - it is NOT rewritten per category here, because doing
+that would mean inventing product names and specifics for Sexual Health/
+Weight Loss/Skin that this system has no real, verified source for (see
+categories.py's `otc_verified` flag - only Hair Loss has one). Instead,
+copywriter_agent.py's category context (categories.py) adapts the READER'S
+VOICE/OBJECTIONS/COMPLIANCE per category at generation time, and
+explicitly avoids naming any Hair-Loss-specific product when writing for a
+different category - the copy adapts, the underlying flow shape does not
+need to be duplicated 5x to do that. A real, honest limitation this
+implies: the exact cadence/timing/channel-mix below is independently
+verified against real MoEngage data for HAIR LOSS specifically (see below)
+- the SAME shape applied to another category is a reasonable structural
+assumption, not independently re-verified for that category yet.
 
 Source of truth: the real andSons CRM knowledge base
 (03-Segments-Lifecycle.md, 07-Patient-Journey.md, 06-MoEngage-Data-Dictionary.md,

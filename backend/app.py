@@ -18,6 +18,7 @@ from flask_cors import CORS
 from agents.analytics_agent import ask_analytics
 from agents.copywriter_agent import parse_email_request
 from agents.visual_qa_agent import review_image
+from categories import DEFAULT_CATEGORY, VALID_CATEGORY_SLUGS
 from agents.feedback_node import (
     add_flow_touchpoint,
     remove_flow_touchpoint,
@@ -103,11 +104,24 @@ CORS(app)
 VALID_FLOWS = set(VALID_FLOW_SLUGS)
 
 
+def _resolve_category_field(data: dict) -> str:
+    """Shared validation for the optional "category" field every content-
+    generation endpoint now accepts - defaults to hair_loss (the original,
+    always-supported category) when omitted, matching every function this
+    feeds into. Real, deliberate choice: silently falling back rather than
+    erroring on an unrecognised category string keeps this endpoint
+    backward-compatible for any caller that predates 2026-08-25 and never
+    sends this field at all."""
+    category = data.get("category") or DEFAULT_CATEGORY
+    return category if category in VALID_CATEGORY_SLUGS else DEFAULT_CATEGORY
+
+
 @app.route("/generate-email", methods=["POST"])
 def generate_email_endpoint():
     data = request.get_json(silent=True) or {}
     flow_name = data.get("flow_name")
     first_name = data.get("first_name")
+    category = _resolve_category_field(data)
 
     if not flow_name or flow_name not in VALID_FLOWS:
         return jsonify({"error": f"flow_name must be one of {sorted(VALID_FLOWS)}"}), 400
@@ -115,7 +129,7 @@ def generate_email_endpoint():
         return jsonify({"error": "first_name is required"}), 400
 
     try:
-        result = run_email_pipeline(flow_name, first_name.strip())
+        result = run_email_pipeline(flow_name, first_name.strip(), category=category)
     except Exception as exc:  # noqa: BLE001 — surfaced to the demo UI
         return jsonify({"error": str(exc)}), 500
 
@@ -130,6 +144,7 @@ def revise_email_endpoint():
     feedback = data.get("feedback")
     previous_rendered_text = data.get("previous_rendered_text")
     feedback_history = data.get("feedback_history") or []
+    category = _resolve_category_field(data)
 
     if not flow_name or flow_name not in VALID_FLOWS:
         return jsonify({"error": f"flow_name must be one of {sorted(VALID_FLOWS)}"}), 400
@@ -147,6 +162,7 @@ def revise_email_endpoint():
             feedback.strip(),
             previous_rendered_text=previous_rendered_text,
             feedback_history=feedback_history,
+            category=category,
         )
     except Exception as exc:  # noqa: BLE001 — surfaced to the demo UI
         return jsonify({"error": str(exc)}), 500
@@ -393,6 +409,12 @@ def slack_events_email():
 
             session = get_email_session(channel, thread_ts)
             if session:
+                # Persisted forward from whichever category this flow was
+                # originally generated for (see the fresh-generation branch
+                # further down, which is the only place a category gets
+                # chosen) - defaults to hair_loss for any session saved
+                # before 2026-08-25, which never had this field at all.
+                session_category = session.get("category", DEFAULT_CATEGORY)
                 feedback_text = text
                 if file_context:
                     feedback_text = (text + "\n\n" if text else "") + (
@@ -426,6 +448,7 @@ def slack_events_email():
                             "flow_name": session["flow_name"],
                             "touchpoints": result["touchpoints"],
                             "feedback_history": result["feedback_history"],
+                            "category": session_category,
                         },
                     )
                     _repost_flow(
@@ -440,6 +463,7 @@ def slack_events_email():
                         session["flow_name"], session["touchpoints"], feedback_text,
                         structural["insert_after_n"], structural["new_channel"], structural["new_timing"],
                         structural["new_intent"], feedback_history=session.get("feedback_history", []),
+                        category=session_category,
                     )
                     save_email_session(
                         channel, thread_ts,
@@ -447,6 +471,7 @@ def slack_events_email():
                             "flow_name": session["flow_name"],
                             "touchpoints": result["touchpoints"],
                             "feedback_history": result["feedback_history"],
+                            "category": session_category,
                         },
                     )
                     _repost_flow(
@@ -482,7 +507,7 @@ def slack_events_email():
                         # each result, no clarifying question needed.
                         result = revise_flow_touchpoints(
                             session["flow_name"], session["touchpoints"], resolved_ns, feedback_text,
-                            feedback_history=session.get("feedback_history", []),
+                            feedback_history=session.get("feedback_history", []), category=session_category,
                         )
                         save_email_session(
                             channel, thread_ts,
@@ -490,6 +515,7 @@ def slack_events_email():
                                 "flow_name": session["flow_name"],
                                 "touchpoints": result["touchpoints"],
                                 "feedback_history": result["feedback_history"],
+                                "category": session_category,
                             },
                         )
                         for revised_touchpoint in result["revised"]:
@@ -521,7 +547,7 @@ def slack_events_email():
                 try:
                     result = revise_flow_touchpoint(
                         session["flow_name"], session["touchpoints"], touchpoint_n, touchpoint_feedback,
-                        feedback_history=session.get("feedback_history", []),
+                        feedback_history=session.get("feedback_history", []), category=session_category,
                     )
                 except ValueError as exc:
                     post_message(bot_token, channel, thread_ts=thread_ts, text=str(exc))
@@ -533,6 +559,7 @@ def slack_events_email():
                         "flow_name": session["flow_name"],
                         "touchpoints": result["touchpoints"],
                         "feedback_history": result["feedback_history"],
+                        "category": session_category,
                     },
                 )
                 _post_flow_touchpoint(
@@ -576,6 +603,7 @@ def slack_events_email():
                 question = intent["signal_question"] or combined_text or "Review the attached data and identify what needs addressing."
                 result = run_insight_flow_pipeline(
                     question, flow_name=intent["flow_name"], file_context=file_context, raw_request=combined_text,
+                    category=intent["category"],
                 )
                 if result["needs_flow_clarification"]:
                     save_pending_email_request(channel, thread_ts, pending_texts + [text])
@@ -595,6 +623,7 @@ def slack_events_email():
                         "flow_name": result["flow_name"],
                         "touchpoints": result["touchpoints"],
                         "feedback_history": [],
+                        "category": intent["category"],
                     },
                 )
                 _post_flow_result(bot_token, channel, thread_ts, result, insight=result.get("insight_brief"))
@@ -611,13 +640,16 @@ def slack_events_email():
                 return
 
             clear_pending_email_request(channel, thread_ts)
-            result = run_flow_pipeline(intent["flow_name"], file_context=file_context, raw_request=combined_text)
+            result = run_flow_pipeline(
+                intent["flow_name"], file_context=file_context, raw_request=combined_text, category=intent["category"],
+            )
             save_email_session(
                 channel, thread_ts,
                 {
                     "flow_name": intent["flow_name"],
                     "touchpoints": result["touchpoints"],
                     "feedback_history": [],
+                    "category": intent["category"],
                 },
             )
             _post_flow_result(bot_token, channel, thread_ts, result)

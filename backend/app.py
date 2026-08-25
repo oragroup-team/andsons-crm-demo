@@ -20,8 +20,7 @@ from agents.copywriter_agent import parse_email_request
 from agents.visual_qa_agent import review_image
 from categories import DEFAULT_CATEGORY, VALID_CATEGORY_SLUGS
 from agents.feedback_node import (
-    add_flow_touchpoint,
-    remove_flow_touchpoint,
+    apply_target_cadence,
     resolve_touchpoint_reference,
     revise_flow_touchpoint,
     revise_flow_touchpoints,
@@ -423,47 +422,26 @@ def slack_events_email():
 
                 # Structural check FIRST, before assuming this is content
                 # feedback about one existing step: real reasoning against
-                # the flow's actual current steps decides whether this is
-                # asking to change the flow's SHAPE (add/remove a whole
-                # step) - see feedback_node._resolve_structural_request()'s
-                # docstring for why this can't be a keyword/regex check
-                # (e.g. "2: remove this line about X" is a content edit to
-                # step 2, not a request to remove step 2 - only genuine
-                # reasoning about what's actually being asked tells them
-                # apart).
-                structural = _resolve_structural_request(feedback_text, session["touchpoints"], session["flow_name"])
+                # the flow's actual current steps AND the full feedback
+                # history of this thread so far decides whether this is
+                # asking to change the flow's real SHAPE - see
+                # feedback_node._resolve_structural_request()'s docstring
+                # for why this can't be a keyword/regex check (e.g. "2:
+                # remove this line about X" is a content edit to step 2,
+                # not a request to remove step 2 - only genuine reasoning
+                # about what's actually being asked, with the full history
+                # of what's already been asked and done, tells them apart -
+                # including a later message referring back to an earlier
+                # one, e.g. "I said I want 2 emails").
+                prior_feedback_history = session.get("feedback_history", [])
+                structural = _resolve_structural_request(
+                    feedback_text, session["touchpoints"], session["flow_name"], feedback_history=prior_feedback_history,
+                )
 
-                if structural["action"] == "remove_step":
-                    try:
-                        result = remove_flow_touchpoint(
-                            session["flow_name"], session["touchpoints"], structural["remove_n"], feedback_text,
-                            feedback_history=session.get("feedback_history", []),
-                        )
-                    except ValueError as exc:
-                        post_message(bot_token, channel, thread_ts=thread_ts, text=str(exc))
-                        return
-                    save_email_session(
-                        channel, thread_ts,
-                        {
-                            "flow_name": session["flow_name"],
-                            "touchpoints": result["touchpoints"],
-                            "feedback_history": result["feedback_history"],
-                            "category": session_category,
-                        },
-                    )
-                    _repost_flow(
-                        bot_token, channel, thread_ts, session["flow_name"], result["touchpoints"],
-                        f"Removed step {result['removed_n']} - the flow is now {len(result['touchpoints'])} "
-                        "step(s). Reposting the updated sequence below.",
-                    )
-                    return
-
-                if structural["action"] == "add_step":
-                    result = add_flow_touchpoint(
-                        session["flow_name"], session["touchpoints"], feedback_text,
-                        structural["insert_after_n"], structural["new_channel"], structural["new_timing"],
-                        structural["new_intent"], feedback_history=session.get("feedback_history", []),
-                        category=session_category,
+                if structural["changed"]:
+                    result = apply_target_cadence(
+                        session["flow_name"], session["touchpoints"], structural["target_cadence"], feedback_text,
+                        feedback_history=prior_feedback_history, category=session_category,
                     )
                     save_email_session(
                         channel, thread_ts,
@@ -476,8 +454,8 @@ def slack_events_email():
                     )
                     _repost_flow(
                         bot_token, channel, thread_ts, session["flow_name"], result["touchpoints"],
-                        f"Added a new step {result['touchpoint']['n']} - the flow is now "
-                        f"{len(result['touchpoints'])} step(s). Reposting the updated sequence below.",
+                        f"Updated the flow - it's now {len(result['touchpoints'])} step(s). Reposting the "
+                        "updated sequence below.",
                     )
                     return
 

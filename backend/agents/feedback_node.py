@@ -861,97 +861,103 @@ def revise_flow_touchpoints(
 # resolve_touchpoint_reference() and _resolve_live_data_request() above.
 
 
+class _TargetStep(BaseModel):
+    n: int = Field(description="This step's position in the NEW sequence, starting at 1, contiguous, no gaps.")
+    channel: Literal["email", "whatsapp"] = Field(
+        description="The real channel for this step. andSons only ever sends on two real channels, email "
+        "and whatsapp - never propose anything else, there is no push/notification/SMS channel."
+    )
+    timing: str = Field(description="When this step fires, relative to the trigger or its neighbours.")
+    intent: str = Field(description="One line: what this step is for - distinct from every other step's.")
+    from_existing_n: Optional[int] = Field(
+        default=None,
+        description="If this step's real content should carry over UNCHANGED from the CURRENT flow (same "
+        "message, just possibly at a new position/number) - the CURRENT step number it comes from. Only "
+        "valid when this step's `channel` above is the SAME real channel that current step already has - "
+        "email content and whatsapp content are structurally different, so a channel conversion always "
+        "means fresh content, never a carry-over, even if nothing else about the step's purpose changed. "
+        "Null if this step is brand new, its channel just changed, or the feedback specifically asked to "
+        "change what it says. Reuse existing content whenever the feedback gives no real reason to touch it "
+        "- never regenerate a step nobody asked about just because the flow around it changed shape."
+    )
+
+
 class _StructuralRequest(BaseModel):
-    action: Literal["add_step", "remove_step", "none"] = Field(
-        description="'add_step' if this feedback asks to ADD a new touchpoint/message/step to the flow "
-        "(e.g. 'add a whatsapp reminder before step 3', 'can we get one more email after this one', "
-        "'insert an extra whatsapp touch in between'). 'remove_step' if it asks to DELETE/DROP/CUT an "
-        "existing step entirely, so the flow ends up with fewer steps (e.g. 'remove step 2', 'we don't "
-        "need the second whatsapp message', 'cut the last email'). 'none' for every other kind of feedback "
-        "- anything about wording, tone, an image, a button, a price, a fact, or any other change to an "
-        "EXISTING step's own content, where the number of steps in the flow stays the same."
+    changed: bool = Field(
+        description="Whether this feedback asks to change the flow's real SHAPE at all - add a step, "
+        "remove one, reorder, convert an existing step's channel, or reach any stated structural/"
+        "composition target (e.g. 'I want 2 emails in this flow', 'make it 3 steps'). False if it's just a "
+        "normal content edit to one existing step's own wording/tone/image/price/fact, where every step and "
+        "its channel stays exactly where it is - that case falls through to the regular per-step content-"
+        "edit path instead, so target_cadence should be left null."
     )
-    remove_n: Optional[int] = Field(
+    target_cadence: Optional[List[_TargetStep]] = Field(
         default=None,
-        description="If action is 'remove_step': which real step number (from the list below) should be "
-        "removed, resolved from what the feedback actually says (an explicit number, or which step's real "
-        "content it's clearly describing). Null otherwise.",
+        description="Only when changed=True: the flow's COMPLETE real touchpoint sequence as it should be "
+        "AFTER applying this feedback - not a diff, not one operation, the whole thing, reasoned freely "
+        "from everything you've been given (the flow's current real steps, and the FULL feedback history of "
+        "this thread so far, not just the latest message - a later message can refer back to something "
+        "asked earlier, e.g. 'I said I want 2 emails', and you have everything you need above to resolve "
+        "that against what's actually true right now). Handle any combination of add/remove/reorder/convert "
+        "in one pass; there's no fixed catalog of allowed operation types, just reason to the correct real "
+        "end state. Null when changed=False."
     )
-    insert_after_n: Optional[int] = Field(
-        default=None,
-        description="If action is 'add_step': the real step number the new step belongs immediately after, "
-        "resolved from what the feedback says (e.g. 'before step 3' means insert_after_n one less than "
-        "step 3's number; 'after the first email' means whichever step number that actually is; 'one more "
-        "at the end' means the flow's real last step number). Use 0 to insert before every existing step. "
-        "If the feedback doesn't pin down a position at all, use the flow's real last step number (append "
-        "to the end) - your own sound judgement, never left unresolved. Null only when action isn't "
-        "'add_step'.",
-    )
-    new_channel: Literal["email", "whatsapp", None] = Field(
-        default=None,
-        description="If action is 'add_step': the real channel for the new step - the one the feedback "
-        "names explicitly, or, if it doesn't name one, whichever real channel best fits the step's purpose "
-        "given the steps around it. andSons only has two real channels, email and whatsapp - there is no "
-        "push/notification/SMS channel, so if the feedback literally asks for one of those, pick whichever "
-        "of email/whatsapp best serves the same purpose instead. Null otherwise.",
-    )
-    new_timing: Optional[str] = Field(
-        default=None,
-        description="If action is 'add_step': when the new step should fire relative to its neighbours "
-        "(e.g. '+1 day after step 2', 'immediately before step 3') - state it, using your own sound "
-        "judgement if the feedback doesn't. Null otherwise.",
-    )
-    new_intent: Optional[str] = Field(
-        default=None,
-        description="If action is 'add_step': one line stating what this new step is actually FOR, "
-        "grounded in what the feedback asked for and distinct from every existing step's intent. Null "
-        "otherwise.",
-    )
-    reasoning: str = Field(description="One short line explaining the resolution (or why it's 'none').")
+    reasoning: str = Field(description="One short line explaining the resolution (or why changed=False).")
 
 
-def _resolve_structural_request(feedback_text: str, touchpoints: list, flow_name: str) -> dict:
+def _resolve_structural_request(feedback_text: str, touchpoints: list, flow_name: str, feedback_history: Optional[list] = None) -> dict:
     """Determines whether a reply in an already-generated flow's thread is
-    asking to change the flow's SHAPE (add or remove a whole step) rather
-    than edit one existing step's content - a real reasoning call against
-    the flow's actual current touchpoints, not keyword matching, same
-    principle as resolve_touchpoint_reference(). Fails closed to
-    action='none' on any error, so a classification failure just means this
-    feedback falls through to the existing content-edit path exactly as it
-    did before this existed - never a crash, never a silently-dropped
-    request."""
+    asking to change the flow's real SHAPE, and if so, what the flow's
+    complete real touchpoint sequence should look like afterwards - one
+    holistic reasoning call against the flow's actual current touchpoints
+    AND the full feedback history of this thread so far (not just the
+    latest message in isolation), same principle as
+    resolve_touchpoint_reference() and _resolve_live_data_request(): no
+    fixed catalog of named operations to special-case in code, the model
+    reasons to the real target shape and code just diffs old vs. new to
+    know what needs regenerating. Fails closed to changed=False on any
+    error, so a classification failure just means this feedback falls
+    through to the existing content-edit path exactly as it did before
+    this existed - never a crash, never a silently-dropped request."""
     lines = [f"- Step {t['n']} ({t['channel']}, {t['timing']}): {_touchpoint_content_summary(t)}" for t in touchpoints]
-    llm = get_llm("HEAD_OF_CRM", temperature=0.0)  # a classification task, not creative writing
+    history_text = (
+        "\n".join(f"- {h}" for h in feedback_history) if feedback_history
+        else "(none yet - this is the first feedback on this flow)"
+    )
+    llm = get_llm("HEAD_OF_CRM", temperature=0.0)  # a reasoning/classification task, not creative writing
     structured_llm = llm.with_structured_output(_StructuralRequest)
     system_text = (
         f"This is real human feedback on the andSons '{flow_name}' flow, which currently has these real "
-        "steps:\n" + "\n".join(lines) + "\n\nDetermine whether it's asking to change how many steps this "
-        "flow has (add a new one, or remove an existing one) versus just changing something about an "
-        "existing step's own content."
+        "steps:\n" + "\n".join(lines) + "\n\nFULL FEEDBACK HISTORY ON THIS FLOW SO FAR, IN ORDER (what was "
+        "asked, and what was actually done about it - a later message can reference this, e.g. 'I said...' "
+        "or 'like I asked before'; use it to reason correctly rather than starting from scratch each time):\n"
+        + history_text + "\n\nDetermine whether the NEW feedback below asks to change the flow's real shape, "
+        "and if so, reason out its complete correct real touchpoint sequence afterwards."
     )
     escaped_feedback = feedback_text.replace("{", "{{").replace("}", "}}")
-    human_text = f"Feedback: {escaped_feedback}"
+    human_text = f"New feedback: {escaped_feedback}"
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
     chain = prompt | structured_llm
     result, last_exc = invoke_with_retry(chain, label="Structural-request resolution call")
     if result is None:
         logger.warning("Structural-request resolution failed (%s) - falling through to the content-edit path.", last_exc)
-        return {"action": "none", "remove_n": None, "insert_after_n": None, "new_channel": None, "new_timing": None, "new_intent": None, "reasoning": "resolution unavailable"}
+        return {"changed": False, "target_cadence": None, "reasoning": "resolution unavailable"}
 
     resolved = result.model_dump()
-    # Same real tool-calling quirk documented on _resolve_live_data_request
-    # above (Groq sometimes sets the primary field right but drops a
-    # dependent one on the same call): never act on an add/remove decision
-    # missing the field it actually needs to be carried out safely. Falling
-    # back to 'none' degrades this to the existing content-edit path (which
-    # has its own clarifying-question fallback) rather than removing the
-    # wrong step or guessing a channel nobody asked for.
-    if resolved["action"] == "remove_step" and resolved["remove_n"] is None:
-        logger.warning("Structural resolution said remove_step but didn't resolve which step - falling back to the content-edit path.")
-        resolved["action"] = "none"
-    elif resolved["action"] == "add_step" and (resolved["new_channel"] is None or resolved["insert_after_n"] is None):
-        logger.warning("Structural resolution said add_step but didn't resolve where/what channel - falling back to the content-edit path.")
-        resolved["action"] = "none"
+    if resolved["changed"] and not resolved["target_cadence"]:
+        logger.warning("Structural resolution said changed=True but returned no target cadence - falling back to the content-edit path.")
+        resolved["changed"] = False
+        resolved["target_cadence"] = None
+    elif resolved["changed"]:
+        # Never trust step numbering blindly - a model tool-calling quirk
+        # (documented on _resolve_live_data_request above) can produce
+        # gaps/duplicates on an otherwise-good call. Renumber to a clean
+        # 1..N sequence in whatever order it was returned rather than
+        # reject a real, usable answer over a numbering slip.
+        ordered = sorted(resolved["target_cadence"], key=lambda s: s["n"])
+        for i, step in enumerate(ordered, start=1):
+            step["n"] = i
+        resolved["target_cadence"] = ordered
     return resolved
 
 
@@ -963,7 +969,7 @@ def _generate_and_sweep(
     PREVIOUS DRAFT of its own to ground a revision against (a brand-new
     step being added, not an edit to one that already exists) - same
     MAX_RETRIES correction-loop principle used everywhere else in this
-    file, factored out here so add_flow_touchpoint() doesn't hand-roll a
+    file, factored out here so apply_target_cadence() doesn't hand-roll a
     fourth copy of the same retry logic already written for
     _run_pipeline_loop/run_flow_pipeline/revise_flow_touchpoint. Returns
     (touchpoint, sweep_result)."""
@@ -998,112 +1004,102 @@ def _generate_and_sweep(
     return touchpoint, sweep
 
 
-def add_flow_touchpoint(
+def apply_target_cadence(
     flow_name: str,
     touchpoints: list,
+    target_cadence: list,
     feedback: str,
-    insert_after_n: int,
-    channel: str,
-    timing: str,
-    intent: str,
     feedback_history: Optional[list] = None,
     category: str = DEFAULT_CATEGORY,
 ) -> dict:
-    """Human-in-the-loop ADDITION of a whole new step to an already-generated
-    flow - the counterpart to revise_flow_touchpoint() (which only ever
-    edits one existing step's content) for feedback that changes the flow's
-    real shape instead. `insert_after_n`/`channel`/`timing`/`intent` are the
-    Head-of-CRM-style judgement call already made by
-    _resolve_structural_request() - reasoned from the real feedback and the
-    flow's real current touchpoints, never a fixed rule.
+    """Human-in-the-loop RESHAPE of an already-generated flow to a new
+    target sequence - the single, general counterpart to
+    revise_flow_touchpoint() (which only ever edits one existing step's
+    content in place) for feedback that changes the flow's real shape
+    instead: adding, removing, reordering, or converting a step's channel,
+    in any combination, in one pass. `target_cadence` is
+    _resolve_structural_request()'s own real reasoning (given the flow's
+    current steps AND the full feedback history of this thread) about what
+    the complete sequence should be - this function does no shape
+    reasoning of its own, it only diffs old vs. new and executes:
 
-    Steps at or after the insertion point are renumbered up by one; the new
-    step is generated fresh (same generate_touchpoint() every other step in
-    this codebase goes through) with the steps genuinely before it as its
-    only prior context, then goes through the same Sweeper retry loop as
-    every other touchpoint. Steps that already existed are never
-    regenerated - only their `n` may shift."""
+    - A target step with `from_existing_n` set carries its real content
+      over UNCHANGED (only its n/timing/intent labels may move) - never
+      regenerated, so a step nobody asked about never drifts.
+    - A target step with no `from_existing_n` is generated fresh (the same
+      generate_touchpoint() -> Sweeper retry loop every other touchpoint in
+      this codebase goes through), with whatever real steps precede it IN
+      THE NEW ORDER as its only prior context - a mix of carried-over and
+      newly-written steps, exactly as the final flow will actually read.
+    - Any current step whose number isn't reused by any target step is
+      implicitly dropped."""
     feedback_history = feedback_history or []
-    ordered = sorted(touchpoints, key=lambda t: t["n"])
-    insert_after_n = max(0, min(insert_after_n, len(ordered)))
-    new_n = insert_after_n + 1
-    # timing/intent quality-only null-guards (channel/insert_after_n are
-    # already required non-null upstream by _resolve_structural_request's
-    # own fallback, since guessing those wrong would touch the wrong step
-    # or channel - these two only affect how the prompt reads, so a plain
-    # placeholder that defers to the real feedback text below is safe).
-    timing = timing or "positioned to fit naturally around the steps next to it"
-    intent = intent or "Address exactly what the reviewer's real request (below) asks for in this new step."
+    current_by_n = {t["n"]: t for t in touchpoints}
+    ordered_target = sorted(target_cadence, key=lambda s: s["n"])
 
-    renumbered = [
-        ({**t, "n": t["n"] + 1} if t["n"] >= new_n else t)
-        for t in ordered
-    ]
+    # Pass 1: lay out the final sequence - carried-over steps get their
+    # real content immediately, regenerated steps start as placeholders
+    # (content=None) so pass 2 can compute other_heroes/prior context from
+    # the real, final shape of the flow as it fills in, same convention
+    # _heroes_from_touchpoints already relies on elsewhere in this file.
+    new_touchpoints = []
+    for target in ordered_target:
+        source = current_by_n.get(target.get("from_existing_n")) if target.get("from_existing_n") else None
+        # Defensive, not just a prompt instruction: email and whatsapp
+        # content are structurally different shapes (hook_line/cta_text vs.
+        # subject/hero/cta_position/...) - never honor a carry-over across
+        # a channel change even if the model marked one, or the OLD
+        # channel's content would silently ship unconverted.
+        if source is not None and source.get("channel") != target["channel"]:
+            source = None
+        if source is not None:
+            new_touchpoints.append({**source, "n": target["n"], "timing": target["timing"], "intent": target["intent"]})
+        else:
+            new_touchpoints.append({
+                "n": target["n"], "channel": target["channel"], "timing": target["timing"],
+                "intent": target["intent"], "content": None, "rendered_text": None, "hero": None,
+            })
 
-    prior_summaries = [_touchpoint_summary(t) for t in renumbered if t["n"] < new_n]
-    step = {"n": new_n, "channel": channel, "timing": timing, "intent": intent}
-    other_heroes = _heroes_from_touchpoints(renumbered, new_n)
+    # Pass 2: generate every placeholder, front to back, so each one's
+    # prior context is the real (carried-over or already-regenerated)
+    # content immediately before it.
+    generated_ns = []
+    for i, tp in enumerate(new_touchpoints):
+        if tp.get("content") is not None or tp.get("generation_failed"):
+            continue  # real carried-over content - never regenerated
+        prior_summaries = [_touchpoint_summary(t) for t in new_touchpoints[:i] if t.get("content") is not None]
+        step = {"n": tp["n"], "channel": tp["channel"], "timing": tp["timing"], "intent": tp["intent"]}
+        other_heroes = _heroes_from_touchpoints(new_touchpoints, tp["n"])
+        correction = (
+            "This step is being written/rewritten because a real reviewer's feedback on this flow requires "
+            f"it. Their actual request: {feedback.strip()}\n\n"
+            "Write this step's content fully fresh for its real place in the sequence (see the prior-steps "
+            "context you were given) - never reference its step number in the copy itself, just write for "
+            "this specific moment in the customer's journey."
+        )
+        new_touchpoint, sweep = _generate_and_sweep(
+            flow_name, step, prior_summaries, correction, other_heroes, human_feedback=feedback, category=category,
+        )
+        new_touchpoint["passed"] = sweep["pass"]
+        new_touchpoint["sweeper_reasons"] = sweep["reasons"]
+        new_touchpoint["sweeper_severity"] = sweep["severity"]
+        new_touchpoints[i] = new_touchpoint
+        generated_ns.append(tp["n"])
+        if sweep["pass"]:
+            distill_and_save_rule(feedback, new_touchpoint.get("rendered_text") or "")
 
-    correction = (
-        "This is a brand-new step being ADDED to the flow because a real reviewer asked for it. Their "
-        f"actual request: {feedback.strip()}\n\n"
-        "Write this step's content fully fresh for its real place in the sequence (see the prior-steps "
-        "context you were given) - never reference its step number in the copy itself, just write for "
-        "this specific moment in the customer's journey."
-    )
-
-    new_touchpoint, sweep = _generate_and_sweep(
-        flow_name, step, prior_summaries, correction, other_heroes, human_feedback=feedback, category=category,
-    )
-    new_touchpoint["passed"] = sweep["pass"]
-    new_touchpoint["sweeper_reasons"] = sweep["reasons"]
-    new_touchpoint["sweeper_severity"] = sweep["severity"]
-
-    if sweep["pass"]:
-        distill_and_save_rule(feedback, new_touchpoint.get("rendered_text") or "")
-
-    updated_touchpoints = sorted(renumbered + [new_touchpoint], key=lambda t: t["n"])
-    return {
-        "flow_name": flow_name,
-        "action": "added",
-        "touchpoint": new_touchpoint,
-        "touchpoints": updated_touchpoints,
-        "feedback_history": feedback_history + [f"[added step {new_n}] {feedback}"],
-    }
-
-
-def remove_flow_touchpoint(
-    flow_name: str,
-    touchpoints: list,
-    remove_n: int,
-    feedback: str,
-    feedback_history: Optional[list] = None,
-) -> dict:
-    """Human-in-the-loop REMOVAL of a whole step from an already-generated
-    flow. No regeneration needed - the remaining steps' real content
-    already stands on its own (no step's copy names its own step number),
-    so this is a pure structural edit: drop the step, renumber what's left
-    to stay contiguous from 1. Raises ValueError (same pattern as
-    revise_flow_touchpoint's unknown-step case) if the step doesn't exist,
-    or if it's the only step left - a flow can't be emptied out entirely
-    this way."""
-    feedback_history = feedback_history or []
-    ordered = sorted(touchpoints, key=lambda t: t["n"])
-    if not any(t["n"] == remove_n for t in ordered):
-        raise ValueError(f"No touchpoint {remove_n} in this flow (has {[t['n'] for t in ordered]}).")
-    if len(ordered) <= 1:
-        raise ValueError("Can't remove the only remaining step - a flow needs at least one.")
-
-    remaining = [t for t in ordered if t["n"] != remove_n]
-    renumbered = [
-        ({**t, "n": i} if t["n"] != i else t)
-        for i, t in enumerate(remaining, start=1)
-    ]
+    old_ns = sorted(current_by_n.keys())
+    kept_ns = sorted(t.get("from_existing_n") for t in ordered_target if t.get("from_existing_n"))
+    removed_ns = [n for n in old_ns if n not in kept_ns]
+    summary_bits = []
+    if generated_ns:
+        summary_bits.append(f"wrote step(s) {generated_ns}")
+    if removed_ns:
+        summary_bits.append(f"removed step(s) {removed_ns}")
+    change_summary = "; ".join(summary_bits) or "reordered with no content changes"
 
     return {
         "flow_name": flow_name,
-        "action": "removed",
-        "removed_n": remove_n,
-        "touchpoints": renumbered,
-        "feedback_history": feedback_history + [f"[removed step {remove_n}] {feedback}"],
+        "touchpoints": new_touchpoints,
+        "feedback_history": feedback_history + [f"[restructured: {change_summary}] {feedback}"],
     }

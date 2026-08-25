@@ -865,11 +865,11 @@ class _StructuralRequest(BaseModel):
     action: Literal["add_step", "remove_step", "none"] = Field(
         description="'add_step' if this feedback asks to ADD a new touchpoint/message/step to the flow "
         "(e.g. 'add a whatsapp reminder before step 3', 'can we get one more email after this one', "
-        "'insert a push notification in between'). 'remove_step' if it asks to DELETE/DROP/CUT an existing "
-        "step entirely, so the flow ends up with fewer steps (e.g. 'remove step 2', 'we don't need the "
-        "push notification', 'cut the last email'). 'none' for every other kind of feedback - anything "
-        "about wording, tone, an image, a button, a price, a fact, or any other change to an EXISTING "
-        "step's own content, where the number of steps in the flow stays the same."
+        "'insert an extra whatsapp touch in between'). 'remove_step' if it asks to DELETE/DROP/CUT an "
+        "existing step entirely, so the flow ends up with fewer steps (e.g. 'remove step 2', 'we don't "
+        "need the second whatsapp message', 'cut the last email'). 'none' for every other kind of feedback "
+        "- anything about wording, tone, an image, a button, a price, a fact, or any other change to an "
+        "EXISTING step's own content, where the number of steps in the flow stays the same."
     )
     remove_n: Optional[int] = Field(
         default=None,
@@ -887,11 +887,13 @@ class _StructuralRequest(BaseModel):
         "to the end) - your own sound judgement, never left unresolved. Null only when action isn't "
         "'add_step'.",
     )
-    new_channel: Literal["email", "whatsapp", "push", None] = Field(
+    new_channel: Literal["email", "whatsapp", None] = Field(
         default=None,
         description="If action is 'add_step': the real channel for the new step - the one the feedback "
         "names explicitly, or, if it doesn't name one, whichever real channel best fits the step's purpose "
-        "given the steps around it. Null otherwise.",
+        "given the steps around it. andSons only has two real channels, email and whatsapp - there is no "
+        "push/notification/SMS channel, so if the feedback literally asks for one of those, pick whichever "
+        "of email/whatsapp best serves the same purpose instead. Null otherwise.",
     )
     new_timing: Optional[str] = Field(
         default=None,

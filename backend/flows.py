@@ -76,6 +76,18 @@ channel exists. So:
     replenishment_dunning, aov_growth, results_milestone, quiz_recovery)
     keep their original knowledge-base-derived structure, channel-corrected
     to push only.
+
+OVERRIDE (2026-08-25): Thalia (the real Head of CRM, i.e. the actual human
+this system's own agent role is modelled on) gave explicit, direct
+instruction in Slack that push notifications are never a valid step in any
+andSons flow - "we only do whatsapp and email" - full stop, superseding the
+MoEngage-campaigns-search audit above. That audit was real data, but it
+reflects what the live account happens to contain, not what the actual CRM
+lead has decided the channel mix should be going forward; her explicit word
+on her own team's channels is the higher-authority source. Every "push"
+step below is corrected back to "whatsapp" accordingly, and
+head_of_crm_agent.py's cadence Literal no longer allows the model to
+propose push for a new/synthesized flow either.
 """
 
 FLOWS = [
@@ -110,10 +122,12 @@ FLOWS = [
         "allow_price": False,
         "allow_stat": False,
         # Real live match: MoEngage flow "No show consultation" - exactly
-        # ONE real campaign ("PN #1: No show nudge", channel PUSH). Matched
-        # exactly rather than kept as an invented multi-step sequence.
+        # ONE real campaign ("PN #1: No show nudge", originally channel PUSH
+        # per the live audit, channel-corrected to whatsapp per the
+        # 2026-08-25 override above). Matched exactly rather than kept as an
+        # invented multi-step sequence.
         "cadence": [
-            {"n": 1, "channel": "push", "timing": "immediate", "intent": "No judgement, life happens - a short nudge that the doctor is ready when he is."},
+            {"n": 1, "channel": "whatsapp", "timing": "immediate", "intent": "No judgement, life happens - a short nudge that the doctor is ready when he is."},
         ],
     },
     {
@@ -148,7 +162,7 @@ FLOWS = [
         "allow_stat": True,
         "cadence": [
             {"n": 1, "channel": "email", "timing": "Day 30", "intent": "Normalise shedding and no visible change yet, reinforce consistency."},
-            {"n": 2, "channel": "push", "timing": "Day 45", "intent": "Short check-in nudge, still early, keep going."},
+            {"n": 2, "channel": "whatsapp", "timing": "Day 45", "intent": "Short check-in nudge, still early, keep going."},
             {"n": 3, "channel": "email", "timing": "Day 55", "intent": "Reinforce the real results timeline, first changes often around Month 3."},
             {"n": 4, "channel": "email", "timing": "Day 75", "intent": "Closing encouragement as he nears the results window."},
         ],
@@ -166,7 +180,7 @@ FLOWS = [
         "allow_stat": False,
         "cadence": [
             {"n": 1, "channel": "email", "timing": "+1h", "intent": "De-stigmatise the consult - private, free, 10-15 minutes with a licensed doctor."},
-            {"n": 2, "channel": "push", "timing": "+24h", "intent": "Short nudge if he hasn't booked yet."},
+            {"n": 2, "channel": "whatsapp", "timing": "+24h", "intent": "Short nudge if he hasn't booked yet."},
             {"n": 3, "channel": "email", "timing": "+2 days", "intent": "Final reminder, then exit the flow."},
         ],
     },
@@ -185,7 +199,7 @@ FLOWS = [
         # different touchpoints fire depending on which sub-event happens.
         "cadence": [
             {"n": 1, "channel": "email", "timing": "-3 days before dispatch (renewal reminder)", "intent": "Calm heads-up that the next delivery is coming, nothing to do unless he wants to change something."},
-            {"n": 2, "channel": "push", "timing": "on payment failure", "intent": "Practical, judgement-free nudge that a payment didn't go through."},
+            {"n": 2, "channel": "whatsapp", "timing": "on payment failure", "intent": "Practical, judgement-free nudge that a payment didn't go through."},
             {"n": 3, "channel": "email", "timing": "on payment failure", "intent": "Same payment-fail case, fuller detail and a clear fix-it link."},
             {"n": 4, "channel": "email", "timing": "on pause or skip", "intent": "Acknowledge the pause/skip plainly, no guilt, door open to resume."},
         ],
@@ -222,7 +236,7 @@ FLOWS = [
         # sequence is visible, labelled with its real trigger condition.
         "cadence": [
             {"n": 1, "channel": "email", "timing": "on trigger (30+ days adherent)", "intent": "Suggest building around the serum with the Trio or Kit as a natural next step, never a hard upsell."},
-            {"n": 2, "channel": "push", "timing": "if he browsed the Trio/Kit without buying", "intent": "Short, light nudge back to what he was already looking at."},
+            {"n": 2, "channel": "whatsapp", "timing": "if he browsed the Trio/Kit without buying", "intent": "Short, light nudge back to what he was already looking at."},
         ],
     },
     {
@@ -261,7 +275,7 @@ FLOWS = [
         "allow_stat": True,
         "cadence": [
             {"n": 1, "channel": "email", "timing": "Month 4", "intent": "Reinforce real progress, proud tone, invite him to share it."},
-            {"n": 2, "channel": "push", "timing": "Month 4", "intent": "Short warm congratulations nudge."},
+            {"n": 2, "channel": "whatsapp", "timing": "Month 4", "intent": "Short warm congratulations nudge."},
             {"n": 3, "channel": "email", "timing": "Month 5", "intent": "Continue the momentum, light UGC/referral invite."},
         ],
     },
@@ -278,7 +292,7 @@ FLOWS = [
         "allow_stat": False,
         "cadence": [
             {"n": 1, "channel": "email", "timing": "+1h", "intent": "Recover the intent gently - answers are saved, finishing takes about two minutes."},
-            {"n": 2, "channel": "push", "timing": "+24h", "intent": "Short nudge if the quiz is still unfinished."},
+            {"n": 2, "channel": "whatsapp", "timing": "+24h", "intent": "Short nudge if the quiz is still unfinished."},
             {"n": 3, "channel": "email", "timing": "+3 days", "intent": "Final low-pressure reminder, then exit the flow."},
         ],
     },

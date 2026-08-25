@@ -42,6 +42,21 @@ shipping", a % off) that isn't grounded in what you're actually given - if the f
 doesn't allow prices or offers, the offer angle is a genuine non-monetary motivator (urgency-free \
 reassurance, timing, a real product benefit), never an invented deal to compensate for that constraint.
 
+NEVER STATE A NUMBER YOU WEREN'T GIVEN (explicit correction, 2026-08-25, from Thalia after seeing a brief \
+that invented "from 51.5% to at least 65%" out of nowhere): the objective, KPI, offer angle, and success \
+threshold must NEVER contain a specific percentage, conversion rate, target number, or statistic unless \
+that exact figure appears verbatim in the REAL BUSINESS SIGNAL or THE PERSON'S OWN REQUEST below. No \
+real number given means no number in the brief, full stop - do not estimate one, do not compute a \
+plausible-sounding target off it, do not restate an industry-typical rate as if it were this flow's own \
+data. Describe the objective/threshold qualitatively instead (e.g. "meaningfully increase the share of \
+recovered users who purchase a plan", "a clear, visible lift over where this flow sits today") - it is \
+always better to be vague and honest than precise and made up.
+
+CHANNELS - EMAIL AND WHATSAPP ONLY: andSons sends on exactly two channels, email and WhatsApp. Push \
+notifications are not a real channel this brand uses (explicit instruction from Thalia, the real Head of \
+CRM: "we only do whatsapp and email") - never propose a push/notification step in the cadence, regardless \
+of what any older baseline or reference material might suggest.
+
 CADENCE - THIS IS YOUR CALL, NOT A FIXED TEMPLATE: the baseline cadence below (when this is a known flow) \
 is a reference starting point proven to work, not a rule you're bound to. Decide the actual real \
 touchpoint count, channel per step, timing, and per-step intent yourself, reasoning from three inputs, in \
@@ -58,8 +73,8 @@ its own sake" is not a goal.
 For a flow with NO real baseline (a newly-described problem with nothing in the existing catalog), decide \
 the whole cadence yourself from the real signal, the audience, and sound CRM judgement - normally 2 to 5 \
 touchpoints for a lifecycle send, escalating gently, never pushy, matching how the other real andSons \
-flows are paced. Every step needs a channel (email, whatsapp, or push), a timing (relative, e.g. "+2 \
-days", or a real trigger condition), and a one-line intent distinct from every other step's.
+flows are paced. Every step needs a channel (email or whatsapp - see CHANNELS below), a timing (relative, \
+e.g. "+2 days", or a real trigger condition), and a one-line intent distinct from every other step's.
 
 THE PERSON'S OWN REQUEST, VERBATIM (read it for any explicit structural ask before deciding cadence):
 {raw_request}
@@ -80,12 +95,15 @@ _NO_SIGNAL_TEXT = (
 )
 _NO_RAW_REQUEST_TEXT = "(no specific structural request on record - decide cadence from the baseline, data, and judgement alone)"
 
-_VALID_CHANNELS = ("email", "whatsapp", "push")
+_VALID_CHANNELS = ("email", "whatsapp")
 
 
 class TouchpointPlan(BaseModel):
     n: int = Field(description="This step's position in the sequence, starting at 1.")
-    channel: Literal["email", "whatsapp", "push"] = Field(description="Which real channel this step sends on.")
+    channel: Literal["email", "whatsapp"] = Field(
+        description="Which real channel this step sends on. Only email and whatsapp are real andSons "
+        "channels - push notifications are never valid, do not propose one."
+    )
     timing: str = Field(description="When this step fires, relative to the trigger (e.g. '+2 days') or a "
                          "real condition (e.g. 'on payment failure').")
     intent: str = Field(description="One line: what this specific step is for - distinct from every "
@@ -93,13 +111,20 @@ class TouchpointPlan(BaseModel):
 
 
 class CampaignBrief(BaseModel):
-    objective: str = Field(description="The single concrete commercial objective for this campaign.")
+    objective: str = Field(description="The single concrete commercial objective for this campaign. Never "
+                            "include a specific percentage or numeric target unless that exact figure was "
+                            "given to you in the real signal or the person's own request - describe it "
+                            "qualitatively otherwise.")
     kpi: str = Field(description="The target metric this campaign is accountable to (revenue contribution, "
-                      "conversion rate, reactivation count, etc.) - real and specific to this flow's goal.")
+                      "conversion rate, reactivation count, etc.) - real and specific to this flow's goal. "
+                      "Name the metric itself, never a specific number/percentage/target for it unless that "
+                      "exact figure was given to you above.")
     segment: str = Field(description="The precise audience segment this campaign targets.")
     lifecycle_stage: str = Field(description="Where this segment sits in the patient journey right now.")
     offer_angle: str = Field(description="The primary angle/motivator the Copywriter should lead with.")
-    success_threshold: str = Field(description="What 'this worked' looks like for this specific send.")
+    success_threshold: str = Field(description="What 'this worked' looks like for this specific send - "
+                                    "described qualitatively unless a real baseline/target number was given "
+                                    "to you above, in which case use that exact number and no other.")
     cadence: List[TouchpointPlan] = Field(
         description="The real touchpoint plan you decided on, in order (n=1, 2, 3...) - see the CADENCE "
         "instructions above for how to decide this. At least one touchpoint, no gaps or duplicate n values."
@@ -239,9 +264,12 @@ DESIGN RULES (same as every real flow, non-negotiable):
 that track), "otc" if it's about an approved OTC product (Redensyl serum, Trio, Kit - only these, only \
 their real prices, never invented ones), "neutral" if neither product nor price is the point.
 - cadence: 2 to 5 touchpoints for a normal lifecycle send (fewer for something naturally single-touch like \
-a no-show nudge), escalating gently, each with a distinct intent, each on a real channel (email, whatsapp, \
-push) and a real relative timing or trigger condition - unless the person's own request above states an \
-explicit count/channel mix, which overrides this and must be followed exactly.
+a no-show nudge), escalating gently, each with a distinct intent, each on a real channel (email or \
+whatsapp only - andSons has no push channel) and a real relative timing or trigger condition - unless the \
+person's own request above states an explicit count/channel mix, which overrides this and must be \
+followed exactly.
+- never a specific percentage, conversion rate, or numeric target anywhere in this flow's fields unless \
+that exact figure appears verbatim in the real signal below.
 - cta: verb + "My" + noun convention, matching the real flow catalog's register.
 - Never a fabricated discount, promo code, or urgency device - if there's a genuine reason to offer a real \
 approved OTC price, say so (allow_price=true); otherwise allow_price is false and the angle is a real, \

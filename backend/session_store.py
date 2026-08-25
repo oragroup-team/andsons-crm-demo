@@ -62,6 +62,19 @@ _ANALYTICS_HISTORY_LIMIT = 6
 # relying on that inference. Defaults to this app's own Cloud Run project.
 _DEFAULT_PROJECT = "crm-mail-automation-dev"
 
+# Real bug this scope fixes (found live, minutes after the REST rewrite
+# below shipped): google.auth.default() with NO scopes argument works fine
+# locally against a developer's own `gcloud auth application-default
+# login` credentials (those already carry a broad default scope set), but
+# in Cloud Run - where GOOGLE_APPLICATION_CREDENTIALS points at the
+# service-account JSON key instead - it attaches NO scope at all to
+# service-account credentials unless one is explicitly requested,
+# producing "invalid_scope: Invalid OAuth scope or ID token audience
+# provided" on every single call. The gRPC client library used to attach
+# this internally; talking to the REST API directly means this app has to
+# ask for it itself now.
+_FIRESTORE_SCOPES = ["https://www.googleapis.com/auth/datastore"]
+
 _session: Optional[AuthorizedSession] = None
 _base_url: Optional[str] = None
 
@@ -70,7 +83,7 @@ def _get_session() -> AuthorizedSession:
     global _session, _base_url
     if _session is None:
         project = os.environ.get("FIRESTORE_PROJECT_ID", _DEFAULT_PROJECT)
-        credentials, _ = google.auth.default()
+        credentials, _ = google.auth.default(scopes=_FIRESTORE_SCOPES)
         _session = AuthorizedSession(credentials)
         _base_url = f"https://firestore.googleapis.com/v1/projects/{project}/databases/(default)/documents"
     return _session

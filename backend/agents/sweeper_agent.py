@@ -84,6 +84,12 @@ any wording check - never fail an email for a baked-in headline's length or phra
 - The hero block must appear first, before Subject/Preheader, when present.
 - At most one hero per email (this is enforced upstream, but flag it if you somehow see more than one).
 
+A "[CURRENT STYLING - already applied...]" line, when present (also before Subject), is the same kind of \
+internal-only annotation as the HERO IMAGE block - it records styling already applied in an earlier round \
+(background colour, CTA position, step marker style, address visibility, italic body) so it survives into \
+this revision's context. It is never shown to the customer and never itself a defect - do not flag its \
+presence, and do not treat what it lists as something the candidate needs to visibly "prove" in the copy.
+
 B) POLISH & CORRECTNESS:
 - Brand name written exactly "andSons" (never "&Sons").
 - Sentence case throughout; no awkward auto-text ("Dear there,").

@@ -389,6 +389,14 @@ class EmailContent(BaseModel):
         "described, not a memorised mapping from stock phrases to hex codes. This is the whole page's "
         "background - the email template's own real, brand-owned canvas, not any third-party app's UI.",
     )
+    body_style: Literal["normal", "italic"] = Field(
+        default="normal",
+        description="Leave 'normal' by default. Set to 'italic' ONLY when a human reviewer's feedback "
+        "explicitly asks for italic/slanted text styling on the email's body copy (the greeting, opening "
+        "lines, and gentle truth line - not the CTA button, the what_happens_next list, or the footer, "
+        "which each keep their own look regardless of this field). This is a real, renderable field - "
+        "never write a `note` saying italic isn't supported, just set this directly.",
+    )
     hero: Literal[tuple(HERO_KEYS)] = Field(
         description="Which hero image to use: one of the approved bank keys, or 'none' for a deliberate "
         "text-first email."
@@ -421,7 +429,8 @@ class EmailContent(BaseModel):
         "couldn't do it literally. This field must NEVER fire just because a requested visual or content "
         "change has no dedicated field of its own below - an aesthetic or content request is not a hard "
         "rule conflict, it's a real, buildable change: check first whether an existing field (background_"
-        "color, cta_position, step_marker_style, include_address, or a plain edit to any text field) can "
+        "color, cta_position, step_marker_style, include_address, body_style, or a plain edit to any text "
+        "field) can "
         "genuinely represent what they asked for, and if one can, set it directly - never write a note "
         "about something you could have just done. Never use this field to comment on, re-explain, or "
         "re-litigate a past feedback round - those are already settled.",
@@ -528,6 +537,32 @@ def render_email(content: EmailContent, first_name: str, hero_info: Optional[dic
         else:
             headline_part = ""
         parts.append(f'[HERO IMAGE: {description}{headline_part}]')
+        parts.append("")
+
+    # Real gap this closes (found 2026-08-26, adding body_style below):
+    # none of the "sticky" styling fields below show up ANYWHERE in this
+    # plain-text render, which is the ONLY form of the previous draft a
+    # later, unrelated revision round actually sees (previous_draft is
+    # rendered_text, not the structured EmailContent) - so a background
+    # colour, repositioned CTA, custom step markers, hidden address, or
+    # italic body a reviewer asked for in one round had no way to survive
+    # into the next round's context, and a later edit could silently
+    # revert it without anyone asking for that. Only non-default values are
+    # listed, same principle as the HERO IMAGE annotation above: surface
+    # state that isn't otherwise visible in flowing prose.
+    style_notes = []
+    if content.background_color:
+        style_notes.append(f"background colour {content.background_color}")
+    if content.cta_position:
+        style_notes.append(f"CTA button at horizontal position {content.cta_position:.2f} (0.0=left, 1.0=right)")
+    if content.step_marker_style:
+        style_notes.append(f"step markers: {content.step_marker_style}")
+    if not content.include_address:
+        style_notes.append("address line hidden")
+    if content.body_style == "italic":
+        style_notes.append("body copy styled italic")
+    if style_notes:
+        parts.append(f"[CURRENT STYLING - already applied, keep unless this round's feedback changes it: {'; '.join(style_notes)}]")
         parts.append("")
 
     parts += [

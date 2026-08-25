@@ -9,9 +9,15 @@ steps-block bg #faf7f2) so the Slack preview and the web demo's EmailCard
 match, not two independently-guessed designs.
 
 Pure Pillow (no headless browser) - deliberately, to keep the Docker image
-light on Cloud Run. The bundled variable font (static/fonts/Roboto-Variable.ttf,
-Apache-2.0) is used at fixed weights via set_variation_by_name rather than
-relying on the deploy environment happening to have a system font installed.
+light on Cloud Run. The bundled variable fonts (static/fonts/Roboto-Variable.ttf
+and Roboto-Italic-Variable.ttf, OFL-1.1 - Roboto's real current license,
+googlefonts/roboto-classic) are used at fixed weights via
+set_variation_by_name rather than relying on the deploy environment
+happening to have a system font installed. The italic file is Roboto's
+own separate upright-vs-italic variable font (no slant/italic axis exists
+in the upright file - confirmed directly, not assumed), added 2026-08-26
+per a real reviewer's ask for italic body copy that the EmailContent
+schema had no way to represent at all until content["body_style"] below.
 
 Renders content only - never invents copy. Every string drawn here comes
 from the same EmailContent the Copywriter already produced and the Sweeper
@@ -29,6 +35,7 @@ from image_bank import HERO_BANK
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_PATH = os.path.join(BACKEND_DIR, "static", "fonts", "Roboto-Variable.ttf")
+FONT_PATH_ITALIC = os.path.join(BACKEND_DIR, "static", "fonts", "Roboto-Italic-Variable.ttf")
 HERO_DIR = os.path.join(BACKEND_DIR, "static", "hero_images")
 
 # --- Brand tokens, copied from frontend/src/index.css :root ------------
@@ -76,10 +83,15 @@ def _s(px: int) -> int:
     return px * SCALE
 
 
-def _font(size: int, weight: str = "Regular") -> ImageFont.FreeTypeFont:
-    f = ImageFont.truetype(FONT_PATH, size)
+def _font(size: int, weight: str = "Regular", italic: bool = False) -> ImageFont.FreeTypeFont:
+    f = ImageFont.truetype(FONT_PATH_ITALIC if italic else FONT_PATH, size)
     try:
-        f.set_variation_by_name(weight)
+        # The italic file's named instances mirror the upright file's
+        # (Thin/Light/.../Black) but each one is suffixed " Italic" - except
+        # Regular, whose italic counterpart is just named "Italic" with no
+        # "Regular" prefix (confirmed directly against the real font file).
+        variation = weight if not italic else ("Italic" if weight == "Regular" else f"{weight} Italic")
+        f.set_variation_by_name(variation)
     except Exception:
         pass  # falls back to the font's default instance - still renders fine
     return f
@@ -318,7 +330,13 @@ def render_email_image(content: dict, first_name: str) -> Image.Image:
     draw = ImageDraw.Draw(canvas)  # re-bind after any paste() calls above
 
     # --- Greeting + opening lines ---
-    body_font = _font(_s(16), "Regular")
+    # body_style is the ONLY styling knob a reviewer's "make it italic"-type
+    # feedback can set (content["body_style"], see copywriter_agent.py's
+    # EmailContent) - scoped to the actual flowing body copy (greeting,
+    # opening lines, gentle truth line), not the CTA button, the "what
+    # happens next" list, or the footer, which each keep their own role.
+    body_italic = (content.get("body_style") or "normal") == "italic"
+    body_font = _font(_s(16), "Regular", italic=body_italic)
     draw.text((MARGIN, y), f"Hi {first_name},", font=body_font, fill=COLOR_TEXT)
     y += int(_s(16) * 1.45) + _s(10)
 

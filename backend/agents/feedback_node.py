@@ -19,6 +19,7 @@ from flows import FLOW_BY_SLUG
 
 from .copywriter_agent import (
     _touchpoint_summary,
+    flow_genuinely_fits,
     generate_email,
     generate_flow,
     generate_touchpoint,
@@ -357,6 +358,13 @@ def run_insight_flow_pipeline(
     to needs_flow_clarification if that design call itself fails."""
     brief = investigate(question, file_context=file_context)
 
+    if flow_name and not flow_genuinely_fits(question, flow_name):
+        # An explicitly-named flow deserves the same "does this actually
+        # fit" scrutiny as a freshly-picked one - never trusted just
+        # because the message happened to mention its name (see
+        # flow_genuinely_fits()'s own docstring for the real bug class
+        # this guards against).
+        flow_name = None
     if not flow_name:
         flow_name = pick_flow_for_signal(question, brief["brief_text"])
     if not flow_name:
@@ -376,6 +384,46 @@ def run_insight_flow_pipeline(
     result["insight_brief"] = brief
     result["signal_question"] = question
     return result
+
+
+def resolve_flow_for_request(request_text: str, candidate_flow_name: Optional[str] = None) -> Optional[str]:
+    """Real, live-caught bug this fixes: a plain 'direct' build request
+    describing a genuinely NEW flow ("signed up, never transacted" -
+    materially different from any real catalog entry) got force-matched
+    onto the closest-SOUNDING existing one (p1_plan_not_purchased) by
+    parse_email_request's own first-pass classification, because that
+    classifier's flow_name field can only ever return an existing catalog
+    slug or null - there was no way for a request describing something
+    new to say so. This applies the exact same "does this genuinely fit,
+    or design something new" discipline run_insight_flow_pipeline already
+    has for an investigated business signal, to a plain direct request:
+    - `candidate_flow_name` (parse_email_request's own guess, if any) is
+      verified via flow_genuinely_fits() before being trusted at all.
+    - If that fails, or nothing was guessed, pick_flow_for_signal() gets
+      an independent, full-catalog look at the request's own text.
+    - Only if NOTHING in the real catalog genuinely fits does the Head of
+      CRM design a brand new flow from the request itself
+      (synthesize_flow_for_signal()) - matching a request as detailed as
+      Thalia's own "SIGN UP NOT TRANSACTED" ask deserves a new flow, not
+      a dead-end clarifying question, when nothing real actually applies.
+    Returns None only if every one of those genuinely fails - the
+    caller's own "which flow" question is the last resort, not the
+    first."""
+    if candidate_flow_name and flow_genuinely_fits(request_text, candidate_flow_name):
+        return candidate_flow_name
+    picked = pick_flow_for_signal(
+        request_text, "(a direct build request describing exactly what's wanted, not an investigated live-data signal)",
+    )
+    # Verified again, not just trusted as the "stricter" second opinion -
+    # live-caught in testing: pick_flow_for_signal's own re-pick can STILL
+    # force-match a genuinely new request onto the closest existing flow
+    # (a "signed up, never transacted" request landed on quiz_recovery -
+    # incomplete QUIZ specifically, a different real audience) despite its
+    # own "don't force a weak match" instruction. The same fit check is
+    # the only thing that actually catches that, at either stage.
+    if picked and flow_genuinely_fits(request_text, picked):
+        return picked
+    return synthesize_flow_for_signal(request_text, request_text, raw_request=request_text)
 
 
 class _LiveDataRequest(BaseModel):

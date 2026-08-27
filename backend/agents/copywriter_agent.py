@@ -1413,3 +1413,51 @@ def pick_flow_for_signal(question: str, brief_text: str) -> Optional[str]:
         logger.warning("pick_flow_for_signal: model failed to return structured output for %r", question)
         return None
     return result.flow_name
+
+
+class _FlowFitCheck(BaseModel):
+    fits: bool = Field(
+        description="True only if the request GENUINELY describes this flow's own real trigger/audience/"
+        "goal - not just a topically similar theme. A request describing a materially different trigger "
+        "condition or audience (even if thematically related - e.g. both about hair-loss engagement, both "
+        "about a customer who hasn't paid) does NOT genuinely fit; say so plainly rather than assuming a "
+        "loose thematic overlap is close enough."
+    )
+
+
+def flow_genuinely_fits(request_text: str, flow_slug: str) -> bool:
+    """Real, live-caught bug this exists to fix: a first-pass classifier
+    (parse_email_request's own flow_name field, or an explicitly-named
+    flow_name handed into an insight-mode request) can force-match a
+    request describing a genuinely NEW flow onto the closest-SOUNDING
+    existing one ("signed up, never transacted" matched onto
+    p1_plan_not_purchased - a materially different real audience: p1 is
+    for someone who already had the consult and got a plan). This is the
+    same 'do not force a match just because it's topically related'
+    discipline pick_flow_for_signal() already applies when starting fresh
+    from a business signal - applied here as a second, independent check
+    on a flow that's already been picked, before trusting it. Fails safe
+    to True (assume it fits) on any classification error - a verification
+    call failing must never block an otherwise-correct, already-resolved
+    match."""
+    flow = FLOW_BY_SLUG.get(flow_slug)
+    if flow is None:
+        return False
+    llm = get_llm("COPYWRITER", temperature=0.0)
+    structured_llm = llm.with_structured_output(_FlowFitCheck)
+    system_text = (
+        f"A CRM request was matched to the real andSons '{flow['label']}' flow. Its actual real "
+        f"definition - trigger: {flow['trigger']} | real audience: {flow['audience']} | goal: {flow['goal']}.\n\n"
+        "Does the request below genuinely describe sending an email for THIS SAME real trigger/audience/"
+        "goal, or does it actually describe something meaningfully different that just happens to share a "
+        "theme or a few words with it?"
+    )
+    escaped_request = request_text.replace("{", "{{").replace("}", "}}")
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", escaped_request)])
+    chain = prompt | structured_llm
+    try:
+        result: _FlowFitCheck = chain.invoke({})
+    except Exception as exc:  # noqa: BLE001 - fail safe, see docstring
+        logger.warning("flow_genuinely_fits: verification call failed for flow=%r (%s) - assuming it fits.", flow_slug, exc)
+        return True
+    return result.fits

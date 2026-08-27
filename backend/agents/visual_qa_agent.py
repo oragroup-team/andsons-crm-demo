@@ -23,7 +23,7 @@ import logging
 
 from langchain_core.messages import HumanMessage
 
-from .llm_provider import anthropic_available, get_llm
+from .llm_provider import anthropic_available, extract_text_content, get_llm
 
 logger = logging.getLogger("visual_qa_agent")
 
@@ -63,7 +63,12 @@ def review_image(image, channel: str = "email") -> dict:
 
     try:
         response = llm.invoke([message])
-        reply = (response.content or "").strip()
+        # Real, live-caught bug this fixes: with Opus 5's thinking, this
+        # call's response.content came back as a list of content blocks
+        # (not a plain string) often enough to matter, and .strip() on a
+        # list raises - see llm_provider.extract_text_content()'s own
+        # docstring for the confirmed repro.
+        reply = extract_text_content(response).strip()
     except Exception as exc:  # noqa: BLE001 - a vision-call failure skips, never crashes the post
         logger.warning("Visual QA call failed: %s", exc)
         return {"reviewed": False, "looks_good": True, "note": f"Visual QA call failed ({exc}) - skipped."}

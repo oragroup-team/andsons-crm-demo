@@ -212,7 +212,7 @@ def _sweep_touchpoint(
 
 def run_flow_pipeline(
     flow_name: str, file_context: str = "", insight_brief_text: Optional[str] = None,
-    raw_request: Optional[str] = None, category: str = DEFAULT_CATEGORY,
+    raw_request: Optional[str] = None, category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
 ) -> dict:
     """Generate the WHOLE real flow - every touchpoint in its real cadence
     - not just one email. Each touchpoint goes through its own Sweeper QA
@@ -226,7 +226,11 @@ def run_flow_pipeline(
     `raw_request`, when given, is the human's own literal text (never
     paraphrased) - passed straight to the Head of CRM so an explicit
     structural ask ("5 sequence mixed with WhatsApp and email") reaches
-    the cadence decision directly."""
+    the cadence decision directly. `template_reference` (from
+    agents.template_agent.analyze_template_image, when a reference image
+    was uploaded with this request) is a real design instruction passed
+    straight to the Copywriter - see copywriter_agent._TEMPLATE_REFERENCE_
+    INSTRUCTION."""
     # EVERY flow build is grounded in real, live data before anything is
     # decided - not only ones explicitly framed as a business signal. A
     # direct 'write the winback flow' request still gets a real BigQuery/
@@ -263,7 +267,10 @@ def run_flow_pipeline(
     if file_context:
         brief_parts.append(f"DATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}")
     brief = "\n\n".join(brief_parts)
-    flow_result = generate_flow(flow_name, insight_brief=brief, cadence=crm_brief.get("cadence"), category=category)
+    flow_result = generate_flow(
+        flow_name, insight_brief=brief, cadence=crm_brief.get("cadence"), category=category,
+        template_reference=template_reference,
+    )
 
     prior_summaries = []
     final_touchpoints = []
@@ -308,7 +315,7 @@ def run_flow_pipeline(
             correction = format_correction(sweep["reasons"])
             attempts += 1
             try:
-                touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief, category=category)
+                touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=brief, category=category, template_reference=template_reference)
             except RuntimeError as exc:
                 # Same real failure mode as generate_flow()'s own retry
                 # exhaustion, just hit during a Sweeper-triggered
@@ -339,7 +346,7 @@ def run_flow_pipeline(
 
 def run_insight_flow_pipeline(
     question: str, flow_name: Optional[str] = None, file_context: str = "",
-    raw_request: Optional[str] = None, category: str = DEFAULT_CATEGORY,
+    raw_request: Optional[str] = None, category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
 ) -> dict:
     """Investigate a business signal, then generate the WHOLE flow (every
     real touchpoint) addressing it - the flow-level counterpart to
@@ -363,6 +370,7 @@ def run_insight_flow_pipeline(
 
     result = run_flow_pipeline(
         flow_name, insight_brief_text=brief["brief_text"], raw_request=raw_request or question, category=category,
+        template_reference=template_reference,
     )
     result["needs_flow_clarification"] = False
     result["insight_brief"] = brief
@@ -424,6 +432,43 @@ def _resolve_live_data_request(feedback: str, flow_name: str) -> Optional[str]:
         "What other real aggregate customer numbers exist (signups, bookings, completions) that could "
         f"work as honest social proof for the '{flow_name}' flow? Context for why this is being asked: {feedback}"
     )
+
+
+class _ImageChangeRequest(BaseModel):
+    wants_image_change: bool = Field(
+        description="True only if this feedback explicitly asks to change the PHOTO/IMAGE/HERO itself - a "
+        "different picture, a different subject, removing or adding a hero image, swapping which bank photo "
+        "is used. False for absolutely everything else, including wording/tone/CTA/price/structure changes "
+        "that don't mention the photo at all - the image must never change as a side effect of some other "
+        "edit, only when it's genuinely what was asked."
+    )
+
+
+def _feedback_asks_for_image_change(feedback: str) -> bool:
+    """Determines whether a piece of revision feedback explicitly asks to
+    change the hero photo - real reasoning, same principle as
+    _resolve_live_data_request() above. Fails closed to False on any
+    error or ambiguity: a real, reported problem this exists to fix is the
+    hero photo changing on its own initiative on a revision round that
+    never asked for that, so the safe default on an uncertain
+    classification is to leave the image exactly as it is, never to change
+    it speculatively."""
+    llm = get_llm("HEAD_OF_CRM", temperature=0.0)  # a classification task, not creative writing
+    structured_llm = llm.with_structured_output(_ImageChangeRequest)
+    system_text = (
+        "This is real human revision feedback on an andSons email that already has a real hero photo. "
+        "Determine whether it explicitly asks to change that photo/image, as opposed to any other kind of "
+        "edit (wording, tone, CTA, price, structure) that doesn't mention the image at all."
+    )
+    escaped_feedback = feedback.replace("{", "{{").replace("}", "}}")
+    human_text = f"Feedback: {escaped_feedback}"
+    prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", human_text)])
+    chain = prompt | structured_llm
+    result, last_exc = invoke_with_retry(chain, label="Image-change-request resolution call")
+    if result is None:
+        logger.warning("Image-change-request resolution failed (%s) - defaulting to NOT changing the hero.", last_exc)
+        return False
+    return result.wants_image_change
 
 
 def _run_live_data_lookup(query_question: str) -> str:
@@ -549,6 +594,8 @@ def revise_with_feedback(
     previous_rendered_text: Optional[str] = None,
     feedback_history: Optional[list] = None,
     category: str = DEFAULT_CATEGORY,
+    previous_content: Optional[dict] = None,
+    template_reference: Optional[str] = None,
 ) -> dict:
     """Human-in-the-loop revision. Re-invokes the Copywriter with the ORIGINAL
     system prompt/constraints plus the current draft, the full prior feedback
@@ -560,11 +607,27 @@ def revise_with_feedback(
     correction-loop principle as revise_flow_touchpoint()/run_flow_pipeline -
     this used to ship a Sweeper-failing draft after exactly one attempt,
     which meant a real, catchable defect went straight to a human instead of
-    a normal automatic retry fixing it first."""
+    a normal automatic retry fixing it first.
+
+    `previous_content`, when the caller has it (the main Slack path's
+    revise_flow_touchpoint() always does; this function's own HTTP caller,
+    /revise-email, currently only sends previous_rendered_text - a plain
+    string with no structured hero field to lock from - so this stays a
+    no-op there until that endpoint's contract is extended), locks the
+    hero photo exactly the same way revise_flow_touchpoint() does - see
+    _apply_hero_lock(). `template_reference` (an uploaded reference image
+    for this revision) is a real design instruction, see
+    copywriter_agent._TEMPLATE_REFERENCE_INSTRUCTION - also disables the
+    hero lock above, same reasoning as revise_flow_touchpoint()."""
     feedback_history = feedback_history or []
 
     query_question = _resolve_live_data_request(feedback, flow_name)
     live_data_context = _run_live_data_lookup(query_question) if query_question else None
+
+    locked_hero = None
+    if previous_content and previous_content.get("hero", "none") != "none" and not template_reference:
+        if not _feedback_asks_for_image_change(feedback):
+            locked_hero = {"hero": previous_content["hero"], "hero_headline": previous_content.get("hero_headline")}
 
     previous_draft = previous_rendered_text
     sweeper_correction = None
@@ -579,7 +642,7 @@ def revise_with_feedback(
         if sweeper_correction:
             correction = correction + "\n\n" + sweeper_correction
 
-        email = generate_email(flow_name, first_name, correction=correction, category=category)
+        email = generate_email(flow_name, first_name, correction=correction, category=category, locked_hero=locked_hero, template_reference=template_reference)
         rendered = email["rendered_text"]
         sweep = sweep_email(rendered, flow_name=flow_name, hero_info=email["content"], human_feedback=feedback, category=category)
         logger.info(
@@ -715,6 +778,7 @@ def revise_flow_touchpoint(
     feedback: str,
     feedback_history: Optional[list] = None,
     category: str = DEFAULT_CATEGORY,
+    template_reference: Optional[str] = None,
 ) -> dict:
     """Human-in-the-loop revision of ONE touchpoint in an already-generated
     flow - same principle as revise_with_feedback(), but aware of its real
@@ -729,7 +793,10 @@ def revise_flow_touchpoint(
     retry would have fixed it. Each retry keeps the human's original
     feedback in force (grounded on the draft that just came out of the
     previous attempt) while also handing the Copywriter the Sweeper's exact
-    reasons to fix, same wording generate_flow's own retry loop uses."""
+    reasons to fix, same wording generate_flow's own retry loop uses.
+    `template_reference` (from an uploaded reference image for this
+    revision, see agents.template_agent) is a real design instruction -
+    see copywriter_agent._TEMPLATE_REFERENCE_INSTRUCTION."""
     feedback_history = feedback_history or []
     target = next((t for t in touchpoints if t["n"] == touchpoint_n), None)
     if target is None:
@@ -738,6 +805,19 @@ def revise_flow_touchpoint(
     prior_summaries = [_touchpoint_summary(t) for t in touchpoints if t["n"] < touchpoint_n]
     step = {"n": target["n"], "channel": target["channel"], "timing": target["timing"], "intent": target["intent"]}
     other_heroes = _heroes_from_touchpoints(touchpoints, touchpoint_n)
+
+    # Real, reported problem this fixes: the hero photo changing on its own
+    # initiative on a revision round that never asked for a different
+    # image. Locked by default for an email touchpoint that already has a
+    # real hero - unlocked when this specific feedback genuinely asks to
+    # change the photo (see _apply_hero_lock/_feedback_asks_for_image_change),
+    # or when a template reference image was uploaded for this round (its
+    # whole point can be reconsidering the look, hero included).
+    locked_hero = None
+    target_content = target.get("content") or {}
+    if target["channel"] == "email" and target_content.get("hero", "none") != "none" and not template_reference:
+        if not _feedback_asks_for_image_change(feedback):
+            locked_hero = {"hero": target_content["hero"], "hero_headline": target_content.get("hero_headline")}
 
     # Run the live-data lookup (if this feedback genuinely asks for one) ONCE,
     # not per-retry - a real BigQuery/MoEngage query, same one every retry
@@ -760,7 +840,7 @@ def revise_flow_touchpoint(
             correction = correction + "\n\n" + sweeper_correction
 
         try:
-            new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction, category=category)
+            new_touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=correction, category=category, locked_hero=locked_hero, template_reference=template_reference)
             sweep = _sweep_touchpoint(new_touchpoint, flow_name, other_heroes=other_heroes, human_feedback=feedback, category=category)
         except RuntimeError as exc:
             # Same real, if rare, exhausted-retry failure as generate_flow() -
@@ -820,6 +900,7 @@ def revise_flow_touchpoints(
     feedback: str,
     feedback_history: Optional[list] = None,
     category: str = DEFAULT_CATEGORY,
+    template_reference: Optional[str] = None,
 ) -> dict:
     """Human-in-the-loop revision of MULTIPLE existing touchpoints with the
     SAME feedback in one go - what resolve_touchpoint_reference()'s
@@ -838,6 +919,7 @@ def revise_flow_touchpoints(
     for n in touchpoint_ns:
         step_result = revise_flow_touchpoint(
             flow_name, current_touchpoints, n, feedback, feedback_history=feedback_history, category=category,
+            template_reference=template_reference,
         )
         current_touchpoints = step_result["touchpoints"]
         feedback_history = step_result["feedback_history"]
@@ -963,7 +1045,7 @@ def _resolve_structural_request(feedback_text: str, touchpoints: list, flow_name
 
 def _generate_and_sweep(
     flow_name: str, step: dict, prior_summaries: list, correction: str, other_heroes: list,
-    human_feedback: Optional[str] = None, category: str = DEFAULT_CATEGORY,
+    human_feedback: Optional[str] = None, category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
 ):
     """Shared generate -> Sweeper -> retry loop for a touchpoint that has no
     PREVIOUS DRAFT of its own to ground a revision against (a brand-new
@@ -978,7 +1060,7 @@ def _generate_and_sweep(
     sweep = None
     for attempt_num in range(MAX_RETRIES + 1):
         try:
-            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=working_correction, category=category)
+            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, correction=working_correction, category=category, template_reference=template_reference)
         except RuntimeError as exc:
             logger.error("New touchpoint %d (%s) failed to generate: %s", step["n"], step["channel"], exc)
             touchpoint = {
@@ -1011,6 +1093,7 @@ def apply_target_cadence(
     feedback: str,
     feedback_history: Optional[list] = None,
     category: str = DEFAULT_CATEGORY,
+    template_reference: Optional[str] = None,
 ) -> dict:
     """Human-in-the-loop RESHAPE of an already-generated flow to a new
     target sequence - the single, general counterpart to
@@ -1079,6 +1162,7 @@ def apply_target_cadence(
         )
         new_touchpoint, sweep = _generate_and_sweep(
             flow_name, step, prior_summaries, correction, other_heroes, human_feedback=feedback, category=category,
+            template_reference=template_reference,
         )
         new_touchpoint["passed"] = sweep["pass"]
         new_touchpoint["sweeper_reasons"] = sweep["reasons"]

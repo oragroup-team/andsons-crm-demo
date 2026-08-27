@@ -17,6 +17,7 @@ from flask_cors import CORS
 
 from agents.analytics_agent import ask_analytics
 from agents.copywriter_agent import parse_email_request
+from agents.template_agent import analyze_template_image
 from agents.visual_qa_agent import review_image
 from categories import DEFAULT_CATEGORY, VALID_CATEGORY_SLUGS
 from agents.feedback_node import (
@@ -277,8 +278,11 @@ def _collect_uploaded_file_context(event: dict, bot_token: str) -> tuple:
     """Download and summarize every CSV/Excel file attached to an
     app_mention event. Returns (summary_text, error_messages) - a file that
     fails to download or parse is reported, never silently dropped, but one
-    bad file doesn't block the others."""
-    files = event.get("files") or []
+    bad file doesn't block the others. Images are skipped here entirely -
+    see _collect_template_reference() below, the email bot's own separate
+    handling for those - so an uploaded reference image never shows up as
+    a bogus "unsupported file type" error on this path."""
+    files = [f for f in (event.get("files") or []) if not (f.get("mimetype") or "").startswith("image/")]
     if not files:
         return "", []
 
@@ -293,6 +297,33 @@ def _collect_uploaded_file_context(event: dict, bot_token: str) -> tuple:
 
     summary, parse_errors = summarize_files(downloaded)
     return summary, errors + parse_errors
+
+
+def _collect_template_reference(event: dict, bot_token: str) -> tuple:
+    """Download and vision-analyze every IMAGE attached to an app_mention
+    event on the email bot - a real reviewer-uploaded template ("follow
+    this template for the emails") - see agents/template_agent.py.
+    Returns (combined_description_or_empty, error_messages). Multiple
+    images get concatenated, each labelled, rather than only using the
+    first - a real reviewer could reasonably attach one reference for email
+    and another for WhatsApp in the same message."""
+    images = [f for f in (event.get("files") or []) if (f.get("mimetype") or "").startswith("image/")]
+    if not images:
+        return "", []
+
+    descriptions = []
+    errors = []
+    for file_info in images:
+        name = file_info.get("name", "upload")
+        try:
+            content = download_slack_file(file_info, bot_token)
+        except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+            errors.append(f"{name}: couldn't download ({exc})")
+            continue
+        description = analyze_template_image(content, mimetype=file_info.get("mimetype") or "image/png")
+        descriptions.append(f"[Reference image {name!r}]\n{description}" if len(images) > 1 else description)
+
+    return "\n\n".join(descriptions), errors
 
 
 _TOUCHPOINT_FEEDBACK_RE = re.compile(r"^\s*(?:step\s*)?(\d+)\s*[:.\-]\s*(.+)$", re.IGNORECASE | re.DOTALL)
@@ -406,6 +437,15 @@ def slack_events_email():
                     text="Read the attached file, factoring it in now...",
                 )
 
+            template_reference, template_errors = _collect_template_reference(event, bot_token)
+            for err in template_errors:
+                post_message(bot_token, channel, thread_ts=thread_ts, text=f"Couldn't read {err}")
+            if template_reference:
+                post_message(
+                    bot_token, channel, thread_ts=thread_ts,
+                    text="Reading the attached image as a visual template to follow...",
+                )
+
             session = get_email_session(channel, thread_ts)
             if session:
                 # Persisted forward from whichever category this flow was
@@ -418,6 +458,10 @@ def slack_events_email():
                 if file_context:
                     feedback_text = (text + "\n\n" if text else "") + (
                         "Also take this uploaded file into account:\n" + file_context
+                    )
+                if template_reference:
+                    feedback_text = (feedback_text + "\n\n" if feedback_text else "") + (
+                        "An image was attached asking to follow its visual template."
                     )
 
                 # Structural check FIRST, before assuming this is content
@@ -442,6 +486,7 @@ def slack_events_email():
                     result = apply_target_cadence(
                         session["flow_name"], session["touchpoints"], structural["target_cadence"], feedback_text,
                         feedback_history=prior_feedback_history, category=session_category,
+                        template_reference=template_reference or None,
                     )
                     save_email_session(
                         channel, thread_ts,
@@ -486,6 +531,7 @@ def slack_events_email():
                         result = revise_flow_touchpoints(
                             session["flow_name"], session["touchpoints"], resolved_ns, feedback_text,
                             feedback_history=session.get("feedback_history", []), category=session_category,
+                            template_reference=template_reference or None,
                         )
                         save_email_session(
                             channel, thread_ts,
@@ -526,6 +572,7 @@ def slack_events_email():
                     result = revise_flow_touchpoint(
                         session["flow_name"], session["touchpoints"], touchpoint_n, touchpoint_feedback,
                         feedback_history=session.get("feedback_history", []), category=session_category,
+                        template_reference=template_reference or None,
                     )
                 except ValueError as exc:
                     post_message(bot_token, channel, thread_ts=thread_ts, text=str(exc))
@@ -581,7 +628,7 @@ def slack_events_email():
                 question = intent["signal_question"] or combined_text or "Review the attached data and identify what needs addressing."
                 result = run_insight_flow_pipeline(
                     question, flow_name=intent["flow_name"], file_context=file_context, raw_request=combined_text,
-                    category=intent["category"],
+                    category=intent["category"], template_reference=template_reference or None,
                 )
                 if result["needs_flow_clarification"]:
                     save_pending_email_request(channel, thread_ts, pending_texts + [text])
@@ -620,6 +667,7 @@ def slack_events_email():
             clear_pending_email_request(channel, thread_ts)
             result = run_flow_pipeline(
                 intent["flow_name"], file_context=file_context, raw_request=combined_text, category=intent["category"],
+                template_reference=template_reference or None,
             )
             save_email_session(
                 channel, thread_ts,

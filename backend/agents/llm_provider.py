@@ -285,3 +285,26 @@ def invoke_with_retry(chain, attempts: int = 5, backoff_seconds: float = 1.5, la
             if attempt < attempts - 1:
                 time.sleep(backoff_seconds)
     return None, last_exc
+
+
+def extract_text_content(response) -> str:
+    """A plain, direct chat call's `response.content` (as opposed to a
+    structured-output chain's already-parsed result) is USUALLY a plain
+    string - but a real, live-caught bug this fixes: with a thinking-
+    capable model (Opus 5 here), it can just as often come back as a LIST
+    of content blocks instead (a 'thinking' block plus a 'text' block, or
+    similar) - non-deterministically, confirmed live (two otherwise
+    identical calls, one string, one list). Every direct-chat call site in
+    this codebase (visual_qa_agent.py, template_agent.py) needs this same
+    normalization, so it lives here once rather than each guessing its own
+    fix. Returns the joined text of every text-type block, or the string
+    itself unchanged, or "" for anything else (never raises)."""
+    content = response.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            block.get("text", "") for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""

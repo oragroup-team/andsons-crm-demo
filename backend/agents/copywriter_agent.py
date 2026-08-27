@@ -499,6 +499,29 @@ def resolve_hero(content: EmailContent) -> dict:
     }
 
 
+def _apply_hero_lock(content: "EmailContent", locked_hero: Optional[dict]) -> "EmailContent":
+    """Deterministic enforcement backing up whatever the Copywriter (and,
+    for a flow touchpoint, the Creative Director's own independent hero
+    pass right after it) decided - a real, reported problem this fixes is
+    the hero photo changing on ITS OWN INITIATIVE on a revision round that
+    never asked for a different image. `locked_hero`, when given by a
+    caller that already determined this round's feedback does NOT ask for
+    an image change, is the exact hero/hero_headline the email already
+    had - forced back onto the result regardless of what either upstream
+    stage proposed, same principle as sweeper_agent.py's deterministic
+    checks backing up prompt-only instructions elsewhere in this codebase.
+    A no-op when locked_hero is None (nothing locked) or 'none' (there was
+    no real photo to preserve in the first place)."""
+    if not locked_hero or not locked_hero.get("hero") or locked_hero["hero"] == "none":
+        return content
+    if content.hero != locked_hero["hero"]:
+        logger.warning(
+            "Hero changed to %r on a revision that didn't ask for an image change (was %r) - forcing it back.",
+            content.hero, locked_hero["hero"],
+        )
+    return content.model_copy(update={"hero": locked_hero["hero"], "hero_headline": locked_hero.get("hero_headline")})
+
+
 def render_email(content: EmailContent, first_name: str, hero_info: Optional[dict] = None) -> str:
     """Render the structured email content into a plain-text block, in the
     same shape as the golden template, so the Sweeper agent can evaluate it."""
@@ -610,6 +633,30 @@ claim; the ban on inventing a hair-loss percentage/statistic above applies regar
 {brief}
 """
 
+_TEMPLATE_REFERENCE_INSTRUCTION = """TEMPLATE REFERENCE (a human reviewer uploaded a real image and asked you \
+to follow its visual template) - unlike the strategy context above, this DOES directly set this email's real, \
+visible fields whenever a matching one exists: background_color, cta_position, step_marker_style, hero \
+usage/framing, body_style. Read the description below and set every field it genuinely maps to - never write \
+a `note` saying you couldn't apply it just because it came from an image rather than typed feedback. It \
+describes STYLE only, never wording - never copy a phrase, price, or claim from it as if it were real \
+andSons data; every compliance rule above still applies in full regardless of what the reference shows.
+
+{template_description}
+"""
+
+
+def _template_reference_block(template_reference: Optional[str]) -> str:
+    """Shared by every generation entry point below - the exact
+    escape-then-format pattern insight_brief itself skips (a real, already
+    debugged bug: create_sql_agent's own internal .format() call once
+    collided with unescaped braces elsewhere in this codebase), applied
+    here because a vision model describing a reference image is at least
+    as likely to emit a stray { or } as the regex that caused that bug."""
+    if not template_reference:
+        return ""
+    escaped = template_reference.replace("{", "{{").replace("}", "}}")
+    return "\n\n" + _TEMPLATE_REFERENCE_INSTRUCTION.format(template_description=escaped)
+
 
 def generate_email(
     flow_name: str,
@@ -617,6 +664,8 @@ def generate_email(
     correction: Optional[str] = None,
     insight_brief: Optional[str] = None,
     category: str = DEFAULT_CATEGORY,
+    locked_hero: Optional[dict] = None,
+    template_reference: Optional[str] = None,
 ) -> dict:
     """Run the Copywriter agent. If `correction` is provided, it is appended
     to the ORIGINAL system prompt/constraints (never sent alone) so the model
@@ -626,7 +675,13 @@ def generate_email(
     rules enforced around it. `category` (one of categories.VALID_CATEGORY_
     SLUGS) selects the reader psychology/objections/compliance context and
     the category-scoped hero photo catalogue - defaults to hair_loss, the
-    original and only category this system supported before 2026-08-25."""
+    original and only category this system supported before 2026-08-25.
+    `locked_hero`, when given, forces the result back onto that exact hero
+    regardless of what this call produces - see _apply_hero_lock().
+    `template_reference` (from agents.template_agent.analyze_template_image)
+    is a real, directly-actionable design instruction from an uploaded
+    reference image - unlike insight_brief, it DOES set visible style
+    fields, see _TEMPLATE_REFERENCE_INSTRUCTION."""
     llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
     structured_llm = llm.with_structured_output(EmailContent)
 
@@ -642,6 +697,7 @@ def generate_email(
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
+    system_text += _template_reference_block(template_reference)
 
     human_text = f"Write the {flow_name} email for {first_name}."
     if correction:
@@ -660,6 +716,7 @@ def generate_email(
         raise RuntimeError(f"Copywriter failed to produce a draft after retrying ({last_exc}).") from last_exc
 
     content = _sanitize_content(content)
+    content = _apply_hero_lock(content, locked_hero)
 
     hero_info = resolve_hero(content)
     rendered = render_email(content, first_name, hero_info=hero_info)
@@ -907,17 +964,23 @@ def _prior_touchpoints_context(prior: list) -> str:
 
 def generate_touchpoint(
     flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
-    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY,
+    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY, locked_hero: Optional[dict] = None,
+    template_reference: Optional[str] = None,
 ) -> dict:
     """Single dispatch point for "generate one touchpoint of whatever
     channel this step is" - used by generate_flow() below and by
     feedback_node.py's Sweeper-correction loop and revise_flow_touchpoint(),
     so all three stay in sync as channels are added instead of each
-    hand-rolling its own if/elif channel dispatch."""
+    hand-rolling its own if/elif channel dispatch. `locked_hero` only
+    applies to the email channel (see generate_flow_email_touchpoint) -
+    ignored for whatsapp/push, which have no hero. `template_reference`
+    (see _TEMPLATE_REFERENCE_INSTRUCTION) applies to both real channels -
+    whatsapp has far less visual surface to match, but tone/brevity still
+    apply."""
     if step["channel"] == "email":
-        return generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief, category=category)
+        return generate_flow_email_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief, category=category, locked_hero=locked_hero, template_reference=template_reference)
     if step["channel"] == "whatsapp":
-        return generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief, category=category)
+        return generate_flow_whatsapp_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief, category=category, template_reference=template_reference)
     if step["channel"] == "push":
         return generate_flow_push_touchpoint(flow_name, step, prior_summaries, correction=correction, insight_brief=insight_brief, category=category)
     raise ValueError(f"Unknown channel: {step['channel']!r}")
@@ -925,7 +988,7 @@ def generate_touchpoint(
 
 def generate_flow(
     flow_name: str, insight_brief: Optional[str] = None, cadence: Optional[list] = None,
-    category: str = DEFAULT_CATEGORY,
+    category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
 ) -> dict:
     """Generate every real touchpoint in a flow's cadence, in order, each
     aware of what earlier touchpoints in the same flow already said (so
@@ -952,7 +1015,7 @@ def generate_flow(
 
     for step in (cadence or flow["cadence"]):
         try:
-            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief, category=category)
+            touchpoint = generate_touchpoint(flow_name, step, prior_summaries, insight_brief=insight_brief, category=category, template_reference=template_reference)
         except RuntimeError as exc:
             # Real failure mode, not hypothetical: even with a 5-attempt
             # retry (invoke_with_retry), a single touchpoint can still
@@ -1013,13 +1076,17 @@ def _touchpoint_summary(touchpoint: dict) -> dict:
 
 def generate_flow_email_touchpoint(
     flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
-    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY,
+    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY, locked_hero: Optional[dict] = None,
+    template_reference: Optional[str] = None,
 ) -> dict:
     """Generate (or regenerate, with `correction`) ONE email touchpoint of a
     flow's real cadence - shares the exact same prompt machinery as
     generate_email(), plus this touchpoint's real timing/intent and what
     earlier touchpoints in the same flow already said (so a Sweeper-driven
-    retry stays aware of the rest of the sequence, not just its own text)."""
+    retry stays aware of the rest of the sequence, not just its own text).
+    `locked_hero`, when given, forces the result back onto that exact hero
+    after BOTH the Copywriter's own proposal and the Creative Director's
+    independent override below - see _apply_hero_lock()."""
     flow = FLOW_BY_SLUG[flow_name]
     flow_brief = _build_flow_brief(flow_name, category)
     llm = get_llm("COPYWRITER", temperature=_CREATIVE_TEMPERATURE)
@@ -1040,6 +1107,7 @@ def generate_flow_email_touchpoint(
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
+    system_text += _template_reference_block(template_reference)
     human_text = f"Write touchpoint {step['n']} ({step['timing']}) of the {flow_name} flow for NAME."
     if correction:
         human_text += (
@@ -1068,6 +1136,7 @@ def generate_flow_email_touchpoint(
         "hero": direction["hero"],
         "hero_headline": direction["hero_headline"],
     })
+    content = _apply_hero_lock(content, locked_hero)
 
     hero_info = resolve_hero(content)
     rendered = render_email(content, "NAME", hero_info=hero_info)
@@ -1095,7 +1164,7 @@ def generate_flow_email_touchpoint(
 
 def generate_flow_whatsapp_touchpoint(
     flow_name: str, step: dict, prior_summaries: list, correction: Optional[str] = None,
-    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY,
+    insight_brief: Optional[str] = None, category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
 ) -> dict:
     """Generate (or regenerate, with `correction`) ONE WhatsApp touchpoint
     of a flow's real cadence. See generate_flow_email_touchpoint()."""
@@ -1124,6 +1193,7 @@ def generate_flow_whatsapp_touchpoint(
     )
     if insight_brief:
         system_text += "\n\n" + _INSIGHT_BRIEF_INSTRUCTION.format(brief=insight_brief)
+    system_text += _template_reference_block(template_reference)
     human_text = f"Write touchpoint {step['n']} ({step['timing']}) of the {flow_name} flow, a WhatsApp message for NAME."
     if correction:
         human_text += (

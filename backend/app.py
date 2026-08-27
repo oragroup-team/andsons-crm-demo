@@ -326,6 +326,40 @@ def _collect_template_reference(event: dict, bot_token: str) -> tuple:
     return "\n\n".join(descriptions), errors
 
 
+# Real bug this fixes: an image uploaded with NO flow named yet (e.g. just
+# "@andSonsEmail" + a screenshot, no text) has nothing to attach itself to
+# on this turn - the reply has to ask which flow before anything can be
+# built. get_pending_email_request/save_pending_email_request only ever
+# stored plain text strings though, so the template's own analysis had no
+# way to survive into the NEXT message (the one that finally names a
+# flow) - it was uploaded, analyzed, then silently dropped the moment the
+# thread asked "which flow is this for?" and moved on. Tagging it with a
+# fixed marker lets it round-trip through that same plain-text store
+# without a Firestore schema change.
+_PENDING_TEMPLATE_MARKER = "[TEMPLATE_REFERENCE]\n"
+
+
+def _split_pending_template_reference(pending_texts: list) -> tuple:
+    """Returns (combined_template_text_or_empty, remaining_plain_texts) -
+    pulls any marker-tagged entries back out of a thread's pending texts
+    so they can be merged with this turn's own template_reference (if any)
+    rather than treated as plain request wording."""
+    templates = [t[len(_PENDING_TEMPLATE_MARKER):] for t in pending_texts if t.startswith(_PENDING_TEMPLATE_MARKER)]
+    remaining = [t for t in pending_texts if not t.startswith(_PENDING_TEMPLATE_MARKER)]
+    return "\n\n".join(templates), remaining
+
+
+def _pending_to_save(pending_texts: list, text: str, template_reference: Optional[str]) -> list:
+    """Builds the list save_pending_email_request should persist for this
+    still-unresolved turn - this turn's own plain text, plus the still-
+    unresolved template reference (if any) re-tagged so it survives to the
+    turn that finally names a flow (see _split_pending_template_reference)."""
+    saved = pending_texts + [text]
+    if template_reference:
+        saved.append(f"{_PENDING_TEMPLATE_MARKER}{template_reference}")
+    return saved
+
+
 _TOUCHPOINT_FEEDBACK_RE = re.compile(r"^\s*(?:step\s*)?(\d+)\s*[:.\-]\s*(.+)$", re.IGNORECASE | re.DOTALL)
 
 
@@ -598,11 +632,26 @@ def slack_events_email():
             # email" (flow unclear) -> "OTC cart abandon" (a reply with no
             # other context of its own) reset to square one instead of
             # completing the original request.
-            pending_texts = get_pending_email_request(channel, thread_ts)
+            pending_texts_raw = get_pending_email_request(channel, thread_ts)
+            pending_template_reference, pending_texts = _split_pending_template_reference(pending_texts_raw)
             combined_text = "\n".join(t for t in (pending_texts + [text]) if t)
+            # Merge with whatever template image this thread already had
+            # pending (see _split_pending_template_reference's docstring
+            # above) - a fresh image THIS turn and a leftover one from an
+            # earlier turn are both real, so combine rather than pick one.
+            template_reference = "\n\n".join(x for x in (pending_template_reference, template_reference) if x) or None
 
             if not combined_text and file_context:
                 intent = {"mode": "insight", "flow_name": None, "signal_question": None}
+            elif not combined_text and template_reference:
+                # A bare template-image upload, no flow named yet, nothing
+                # else to go on - asking parse_email_request to classify an
+                # empty string just dead-ends in the generic "unclear"
+                # redirect below, which never even mentions the image.
+                # Skip straight to the real question: which flow to apply
+                # it to (same shape as the generic no-flow-name case
+                # further down).
+                intent = {"mode": "direct", "flow_name": None, "signal_question": None, "category": DEFAULT_CATEGORY}
             else:
                 intent = parse_email_request(combined_text)
 
@@ -631,7 +680,7 @@ def slack_events_email():
                     category=intent["category"], template_reference=template_reference or None,
                 )
                 if result["needs_flow_clarification"]:
-                    save_pending_email_request(channel, thread_ts, pending_texts + [text])
+                    save_pending_email_request(channel, thread_ts, _pending_to_save(pending_texts, text, template_reference))
                     post_message(
                         bot_token, channel, thread_ts=thread_ts,
                         text=(
@@ -655,10 +704,11 @@ def slack_events_email():
                 return
 
             if not intent["flow_name"]:
-                save_pending_email_request(channel, thread_ts, pending_texts + [text])
+                save_pending_email_request(channel, thread_ts, _pending_to_save(pending_texts, text, template_reference))
+                image_note = " (got the image - I'll apply it once I know which flow this is for)" if template_reference else ""
                 post_message(
                     bot_token, channel, thread_ts=thread_ts,
-                    text="I need to know which flow this is for (e.g. \"plan not purchased\", "
+                    text=f"I need to know which flow this is for{image_note} (e.g. \"plan not purchased\", "
                     "\"cart abandon\", \"consult no-show\", \"winback\") - or describe what's going on "
                     "(e.g. \"OTC serum sales are down\") and I'll investigate and pick one.",
                 )

@@ -29,7 +29,7 @@ from slack_sdk.signature import SignatureVerifier
 
 logger = logging.getLogger("slack_integration")
 
-_MENTION_RE = re.compile(r"^\s*<@[A-Z0-9]+>\s*[:,]?\s*", re.IGNORECASE)
+_MENTION_RE = re.compile(r"\s*<@[A-Z0-9]+>\s*[:,]?\s*", re.IGNORECASE)
 
 
 def _signing_secret() -> str:
@@ -109,22 +109,45 @@ def run_in_background(target, *args, **kwargs) -> None:
 
 
 def strip_mention(text: str) -> str:
-    """Remove the leading '<@BOTID>' Slack renders at the start of an
-    app_mention event's text, leaving just what the person actually said."""
-    return _MENTION_RE.sub("", text or "").strip()
+    """Remove every '<@BOTID>' Slack renders wherever one appears in an
+    app_mention event's text, leaving just what the person actually said -
+    not just a leading one. Real, live-caught gap this fixes: a message
+    ending in a second, trailing mention out of habit ("...add some icons
+    etc @andSonsEmail") left that raw mention sitting in the text, which
+    then leaked into a disambiguation prompt's own example reply."""
+    return re.sub(r"\s+", " ", _MENTION_RE.sub("", text or "")).strip()
 
 
 def download_slack_file(file_info: dict, bot_token: str) -> bytes:
-    """Download an uploaded file's real bytes from Slack. `url_private` (on
-    the `files` array of an app_mention event) is only fetchable with the
-    bot's own token in the Authorization header - a plain GET (e.g. what a
-    browser would do while logged into Slack) gets an HTML login page back,
-    not the file. Needs the `files:read` scope on the bot. Raises on
-    anything other than a real 200, so a bad/expired token surfaces as a
-    clear error instead of silently "parsing" an HTML error page as data."""
-    resp = requests.get(
-        file_info["url_private"], headers={"Authorization": f"Bearer {bot_token}"}, timeout=20
-    )
+    """Download an uploaded file's real bytes from Slack. Needs the
+    `files:read` scope on the bot. Raises on anything other than a real
+    200, so a bad/expired token surfaces as a clear error instead of
+    silently "parsing" an HTML error page as data.
+
+    Two real, live-caught fixes here, not hypothetical:
+    - `url_private_download` (when Slack provides it - not every file
+      object does) is used over `url_private` when present: confirmed
+      live, an image upload's `url_private` 403'd via a redirect to a
+      `<workspace>.slack.com/?redir=...` login-wall URL that a bearer
+      token can't satisfy - that's a browser-session-oriented URL, not
+      one meant for a bot's own token. `url_private_download` is Slack's
+      actual field for exactly this use case.
+    - Redirects are followed manually with the Authorization header
+      re-attached on every hop, rather than relying on `requests`'s
+      default auto-follow, which deliberately STRIPS the Authorization
+      header on any redirect to a different host (a real security
+      default in that library) - silently turning the follow-up request
+      into an unauthenticated one and producing exactly the 403 above."""
+    url = file_info.get("url_private_download") or file_info["url_private"]
+    headers = {"Authorization": f"Bearer {bot_token}"}
+    resp = requests.get(url, headers=headers, timeout=20, allow_redirects=False)
+    redirect_hops = 0
+    while resp.is_redirect and redirect_hops < 5:
+        location = resp.headers.get("Location")
+        if not location:
+            break
+        resp = requests.get(location, headers=headers, timeout=20, allow_redirects=False)
+        redirect_hops += 1
     resp.raise_for_status()
     content_type = resp.headers.get("Content-Type", "")
     if "text/html" in content_type:

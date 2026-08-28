@@ -1069,7 +1069,18 @@ def _touchpoint_summary(touchpoint: dict) -> dict:
         "n": touchpoint["n"],
         "channel": touchpoint["channel"],
         "timing": touchpoint["timing"],
-        "hero": touchpoint["hero"],
+        # .get(), not direct indexing - real, live-caught bug: a Firestore
+        # session persists indefinitely across deploys, so a touchpoint
+        # created under an older code path (before this exact top-level
+        # "hero" key was guaranteed on every touchpoint dict, e.g. an
+        # older add_flow_touchpoint()/other shape this codebase has since
+        # replaced) can genuinely lack it - a plain "change the hero image
+        # of step 5" revision KeyError'd exactly here, building step 1-4's
+        # summaries as step 5's prior context, on a session old enough to
+        # predate the current shape. content["hero"] is the same real
+        # value on every current touchpoint anyway, so falling back to
+        # that when the top-level key is missing costs nothing.
+        "hero": touchpoint.get("hero", content.get("hero") if isinstance(content, dict) else None),
         "summary": summary,
     }
 

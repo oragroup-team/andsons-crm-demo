@@ -23,6 +23,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from flows import FLOW_BY_SLUG, VALID_FLOW_SLUGS
+from session_store import save_synthesized_flow
 
 from .llm_provider import get_llm, invoke_with_retry
 
@@ -353,8 +354,17 @@ def synthesize_flow_for_signal(question: str, brief_text: str, raw_request: Opti
     }
     # FLOW_BY_SLUG is the same dict object every module imported - mutating
     # it here makes the new flow immediately visible everywhere (Copywriter,
-    # Sweeper, this module's own _build_flow_brief) with no further wiring.
+    # Sweeper, this module's own _build_flow_brief) with no further wiring
+    # ON THIS INSTANCE. Also persisted to Firestore (save_synthesized_flow)
+    # - a real, live-caught bug this closes: Cloud Run runs multiple
+    # instances, so a synthesized flow that only ever lived in this
+    # process's own memory was invisible to whichever OTHER instance a
+    # later revision request happened to land on, and KeyError'd outright.
+    # flows.py's FLOW_BY_SLUG (a _LazyFlowCatalog) checks Firestore
+    # transparently on a miss, so every other instance picks this up the
+    # first time it's actually asked for.
     FLOW_BY_SLUG[slug] = new_flow
     VALID_FLOW_SLUGS.append(slug)
+    save_synthesized_flow(slug, new_flow)
     logger.info("Synthesized new flow %r (%s) for signal %r: %s", slug, result.label, question, result.rationale)
     return slug

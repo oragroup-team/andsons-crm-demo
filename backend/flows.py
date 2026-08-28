@@ -298,5 +298,37 @@ FLOWS = [
     },
 ]
 
-FLOW_BY_SLUG = {f["slug"]: f for f in FLOWS}
+class _LazyFlowCatalog(dict):
+    """The real catalog above, transparently backed by Firestore for any
+    flow head_of_crm_agent.synthesize_flow_for_signal() designs at
+    runtime. Real bug this fixes, live-caught: a synthesized flow used to
+    be registered with a plain FLOW_BY_SLUG[slug] = new_flow assignment -
+    only ever visible to the ONE Cloud Run instance that happened to
+    create it. This app runs multiple concurrent instances (and recycles
+    them over time) - a person revising that same flow minutes later could
+    land on a different instance and get a bare KeyError (confirmed live:
+    "change the hero image of step 5" on a just-synthesized flow). Every
+    existing FLOW_BY_SLUG[x] / .get(x) call site across this codebase
+    keeps working completely unchanged - dict.__getitem__ already calls
+    __missing__ on a real miss; .get() is overridden below purely because
+    the built-in dict.get() does NOT consult __missing__ on its own."""
+
+    def __missing__(self, slug):
+        from session_store import get_synthesized_flow  # local import: avoids a hard Firestore dependency at module load
+        flow = get_synthesized_flow(slug)
+        if flow is None:
+            raise KeyError(slug)
+        self[slug] = flow
+        if slug not in VALID_FLOW_SLUGS:
+            VALID_FLOW_SLUGS.append(slug)
+        return flow
+
+    def get(self, slug, default=None):
+        try:
+            return self[slug]
+        except KeyError:
+            return default
+
+
+FLOW_BY_SLUG = _LazyFlowCatalog((f["slug"], f) for f in FLOWS)
 VALID_FLOW_SLUGS = [f["slug"] for f in FLOWS]

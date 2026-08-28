@@ -278,3 +278,32 @@ def set_learned_rules(rules: list) -> None:
         _set_doc("learned_rules", _LEARNED_RULES_DOC, {"rules": rules[-_MAX_LEARNED_RULES:]})
     except Exception:
         logger.exception("Failed to overwrite learned rules in Firestore.")
+
+
+# --- Synthesized flows ---------------------------------------------------
+# Real bug this fixes, live-caught: head_of_crm_agent.synthesize_flow_for_
+# signal() used to only ever register a brand-new flow it designed into
+# THIS process's own in-memory FLOW_BY_SLUG dict - Cloud Run runs multiple
+# concurrent instances (and recycles them over time, same as the session-
+# storage problem this file's own module docstring already documents), so
+# a synthesized flow created on one instance was invisible to every other
+# one. A person asking to revise that exact flow minutes later landed on
+# a different instance and got a bare KeyError. This mirrors the session-
+# storage fix exactly, just for the flow catalog instead of a per-thread
+# session - see flows.py's _LazyFlowCatalog for the read side, which
+# checks here transparently on a cache miss.
+
+
+def get_synthesized_flow(slug: str) -> Optional[dict]:
+    try:
+        return _get_doc("synthesized_flows", slug)
+    except Exception:
+        logger.exception("Failed to read synthesized flow %r from Firestore.", slug)
+        return None
+
+
+def save_synthesized_flow(slug: str, flow: dict) -> None:
+    try:
+        _set_doc("synthesized_flows", slug, flow)
+    except Exception:
+        logger.exception("Failed to save synthesized flow %r to Firestore - it will only exist on this instance.", slug)

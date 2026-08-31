@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -34,7 +35,8 @@ from agents.feedback_node import (
 )
 from email_image_renderer import render_email_image
 from file_context import summarize_files
-from flows import VALID_FLOW_SLUGS
+from flows import FLOW_BY_SLUG, VALID_FLOW_SLUGS
+from flow_html_export import render_flow_html
 from whatsapp_image_renderer import render_whatsapp_image
 from push_image_renderer import render_push_image
 from slack_integration import (
@@ -49,6 +51,7 @@ from slack_integration import (
     get_email_session,
     get_pending_email_request,
     is_retry,
+    post_file,
     post_message,
     post_rendered_email,
     post_result_to_slack,
@@ -361,6 +364,34 @@ def _pending_to_save(pending_texts: list, text: str, template_reference: Optiona
     return saved
 
 
+# Matches "APPROVED" anywhere in the message (case-insensitive, real word
+# boundary so it doesn't fire on "disapproved" or similar) - a deliberate
+# keyword trigger, not an LLM classification, since this is a literal
+# sign-off command a human types on purpose, the same way a Slack
+# approval workflow would work, not a natural-language request that needs
+# real reasoning to interpret.
+_APPROVED_RE = re.compile(r"\bapproved\b", re.IGNORECASE)
+
+
+def _handle_flow_approval(bot_token: str, channel: str, thread_ts: str, session: dict) -> None:
+    """A human typed "APPROVED" in this flow's thread - export every real
+    touchpoint exactly as already posted to Slack (same rendering calls,
+    same images) into one self-contained HTML file and upload it, rather
+    than leaving the approved flow as a scattered set of PNGs a human
+    would have to collect by hand."""
+    flow = FLOW_BY_SLUG.get(session["flow_name"])
+    flow_label = flow["label"] if flow else session["flow_name"]
+    approved_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        html_bytes = render_flow_html(flow_label, session["touchpoints"], approved_at)
+    except Exception as exc:  # noqa: BLE001 - a rendering bug must never look like a silent no-op
+        logger.exception("Failed to render the approved-flow HTML export for %s", session["flow_name"])
+        post_message(bot_token, channel, thread_ts=thread_ts, text=f"Approved, but the HTML export failed to build ({exc}).")
+        return
+    filename = f"{session['flow_name']}_approved.html"
+    post_file(bot_token, channel, thread_ts, html_bytes, filename, f"Approved - here's the full {flow_label} flow as one file.")
+
+
 _TOUCHPOINT_FEEDBACK_RE = re.compile(r"^\s*(?:step\s*)?(\d+)\s*[:.\-]\s*(.+)$", re.IGNORECASE | re.DOTALL)
 
 
@@ -483,6 +514,14 @@ def slack_events_email():
 
             session = get_email_session(channel, thread_ts)
             if session:
+                # "APPROVED" is a real sign-off command, checked before
+                # anything else in this thread - never treated as revision
+                # feedback (structural or content-edit), and never needs
+                # any of the file/template context collected above.
+                if _APPROVED_RE.search(text):
+                    _handle_flow_approval(bot_token, channel, thread_ts, session)
+                    return
+
                 # Persisted forward from whichever category this flow was
                 # originally generated for (see the fresh-generation branch
                 # further down, which is the only place a category gets

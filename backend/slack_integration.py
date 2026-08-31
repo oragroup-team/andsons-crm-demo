@@ -103,6 +103,29 @@ def post_rendered_email(bot_token: str, channel: str, thread_ts: str, image, fil
         )
 
 
+def post_file(bot_token: str, channel: str, thread_ts: str, file_bytes: bytes, filename: str, comment: str) -> None:
+    """Upload arbitrary file bytes to Slack via files_upload_v2 - same
+    mechanism and same statelessness reasoning as post_rendered_email()
+    above, generalized to raw bytes (e.g. flow_html_export.py's approved-
+    flow HTML export) instead of a PIL Image specifically."""
+    buf = io.BytesIO(file_bytes)
+    try:
+        client = WebClient(token=bot_token)
+        client.files_upload_v2(
+            channel=channel,
+            thread_ts=thread_ts,
+            file=buf,
+            filename=filename,
+            initial_comment=comment,
+        )
+    except Exception as exc:
+        logger.exception("Failed to upload file to Slack.")
+        post_message(
+            bot_token, channel, thread_ts=thread_ts,
+            text=f"Something went wrong exporting that ({exc}).",
+        )
+
+
 def run_in_background(target, *args, **kwargs) -> None:
     thread = threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True)
     thread.start()

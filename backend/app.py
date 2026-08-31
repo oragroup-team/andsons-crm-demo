@@ -36,7 +36,7 @@ from agents.feedback_node import (
 from email_image_renderer import render_email_image
 from file_context import summarize_files
 from flows import FLOW_BY_SLUG, VALID_FLOW_SLUGS
-from flow_html_export import render_flow_html
+from flow_html_export import render_flow_html, render_step_html
 from whatsapp_image_renderer import render_whatsapp_image
 from push_image_renderer import render_push_image
 from slack_integration import (
@@ -376,20 +376,37 @@ _APPROVED_RE = re.compile(r"\bapproved\b", re.IGNORECASE)
 def _handle_flow_approval(bot_token: str, channel: str, thread_ts: str, session: dict) -> None:
     """A human typed "APPROVED" in this flow's thread - export every real
     touchpoint exactly as already posted to Slack (same rendering calls,
-    same images) into one self-contained HTML file and upload it, rather
+    same images) into one combined self-contained HTML file, AND each
+    touchpoint's own separate HTML file, and upload all of them - rather
     than leaving the approved flow as a scattered set of PNGs a human
-    would have to collect by hand."""
+    would have to collect by hand, or forcing anyone who wants just one
+    step to open the combined file to get it."""
     flow = FLOW_BY_SLUG.get(session["flow_name"])
     flow_label = flow["label"] if flow else session["flow_name"]
+    touchpoints = sorted(session["touchpoints"], key=lambda t: t["n"])
+    total = len(touchpoints)
     approved_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
     try:
-        html_bytes = render_flow_html(flow_label, session["touchpoints"], approved_at)
+        combined_bytes = render_flow_html(flow_label, touchpoints, approved_at)
     except Exception as exc:  # noqa: BLE001 - a rendering bug must never look like a silent no-op
         logger.exception("Failed to render the approved-flow HTML export for %s", session["flow_name"])
         post_message(bot_token, channel, thread_ts=thread_ts, text=f"Approved, but the HTML export failed to build ({exc}).")
         return
-    filename = f"{session['flow_name']}_approved.html"
-    post_file(bot_token, channel, thread_ts, html_bytes, filename, f"Approved - here's the full {flow_label} flow as one file.")
+    post_file(
+        bot_token, channel, thread_ts, combined_bytes, f"{session['flow_name']}_approved.html",
+        f"Approved - here's the full {flow_label} flow as one file, plus each step's own file below.",
+    )
+
+    for t in touchpoints:
+        try:
+            step_bytes = render_step_html(flow_label, t, total, approved_at)
+        except Exception as exc:  # noqa: BLE001 - one bad step's file must not stop the rest from uploading
+            logger.exception("Failed to render step %d's own HTML export for %s", t["n"], session["flow_name"])
+            post_message(bot_token, channel, thread_ts=thread_ts, text=f"Step {t['n']}'s own HTML file failed to build ({exc}).")
+            continue
+        filename = f"{session['flow_name']}_step{t['n']}_{t['channel']}.html"
+        post_file(bot_token, channel, thread_ts, step_bytes, filename, f"Step {t['n']}/{total} - {t['channel'].capitalize()}.")
 
 
 _TOUCHPOINT_FEEDBACK_RE = re.compile(r"^\s*(?:step\s*)?(\d+)\s*[:.\-]\s*(.+)$", re.IGNORECASE | re.DOTALL)

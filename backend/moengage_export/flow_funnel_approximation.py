@@ -19,14 +19,16 @@ how close they land, not to replace looking at the flow.
 
 REAL, LIVE-CONFIRMED LIMITATION - branching: many real flows split
 (Intelligent Path Optimizer, A/B tests, conditional branches) - a Funnels
-query is a strict linear sequence, so it can't represent a fork. This
-script walks a flow's structure from its TRIGGER node through CONDITION
-nodes only (the real decision points a canvas step actually is), and
-STOPS the moment it hits a SPLIT/BRANCH node, reporting how far it got
-rather than guessing which branch to follow. Action nodes (an actual
-campaign send) are skipped - MoEngage doesn't expose a generic
-"delivered" event name to query safely, and every real canvas step
-Bryan asked about was itself a CONDITION/wait, not a send.
+query is a strict linear sequence, so it can't represent a fork by
+itself. This script walks a flow's structure from its TRIGGER node all
+the way to a real end (an EXIT node), collecting every TRIGGER/CONDITION
+node's real event filter as a funnel step along the way; whenever the
+structure genuinely forks (a CONDITION's yes/no, an A/B or IPO split), it
+ASKS interactively which real path to keep following - never guessed,
+since each arm is a genuinely different, mutually exclusive population.
+Action nodes (an actual campaign send) are walked through but never
+become a step themselves - MoEngage doesn't expose a generic "delivered"
+event name to query safely.
 
 USAGE
   List flows matching a name (find the real flow_id you want):
@@ -53,14 +55,58 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import moengage_client as mc  # noqa: E402
 
 
-def _walk_to_funnel_events(nodes_by_id: dict, start_stage_id: str) -> tuple:
-    """Walks a flow's real structure from its TRIGGER node, collecting
-    every TRIGGER/CONDITION node's real event filter as one funnel step,
-    in order. Stops at the first SPLIT/BRANCH/ACTION/CONTROL(non-wait)
-    node it can't linearly represent. Returns (steps, stopped_reason) -
-    steps is a list of {"label", "filters"} ready to become Funnels API
-    event entries; stopped_reason is None if the walk reached a real dead
-    end (EXIT) cleanly, or a real one-line explanation otherwise."""
+_PASS_THROUGH_TYPES = {"BRANCH", "SPLIT", "ACTION"}
+
+
+def _branch_option_label(parent_node: dict, index: int, child_node: dict) -> str:
+    """A real, human-readable label for one fork option - the real
+    BRANCH node's own label when there is one (SPLIT children are always
+    real BRANCH nodes with their own label, e.g. "Branch 1"), or the
+    documented yes/no convention when forking straight off a CONDITION
+    (its two children are index 0 = condition met, index 1 = condition
+    not met - MoEngage's own documented convention, not inferred)."""
+    if child_node and child_node.get("type") == "BRANCH":
+        return child_node.get("label") or f"Branch {index + 1}"
+    if parent_node.get("type") == "CONDITION":
+        return "Yes - condition met" if index == 0 else "No - condition not met"
+    return (child_node.get("label") if child_node else None) or f"Path {index + 1}"
+
+
+def _pick_child(node: dict, nodes_by_id: dict) -> str:
+    """Returns the single child stage_id to keep walking from - ASKING a
+    human which real path to follow whenever the flow's own structure
+    forks (more than one child), since each arm is a genuinely different,
+    mutually exclusive population (e.g. did vs didn't meet a condition,
+    which A/B variant) that can never be picked automatically without
+    silently deciding something nobody asked for. Real, live requirement:
+    the walk has to reach a genuine end (an EXIT node), not stop at the
+    first fork - so this asks at every one, however many there are."""
+    children = node.get("child_stage_ids") or []
+    if len(children) <= 1:
+        return children[0] if children else None
+
+    label = node.get("label") or node.get("sub_type") or node.get("type")
+    print(f"\nFlow forks at '{label}' ({node.get('type')}) - which real path should the funnel keep following?")
+    options = [(cid, _branch_option_label(node, i, nodes_by_id.get(cid))) for i, cid in enumerate(children)]
+    for i, (_, opt_label) in enumerate(options, start=1):
+        print(f"  {i}. {opt_label}")
+
+    while True:
+        choice = input(f"Enter 1-{len(options)}: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(options):
+            return options[int(choice) - 1][0]
+        print("Please enter a valid number.")
+
+
+def _walk_to_funnel_events(nodes_by_id: dict, start_stage_id: str) -> list:
+    """Walks a flow's real structure from its TRIGGER node all the way to
+    a real end (an EXIT node, or simply running out of stages) - asking a
+    human which real path to follow every time the structure forks (see
+    _pick_child), never guessing and never stopping early. Collects every
+    TRIGGER/CONDITION node's real event filter as one funnel step, in
+    order; BRANCH/SPLIT/ACTION nodes and CONTROL waits/re-convergences are
+    walked through but never become a step themselves (see the module
+    docstring for why). Returns the list of steps."""
     steps = []
     stage_id = start_stage_id
     seen = set()
@@ -68,7 +114,8 @@ def _walk_to_funnel_events(nodes_by_id: dict, start_stage_id: str) -> tuple:
         seen.add(stage_id)
         node = nodes_by_id.get(stage_id)
         if node is None:
-            return steps, f"Reached an unknown stage_id {stage_id!r} - stopping."
+            print(f"Reached an unknown stage_id {stage_id!r} - stopping here.")
+            break
 
         node_type = node.get("type")
         if node_type == "TRIGGER":
@@ -77,21 +124,20 @@ def _walk_to_funnel_events(nodes_by_id: dict, start_stage_id: str) -> tuple:
         elif node_type == "CONDITION":
             condition = (node.get("config") or {}).get("condition", {})
             steps.append({"label": node.get("label") or node.get("sub_type") or "Condition", "filters": condition.get("filters", [])})
-        elif node_type == "CONTROL" and node.get("sub_type") in ("WAIT_FOR_TIMER", "GO_TO"):
-            pass  # a real delay/re-convergence, not an event - no funnel step, just keep walking
-        elif node_type == "CONTROL" and node.get("sub_type") == "EXIT":
-            return steps, None  # a clean, real end of this linear path
-        elif node_type == "ACTION":
-            pass  # a real campaign send - no safe generic "delivered" event name to query, skip
+        elif node_type == "CONTROL":
+            if node.get("sub_type") == "EXIT":
+                break  # a clean, real end of this path
+            # WAIT_FOR_TIMER / GO_TO - a real delay/re-convergence, not an
+            # event, no funnel step - just keep walking.
+        elif node_type in _PASS_THROUGH_TYPES:
+            pass  # a BRANCH label, a SPLIT's own config, or an ACTION's campaign send - not a funnel-representable event, keep walking
         else:
-            return steps, f"Flow branches here (a real {node_type}/{node.get('sub_type')} node, {node.get('label') or 'unlabeled'}) - this script only follows a single linear path."
+            print(f"Reached an unrecognized node type {node_type!r} ({node.get('label')}) - stopping here.")
+            break
 
-        children = node.get("child_stage_ids") or []
-        if len(children) > 1:
-            return steps, f"Flow branches here (after {node.get('label') or node_type}, {len(children)} real paths) - this script only follows a single linear path."
-        stage_id = children[0] if children else None
+        stage_id = _pick_child(node, nodes_by_id)
 
-    return steps, None
+    return steps
 
 
 def _to_funnel_event(step_number: int, step: dict) -> dict:
@@ -138,17 +184,14 @@ def approximate_flow(flow_id: str, days: int) -> None:
         print("No TRIGGER node found in this flow's structure - nothing to approximate.")
         return
 
-    steps, stopped_reason = _walk_to_funnel_events(nodes_by_id, trigger["stage_id"])
+    steps = _walk_to_funnel_events(nodes_by_id, trigger["stage_id"])
     if not steps:
         print("Couldn't build any real funnel steps from this flow's structure.")
         return
 
-    print(f"\nWalked {len(steps)} real step(s) from this flow's own structure:")
+    print(f"\nWalked {len(steps)} real step(s) from this flow's own structure, start to end:")
     for i, s in enumerate(steps, start=1):
         print(f"  {i}. {s['label']}")
-    if stopped_reason:
-        print(f"\nStopped early: {stopped_reason}")
-        print("(Steps found before the branch are still run below - a real, partial approximation, not a guess past that point.)")
 
     events = [_to_funnel_event(i, s) for i, s in enumerate(steps, start=1)]
     print(f"\nRunning the funnel over the last {days} day(s)...")

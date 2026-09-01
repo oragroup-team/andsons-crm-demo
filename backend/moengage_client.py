@@ -203,6 +203,104 @@ def search_campaigns(force_refresh: bool = False) -> list:
         return all_campaigns
 
 
+def search_flows(name: Optional[str] = None, status: Optional[list] = None, limit: int = 20) -> list:
+    """POST /v5/flows/search - real MoEngage Flows (early-access API), the
+    flow's own metadata only (name/status/version/tags) - NOT its
+    structure or any performance numbers, see get_flow()/the module-level
+    note below for why stats aren't available here at all. Reuses the
+    Campaigns auth (confirmed live: works with MOENGAGE_CAMPAIGN_API_KEY,
+    matching the real MoEngage docs - "Flows reuse the Campaigns
+    permissions"). One page only (`limit`, server max unconfirmed but 20
+    is the documented example default) - this client doesn't paginate
+    this endpoint since every real use so far has been "find this one
+    flow by name", not "list every flow"."""
+    url = f"{_base_url()}/v5/flows/search"
+    headers = _campaign_auth_headers()
+    payload = {"limit": limit}
+    if name:
+        payload["name"] = name
+    if status:
+        payload["status"] = status
+    resp = requests.post(url, headers=headers, json=payload, timeout=_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return resp.json().get("data", {}).get("flows", [])
+
+
+def get_flow(flow_id: str, version_no: Optional[int] = None) -> dict:
+    """GET /v5/flows/{flow_id} - a real flow's full structure: every node
+    (trigger/condition/split/branch/action/control), its real config
+    (trigger event filters, condition event filters, campaign_ids), and
+    branching (child_stage_ids). CONFIRMED LIVE (read the real OpenAPI
+    spec directly, not assumed): this endpoint has NO performance/stats
+    fields anywhere - no entered/exited/drop-off/conversion numbers, at
+    any depth. There is no documented MoEngage API that returns a flow's
+    own node-level stats (the "Entered/Current/Drops/Exits" numbers shown
+    in the MoEngage UI's flow canvas) - moengage_export/flow_funnel_
+    approximation.py exists specifically to approximate that gap using
+    this real structure plus the separate Funnels Query API below."""
+    url = f"{_base_url()}/v5/flows/{flow_id}"
+    headers = _campaign_auth_headers()
+    params = {"version_no": version_no} if version_no else None
+    resp = requests.get(url, headers=headers, params=params, timeout=_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return resp.json().get("data", {})
+
+
+def register_funnel_query(payload: dict) -> str:
+    """POST /v5/analytics/funnels - registers an async Funnels analysis
+    (step-by-step conversion across an ordered event sequence YOU define -
+    this is a general-purpose analysis tool, not tied to any flow_id).
+    Confirmed live: uses the same auth as the Analytics Dashboards API
+    above (_auth_header, MOENGAGE_DATA_API_KEY), not the Campaigns key
+    Flows/Campaigns Search need. Returns the real request_id to poll."""
+    url = f"{_base_url()}/v5/analytics/funnels"
+    headers = _auth_header()
+    headers["Content-Type"] = "application/json"
+    resp = requests.post(url, headers=headers, json=payload, timeout=_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return resp.json()["data"]["request_id"]
+
+
+def get_query_status(request_id: str) -> str:
+    """GET /v5/analytics/query/{request_id}/status - PENDING/PROCESSING
+    while still running, SUCCESSFUL or FAILED when done."""
+    url = f"{_base_url()}/v5/analytics/query/{request_id}/status"
+    resp = requests.get(url, headers=_auth_header(), timeout=_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return resp.json()["data"]["status"]
+
+
+def get_query_results(request_id: str) -> list:
+    """GET /v5/analytics/query/{request_id}/results - the resolved series
+    for a SUCCESSFUL query. Same real row shape as the Analytics
+    Dashboards API's chart data (step/metric/granularity/splitby/...) -
+    confirmed live, these two APIs share the same underlying result
+    format."""
+    url = f"{_base_url()}/v5/analytics/query/{request_id}/results"
+    resp = requests.get(url, headers=_auth_header(), timeout=_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return resp.json().get("data", [])
+
+
+def run_funnel_query(payload: dict, poll_interval: float = 3.0, max_wait: float = 120.0) -> list:
+    """Submit + poll + fetch in one call - the real async workflow every
+    Analytics Query endpoint requires, wrapped for the common case of
+    just wanting the final rows. Raises RuntimeError on FAILED or on
+    exceeding max_wait (a real query completed in a few seconds on every
+    live test so far; max_wait is generous headroom, not a tuned SLA)."""
+    request_id = register_funnel_query(payload)
+    waited = 0.0
+    while waited < max_wait:
+        status = get_query_status(request_id)
+        if status == "SUCCESSFUL":
+            return get_query_results(request_id)
+        if status == "FAILED":
+            raise RuntimeError(f"Funnel query {request_id} failed.")
+        time.sleep(poll_interval)
+        waited += poll_interval
+    raise RuntimeError(f"Funnel query {request_id} did not complete within {max_wait}s.")
+
+
 def _get(path: str, params: Optional[dict] = None) -> dict:
     """A read timeout under concurrent load is common at this workspace's
     scale (empirically ~1/3 of requests at high concurrency) and usually

@@ -119,8 +119,11 @@ def _walk_to_funnel_events(nodes_by_id: dict, start_stage_id: str) -> list:
 
         node_type = node.get("type")
         if node_type == "TRIGGER":
-            event = (node.get("config") or {}).get("trigger", {}).get("event", {})
-            steps.append({"label": node.get("label") or "Flow entry", "filters": event.get("filters", [])})
+            # Real, live-confirmed shape: config.trigger.primary_conditions.filters
+            # - NOT config.trigger.event.filters (that key doesn't exist; every
+            # real TRIGGER node's own filters live under primary_conditions).
+            trigger = (node.get("config") or {}).get("trigger", {}).get("primary_conditions", {})
+            steps.append({"label": node.get("label") or "Flow entry", "filters": trigger.get("filters", [])})
         elif node_type == "CONDITION":
             condition = (node.get("config") or {}).get("condition", {})
             steps.append({"label": node.get("label") or node.get("sub_type") or "Condition", "filters": condition.get("filters", [])})

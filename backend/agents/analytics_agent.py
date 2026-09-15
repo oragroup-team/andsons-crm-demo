@@ -1,10 +1,18 @@
 """Analytics chat agent - LangChain SQL agent over the live ORA BigQuery
 warehouse, plus real MoEngage campaign/engagement data when it's actually
-relevant to the question (moengage_summary.py, shared with the email bot's
-insight pipeline - same scan-then-summarize approach, same guardrails).
+relevant to the question. MoEngage retrieval mechanism: moengage_dump_
+context.py - a fresh full-account flow dump (moengage_export/dump_all_
+flow_stats.py) read via pandas, then deleted, every time it's asked about
+a question (see that module's own docstring for the real cost tradeoff).
+This REPLACES the chart-catalog mechanism (moengage_summary.py) that used
+to be imported here - moengage_summary.py itself is untouched, still fully
+intact, and still actively used by agents/insight_agent.py; it's simply no
+longer called from this file. Kept in place rather than deleted so it's a
+one-line import swap back if the dump-based mechanism's latency (minutes
+per question, not seconds) turns out to be a problem in practice.
 
 The agent must NEVER state a number in its final answer that didn't come
-from an actual query result (or, for MoEngage, an actual chart value).
+from an actual query result (or, for MoEngage, an actual flow-dump value).
 Enforced with a system-prompt instruction PLUS a post-hoc check: every
 number in the final answer is confirmed to appear somewhere in this run's
 tool (query) results, uploaded file, or MoEngage context; if any number
@@ -29,7 +37,8 @@ from langchain_community.utilities import SQLDatabase
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
-from moengage_summary import gather_moengage_context
+from moengage_dump_context import gather_moengage_context  # see module docstring above: replaces moengage_summary.py's
+# chart-catalog mechanism for THIS agent only - moengage_summary.py itself is untouched, still used by insight_agent.py.
 from text_sanitize import sanitize_text
 
 from .llm_provider import get_llm
@@ -206,7 +215,7 @@ MOENGAGE - THREE REAL, GENUINELY DIFFERENT DATA SURFACES, not one - each covers 
      - CORRECTED REAL FACT about control groups (a previous version of this note was WRONG and said no campaign ever has one - that was checked only against group 1's Flow-only population, not this real, complete one): 6 real campaigns DO have is_campaign_control_group_enabled = TRUE right now (all real "Rampup_Day_N_BoostErection" campaigns, control-group percentages 20-88%, confirmed live: 20/52/52/75/80/88) - query THIS table for any real "which campaigns have a control group" question, never assume the answer is universally zero. These 6 have NULL tags (control-group usage and tagging are independent, unrelated facts about a campaign - don't assume one implies the other).
      - CORRECTED REAL FACT about lifecycle categories (a previous version of this note wrongly said "Sale"/"Upgrade"/"Edu" don't exist anywhere in this real data, and separately understated how common some of these are - both corrected here from a live full-table check, not assumption): the real `tags` column has only 5 distinct non-null values across all 895 campaigns - winback (238 campaigns, by far the most common real tag), upgrade (6, a DIFFERENT set of 6 campaigns from the control-group 6 above - real names like "HL_Upgrades_HL_Active 3M Subs"), replenishment (4), promotional (2), cross-sell (1) - 645 campaigns have no tag at all, so absence of a tag is not evidence a campaign isn't e.g. a winback send, only that it wasn't tagged as one. Separately, "Edu" and "Sale" are both real, COMMON naming-convention segments in the `name` column itself (not the tags column) - Edu appears in 277 real campaign names (e.g. "Rampup_Day8_BoostErection_Edu_ED_All"), and Sale appears in 212 real campaign names, mostly real seasonal promo pushes following a "<Event>Sale_Sale_Generic_..." pattern (MoonlightSale, National Day Sale, Payweek Sale, 7.7 Sale, etc.) - a "how did our Sale campaigns do" question is real and answerable by name LIKE '%Sale%' here (config/targeting only - pair with group 1 if the question needs performance numbers for named campaigns that also appear there). Query this table (tags column AND name LIKE patterns - they capture different things) before concluding a lifecycle category doesn't exist; group 1 alone is not the complete real picture, and neither is assuming from memory.
 
-  3. The chart-based MoEngage tool (a separate real-time system, not a BigQuery table - given to you as context below when relevant, not queried via SQL) - genuinely live, catalog-selected from MoEngage's real dashboard/chart inventory. Use this ONLY for detail neither BigQuery table group above captures: day-by- day trend detail, or funnel step-by-step breakdowns not expressed as a Goal in group 1. PREFER the two BigQuery table groups above for anything they cover (revenue, CVR, control group, tags, unsubscribe/ complaint/bounce rates, real UTM values) - they give an exact queried number, not an LLM's read of a chart. There is NO email/WhatsApp/push send/open/click EVENT-level table in BigQuery itself (row-per-send- per-event) - that granularity, if a question genuinely needs it, only exists via this chart tool or the campaign-level aggregates in groups 1-2 above."""
+  3. The live MoEngage flow-dump tool (a separate real-time system, not a BigQuery table - given to you as context below when relevant, not queried via SQL) - genuinely live: a fresh full-account pull of every real flow's own send nodes (real Attempted/Sent/Delivered/Opened/Clicked/Conversions/Revenue per node, not a snapshot export) run fresh for this specific question. Use this ONLY for detail neither BigQuery table group above captures: node-level detail on a SPECIFIC named flow, or a number more current than the group-1 tables' static export date. PREFER the two BigQuery table groups above for anything they cover (revenue, CVR, control group, tags, unsubscribe/complaint/bounce rates, real UTM values) - they give an exact queried number without paying this tool's real cost (a fresh account-wide pull takes minutes, not seconds - use it deliberately, not by default). There is NO email/WhatsApp/push send/open/click EVENT-level table in BigQuery itself (row-per-send-per-event) - that granularity, if a question genuinely needs it, only exists via this flow-dump tool or the campaign-level aggregates in groups 1-2 above."""
 
 SYSTEM_PREFIX_TEMPLATE = """You are the andSons analytics assistant. andSons is a men's health telehealth \
 brand (hair loss is the flagship vertical, alongside weight loss and other supplements); all prices are \
@@ -342,11 +351,11 @@ internal schema/column name or its literal stored value (e.g. never say "Categor
 "Classification", "Order_Type", "Brand = 'AndSons'" - translate every one of these into the plain \
 business term instead: "Category-Level" + Category "HL" becomes "hair-loss-specific marketing spend", \
 not a description of which rows matched). The same rule applies to any MoEngage context you're given: \
-never say "chart", "dashboard", or a raw MoEngage metric/field label - translate it into the plain \
-business term (e.g. a chart tracking step-1-to-step-2 dropoff on a winback flow becomes "winback \
-emails that get a response", not a description of the chart). The reader should hear a business story \
-told by someone who knows the numbers cold, with zero trace that the answer came from a query or a \
-chart at all.
+never say "flow dump", "spreadsheet", "node", or a raw MoEngage metric/field label like "adjusted_opened" \
+- translate it into the plain business term (e.g. a winback flow's second-email dropoff becomes "winback \
+emails that get a response", not a description of the underlying data). The reader should hear a business \
+story told by someone who knows the numbers cold, with zero trace that the answer came from a query or a \
+raw data pull at all.
 Write like a sharp analyst briefing a colleague, not like a system describing its own query: plain, \
 confident, specific sentences, no hedging, no filler ("this figure reflects...", "it is worth noting \
 that..."). Aim for 3 to 5 sentences for most questions, fewer for genuinely simple ones.
@@ -1055,9 +1064,9 @@ class _MoEngageExclusive(BaseModel):
         "provide - no revenue, no order count, no customer count, no spend, and no per-campaign opens/ "
         "clicks/CVR/unsubscribe/control-group metric either, since those now live in real, exact BigQuery "
         "tables too (see schema notes: moengage_campaigns_email/whatsapp/push, moengage_flows_summary) - "
-        "prefer that real, queryable source over a chart summary whenever a question could be answered "
-        "either way. This should be True mainly for genuine chart-only detail those tables don't capture "
-        "(day-by-day trend over time, funnel step-by-step breakdown). False if answering it needs a "
+        "prefer that real, queryable source over a live MoEngage pull whenever a question could be answered "
+        "either way (that pull is also real but far slower - minutes, not seconds). This should be True "
+        "mainly for genuine node-level detail on a specific flow those tables don't capture. False if answering it needs a "
         "database query for anything, even partially, or if you're genuinely not sure."
     )
 
@@ -1231,7 +1240,7 @@ def ask_analytics(
             return {"answer": PII_BLOCKED_MESSAGE, "sql_query": "", "verified": False, "data_source": "moengage", "moengage_used": True}
         verified = _verify_numbers(raw_answer, moengage_context)
         answer = raw_answer if verified else (
-            "I couldn't verify that figure - the number in my draft answer didn't trace back to a real chart result."
+            "I couldn't verify that figure - the number in my draft answer didn't trace back to a real MoEngage result."
         )
         return {"answer": answer, "sql_query": "", "verified": verified, "data_source": "moengage", "moengage_used": True}
 
@@ -1299,19 +1308,20 @@ def ask_analytics(
     if moengage_used:
         agent_input = (
             "Real MoEngage campaign/engagement data relevant to this question, given to you directly "
-            "below FROM THE CHART-BASED TOOL - a separate, narrower source than the real "
+            "below FROM A LIVE FLOW-DUMP TOOL (a fresh full-account pull, run just now for this question) "
+            "- a separate, narrower source than the real "
             "moengage_campaigns_email/whatsapp/push/flows_summary BigQuery tables (see schema notes), "
             "which now hold real, exact per-campaign opens/clicks/CVR/unsubscribe/control-group numbers - "
-            "PREFER those tables via SQL for anything they cover (they give an exact queried number, not "
-            "an LLM's read of a chart); use this chart-based context below only for genuine detail those "
-            "tables don't have (day-by-day trend, funnel step-by-step breakdown). "
+            "PREFER those tables via SQL for anything they cover (they give an exact queried number "
+            "without paying this tool's real cost); use this live context below only for genuine detail "
+            "those tables don't have (node-level detail on a specific named flow). "
             "USE IT: if it answers something the tables genuinely don't, cite it directly - do not say "
             "that data isn't available if this context already shows it. Still run SQL for anything this "
             "doesn't cover (revenue, order counts, or the exact per-campaign metrics above), and "
             "combine both ONLY when the question genuinely needs both. A real, serious mistake this "
             "caused before: a plain 'how did automation perform this year' question, already fully and "
             "cleanly answered by one SQL revenue/order total, got padded out with several unrelated "
-            "single-flow chart snippets (daily send/open counts for named flows the question never asked "
+            "single-flow snippets (send/open counts for named flows the question never asked "
             "about) glued on with no stated relationship to the SQL total - a reader can't tell if those "
             "numbers are included in, separate from, or overlapping with the real total, which makes the "
             "whole answer impossible to trust. If the SQL total alone actually answers the question, stop "
@@ -1325,7 +1335,7 @@ def ask_analytics(
             + moengage_context + "\n---\n\n" + agent_input
         )
     elif moengage_checked:
-        # Real gap this closes: MoEngage's own real chart catalog was
+        # Real gap this closes: MoEngage's own live flow dump was
         # genuinely checked (not skipped) and came back with nothing
         # relevant to THIS question - but without telling the SQL agent
         # that a real check happened, it has no way to know, and ends up
@@ -1333,14 +1343,14 @@ def ask_analytics(
         # engagement tables in the data warehouse") in a way that reads as
         # if MoEngage was never considered at all, when it genuinely was.
         # Caught live: "is list health deteriorating" got exactly this
-        # vague, misleading answer even after a real MoEngage catalog
-        # check confirmed no unsubscribe/complaint/bounce chart exists
+        # vague, misleading answer even after a real MoEngage check
+        # confirmed no unsubscribe/complaint/bounce metric exists
         # anywhere in the real workspace - the honest, specific version of
         # that same true fact ("MoEngage doesn't track this specific
         # metric") is what should reach the final answer, not a generic
         # "not in the data warehouse" that implies no one looked.
         agent_input = (
-            "MoEngage's real chart catalog was already checked for this question and found nothing "
+            "MoEngage was already checked live for this question and found nothing "
             "relevant - the real reason, verbatim, is below. If your final answer touches anything that "
             "reason covers, state that SPECIFIC reason plainly (e.g. 'MoEngage doesn't track that as its "
             "own metric' or whatever the real reason says) - never say generically that the data 'isn't in "

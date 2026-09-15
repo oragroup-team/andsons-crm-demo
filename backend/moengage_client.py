@@ -44,7 +44,44 @@ _MAX_WORKERS = 6  # higher concurrency measurably increases MoEngage read-timeou
 # rate at this workspace's scale (~1/3 of 137 charts timed out at 16 workers) -
 # this is empirically the more reliable tradeoff, not just a slower one.
 _MAX_RETRIES = 2
+_MAX_RATE_LIMIT_RETRIES = 6  # see _request_with_retry - real, live-confirmed need:
+# a parallel account-wide crawl (dump_all_flow_stats.py, 150 real flows / 6
+# workers) hit real 429s on /v5/flows/{id} well before the whole batch was
+# through - 2 retries wasn't enough to ride that out, 6 was.
 _CACHE_TTL_SECONDS = 900  # 15 min - see module docstring
+
+
+def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
+    """Shared retry wrapper for every real MoEngage HTTP call in this
+    client. Two real, live-confirmed failure modes get retried with
+    backoff: a transient timeout/connection error, and MoEngage's own
+    real per-endpoint rate limiting (429) - confirmed live not just on
+    the documented 100-calls/min Campaign Stats endpoint, but on
+    /v5/flows/{id} too, the hard way (a parallel 150-flow crawl silently
+    dropped ~40 flows to unretried 429s before this existed). A 429
+    honors a real Retry-After header when MoEngage sends one, otherwise
+    backs off 20s flat. Every other status (400/401/404/...) is returned
+    as-is, unexamined - the right error message differs per endpoint
+    (which env var a 401 should point callers at), so that's left to each
+    caller, same as before this helper existed."""
+    last_exc = None
+    for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+        try:
+            resp = requests.request(method, url, timeout=_TIMEOUT_SECONDS, **kwargs)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_exc = exc
+            if attempt < _MAX_RETRIES:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+        if resp.status_code == 429 and attempt < _MAX_RATE_LIMIT_RETRIES:
+            wait = float(resp.headers.get("Retry-After", 20))
+            logger.warning("%s %s rate-limited (429) - waiting %.0fs before retrying (attempt %d/%d).",
+                            method, url, wait, attempt + 1, _MAX_RATE_LIMIT_RETRIES)
+            time.sleep(wait)
+            continue
+        return resp
+    raise last_exc  # unreachable, satisfies type checkers
 
 _cache = {"snapshots": None, "fetched_at": 0.0}
 _catalog_cache = {"refs": None, "fetched_at": 0.0}
@@ -169,27 +206,14 @@ def search_campaigns(force_refresh: bool = False) -> list:
         page = 1
         while True:
             payload = {"page": page, "limit": _CAMPAIGN_SEARCH_PAGE_LIMIT, "request_id": str(uuid.uuid4())}
-            last_exc = None
-            batch = None
-            for attempt in range(_MAX_RETRIES + 1):
-                try:
-                    resp = requests.post(url, headers=headers, json=payload, timeout=_TIMEOUT_SECONDS)
-                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-                    last_exc = exc
-                    if attempt < _MAX_RETRIES:
-                        time.sleep(1.5 * (attempt + 1))
-                        continue
-                    raise
-                if resp.status_code == 401:
-                    raise RuntimeError(
-                        "MoEngage rejected the Campaigns Search request (401) - check "
-                        "MOENGAGE_WORKSPACE_ID/MOENGAGE_CAMPAIGN_API_KEY."
-                    )
-                resp.raise_for_status()
-                batch = resp.json()
-                break
-            if batch is None:
-                raise last_exc  # unreachable, satisfies type checkers
+            resp = _request_with_retry("POST", url, headers=headers, json=payload)
+            if resp.status_code == 401:
+                raise RuntimeError(
+                    "MoEngage rejected the Campaigns Search request (401) - check "
+                    "MOENGAGE_WORKSPACE_ID/MOENGAGE_CAMPAIGN_API_KEY."
+                )
+            resp.raise_for_status()
+            batch = resp.json()
             if not batch:
                 break
             all_campaigns.extend(batch)
@@ -203,6 +227,143 @@ def search_campaigns(force_refresh: bool = False) -> list:
         return all_campaigns
 
 
+_CAMPAIGN_STATS_ID_LIMIT = 10  # real, documented server-side max for campaign_ids per call
+_CAMPAIGN_STATS_MAX_DAYS = 30  # real, documented server-side max date-range span per call
+
+
+def get_campaign_stats(
+    campaign_ids: list,
+    start_date: str,
+    end_date: str,
+    attribution_type: str = "VIEW_THROUGH",
+    metric_type: str = "TOTAL",
+) -> dict:
+    """POST /core-services/v1/campaign-stats - the ONE real MoEngage surface
+    that returns actual message performance numbers (sent/delivered/opened/
+    adjusted_open/click, plus conversion_goal_stats with real revenue) for a
+    specific set of real campaign_ids - confirmed live. This is genuinely
+    different from every other function in this module: search_campaigns()
+    (Campaigns Search API) returns config only, get_flow() (Flows API)
+    returns structure only, and neither the Analytics Dashboards API nor the
+    Funnels API can be pointed at an arbitrary campaign_id at all. A flow's
+    own ACTION nodes (get_flow()'s structure) already carry the real
+    campaign_id each one sends - that's the bridge from "flow node" to
+    "real performance numbers" this function provides.
+
+    Reuses the Campaigns auth (_campaign_auth_headers - MOENGAGE_CAMPAIGN_API_KEY
+    + MOE-APPKEY, confirmed live same as search_campaigns/search_flows).
+
+    Real, documented server-side limits, both enforced by chunking here
+    rather than left for the caller to hit: max 10 campaign_ids per call
+    (extra ids beyond that are silently split into further calls and
+    merged), and max 30-day span per call (a longer start/end range is
+    split into consecutive <=30-day windows and the per-campaign
+    performance_stats/conversion_goal_stats/delivery_funnel counts are
+    summed across them - rates like ctr/open_rate are NOT summable, so
+    per-window rate fields are dropped from the merged result; recompute
+    a rate from the summed counts if you need one).
+
+    attribution_type/metric_type are passed straight through - MoEngage's
+    own real, documented enum values (VIEW_THROUGH/CLICK_THROUGH/
+    IN_SESSION/TOTAL_CONVERSIONS/CLICK_CONVERSIONS for attribution_type,
+    TOTAL/UNIQUE for metric_type). Match whatever the MoEngage UI is set
+    to if you need the numbers to line up with what a human sees there.
+
+    Returns {campaign_id: <real per-campaign response, keyed by platform ->
+    locale -> variation>} - the real nested shape MoEngage returns, summed
+    across date-range chunks when chunking was needed. Callers should
+    reach into variations.all_variations.performance_stats /
+    .conversion_goal_stats for the numbers, same as MoEngage's own UI."""
+    if not campaign_ids:
+        return {}
+
+    def _date_chunks(start: str, end: str) -> list:
+        from datetime import datetime, timedelta
+
+        start_dt = datetime.strptime(start, "%Y-%m-%d")
+        end_dt = datetime.strptime(end, "%Y-%m-%d")
+        chunks = []
+        cursor = start_dt
+        while cursor <= end_dt:
+            chunk_end = min(cursor + timedelta(days=_CAMPAIGN_STATS_MAX_DAYS - 1), end_dt)
+            chunks.append((cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
+            cursor = chunk_end + timedelta(days=1)
+        return chunks
+
+    def _sum_into(target: dict, source: dict) -> None:
+        """Merges one date-chunk's real numeric fields into the running
+        total in place - int/float fields are summed, everything else
+        (goal_name, non-numeric) is kept from whichever chunk set it
+        first. Rate fields get summed too here but are deleted from the
+        final merged dict below since a summed rate is meaningless."""
+        for key, value in source.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                target[key] = target.get(key, 0) + value
+            elif isinstance(value, dict):
+                _sum_into(target.setdefault(key, {}), value)
+            elif key not in target:
+                target[key] = value
+
+    _RATE_FIELD_SUFFIXES = ("_rate", "rate", "ctr", "ctor")
+
+    def _strip_unsummable_rates(node) -> None:
+        """Rates (ctr/open_rate/delivery_rate/cvr/...) don't survive
+        summing across date chunks - only applied when chunking actually
+        happened (a single-chunk call returns MoEngage's real rate values
+        untouched)."""
+        if isinstance(node, dict):
+            for key in list(node.keys()):
+                if isinstance(node[key], dict):
+                    _strip_unsummable_rates(node[key])
+                elif isinstance(node[key], (int, float)) and any(
+                    key == suf or key.endswith(suf) for suf in _RATE_FIELD_SUFFIXES
+                ):
+                    del node[key]
+
+    url = f"{_base_url()}/core-services/v1/campaign-stats"
+    headers = _campaign_auth_headers()
+    date_chunks = _date_chunks(start_date, end_date)
+
+    merged: dict = {}
+    for chunk_start, chunk_end in date_chunks:
+        for i in range(0, len(campaign_ids), _CAMPAIGN_STATS_ID_LIMIT):
+            id_batch = campaign_ids[i : i + _CAMPAIGN_STATS_ID_LIMIT]
+            payload = {
+                "request_id": str(uuid.uuid4()),
+                "campaign_ids": id_batch,
+                "start_date": chunk_start,
+                "end_date": chunk_end,
+                "attribution_type": attribution_type,
+                "metric_type": metric_type,
+            }
+            # Real, documented limit: 100 calls/min per workspace on this
+            # endpoint - a bulk, many-campaign export can realistically hit
+            # it, unlike the single-flow case this client was first built
+            # for; _request_with_retry handles the 429 backoff/retry.
+            resp = _request_with_retry("POST", url, headers=headers, json=payload)
+            if resp.status_code == 401:
+                raise RuntimeError(
+                    "MoEngage rejected the Campaign Stats request (401) - check "
+                    "MOENGAGE_WORKSPACE_ID/MOENGAGE_CAMPAIGN_API_KEY."
+                )
+            resp.raise_for_status()
+            resp_json = resp.json()
+
+            for campaign_id, entries in resp_json.get("data", {}).items():
+                target_entries = merged.setdefault(campaign_id, [])
+                for j, entry in enumerate(entries):
+                    if j >= len(target_entries):
+                        target_entries.append({})
+                    _sum_into(target_entries[j], entry)
+
+    if len(date_chunks) > 1:
+        for entries in merged.values():
+            for entry in entries:
+                _strip_unsummable_rates(entry)
+
+    return merged
+
+
 def search_flows(name: Optional[str] = None, status: Optional[list] = None, limit: int = 20) -> list:
     """POST /v5/flows/search - real MoEngage Flows (early-access API), the
     flow's own metadata only (name/status/version/tags) - NOT its
@@ -210,10 +371,9 @@ def search_flows(name: Optional[str] = None, status: Optional[list] = None, limi
     note below for why stats aren't available here at all. Reuses the
     Campaigns auth (confirmed live: works with MOENGAGE_CAMPAIGN_API_KEY,
     matching the real MoEngage docs - "Flows reuse the Campaigns
-    permissions"). One page only (`limit`, server max unconfirmed but 20
-    is the documented example default) - this client doesn't paginate
-    this endpoint since every real use so far has been "find this one
-    flow by name", not "list every flow"."""
+    permissions"). One page only (`limit`, real confirmed server-side max
+    100 - see list_all_flows() below for "give me every real flow", which
+    this function does NOT do on its own)."""
     url = f"{_base_url()}/v5/flows/search"
     headers = _campaign_auth_headers()
     payload = {"limit": limit}
@@ -221,9 +381,38 @@ def search_flows(name: Optional[str] = None, status: Optional[list] = None, limi
         payload["name"] = name
     if status:
         payload["status"] = status
-    resp = requests.post(url, headers=headers, json=payload, timeout=_TIMEOUT_SECONDS)
+    resp = _request_with_retry("POST", url, headers=headers, json=payload)
     resp.raise_for_status()
     return resp.json().get("data", {}).get("flows", [])
+
+
+def list_all_flows(status: Optional[list] = None) -> list:
+    """Every real flow in the account, fully paginated - confirmed live:
+    /v5/flows/search returns real cursor pagination (`has_more` +
+    `next_cursor` in `data`, undocumented in the endpoint's own written
+    spec but present in every real response), capped at the real
+    server-side max of 100 per page. 150 real flows confirmed live in this
+    workspace across ACTIVE/PAUSED/STOPPED/RETIRED/DRAFT - `status` (same
+    real enum search_flows takes) filters server-side same as there; omit
+    it for genuinely every flow regardless of status."""
+    url = f"{_base_url()}/v5/flows/search"
+    headers = _campaign_auth_headers()
+    all_flows = []
+    cursor = None
+    while True:
+        payload = {"limit": 100}
+        if status:
+            payload["status"] = status
+        if cursor:
+            payload["cursor"] = cursor
+        resp = _request_with_retry("POST", url, headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+        all_flows.extend(data.get("flows", []))
+        if not data.get("has_more") or not data.get("next_cursor"):
+            break
+        cursor = data["next_cursor"]
+    return all_flows
 
 
 def get_flow(flow_id: str, version_no: Optional[int] = None) -> dict:
@@ -241,7 +430,12 @@ def get_flow(flow_id: str, version_no: Optional[int] = None) -> dict:
     url = f"{_base_url()}/v5/flows/{flow_id}"
     headers = _campaign_auth_headers()
     params = {"version_no": version_no} if version_no else None
-    resp = requests.get(url, headers=headers, params=params, timeout=_TIMEOUT_SECONDS)
+    resp = _request_with_retry("GET", url, headers=headers, params=params)
+    if resp.status_code == 401:
+        raise RuntimeError(
+            "MoEngage rejected the Flows request (401) - check "
+            "MOENGAGE_WORKSPACE_ID/MOENGAGE_CAMPAIGN_API_KEY."
+        )
     resp.raise_for_status()
     return resp.json().get("data", {})
 

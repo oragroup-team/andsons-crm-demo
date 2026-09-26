@@ -5,12 +5,28 @@
 # --set-env-vars breaks on BIGQUERY_TABLES' commas, hence the YAML file).
 GROQ_API_KEY: ""
 ANTHROPIC_API_KEY: ""
-COPYWRITER_PROVIDER: "groq"
-SWEEPER_PROVIDER: "groq"
-ANALYTICS_PROVIDER: "groq"
+# Claude (Sonnet 5) is the primary engine for every agent - Groq is wired
+# in as an automatic fallback (llm_provider.py's _anthropic_available()
+# health check), not something you need to configure separately. Sonnet 5,
+# not Opus 5, is deliberate: Opus 5 as the default burned a real ~$100 in
+# credits during testing before this was fixed - see llm_provider.py's own
+# DEFAULT_MODELS comment.
+COPYWRITER_PROVIDER: "anthropic"
+SWEEPER_PROVIDER: "anthropic"
+ANALYTICS_PROVIDER: "anthropic"
+HEAD_OF_CRM_PROVIDER: "anthropic"
+CREATIVE_DIRECTOR_PROVIDER: "anthropic"
 COPYWRITER_GROQ_MODEL: "openai/gpt-oss-120b"
 SWEEPER_GROQ_MODEL: "openai/gpt-oss-120b"
 ANALYTICS_GROQ_MODEL: "openai/gpt-oss-120b"
+HEAD_OF_CRM_GROQ_MODEL: "openai/gpt-oss-120b"
+CREATIVE_DIRECTOR_GROQ_MODEL: "openai/gpt-oss-120b"
+COPYWRITER_ANTHROPIC_MODEL: "claude-sonnet-5"
+SWEEPER_ANTHROPIC_MODEL: "claude-sonnet-5"
+ANALYTICS_ANTHROPIC_MODEL: "claude-sonnet-5"
+VISUAL_QA_ANTHROPIC_MODEL: "claude-sonnet-5"
+HEAD_OF_CRM_ANTHROPIC_MODEL: "claude-sonnet-5"
+CREATIVE_DIRECTOR_ANTHROPIC_MODEL: "claude-sonnet-5"
 BIGQUERY_PROJECT_ID: "ora-bigquery"
 BIGQUERY_DATASET: "ora_bigquery_pipeline"
 BIGQUERY_TABLES: "dotcom_plus_marketplace,updated_sales_data,marketing_spend_data"
@@ -29,3 +45,22 @@ MOENGAGE_DC: ""
 # this deploy's own project (session_store.py) if left blank, which is
 # correct for a standard deploy; only needed if that ever changes.
 FIRESTORE_PROJECT_ID: ""
+# MoEngage daily flow tracker (moengage_export/daily_flow_tracker.py) - see
+# backend/.env.example for what each does. CRON_SECRET: put the real
+# secret here AND configure Cloud Scheduler's HTTP target to send it as
+# the X-Cron-Secret header (README "Deploying to Google Cloud" has the
+# exact `gcloud scheduler jobs create` command). MOENGAGE_EXPORT_GCS_BUCKET:
+# real bucket name (e.g. via `gsutil mb gs://<project>-moengage-export`) -
+# required in production, both the cron endpoint and the Analytics Chat
+# agent depend on it for durable storage across Cloud Run instances.
+CRON_SECRET: ""
+MOENGAGE_EXPORT_GCS_BUCKET: ""
+# Real per-brand/market production MySQL warehouse (see backend/
+# warehouse_client.py) - optional; the analytics agent's warehouse_* tools
+# simply report a brand as "not configured" if its 4 vars below are blank.
+# Repeat this 4-line block for each real brand key: AS_SG, OVA_SG, AS_MY,
+# OVA_MY, AS_PH, OVA_PH, MODULES_SG, AS_GL.
+AS_SG_DB_HOST: ""
+AS_SG_DB_NAME: ""
+AS_SG_DB_USER: ""
+AS_SG_DB_PASSWORD: ""

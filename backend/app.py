@@ -200,6 +200,36 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/cron/daily-flow-tracker", methods=["POST"])
+def cron_daily_flow_tracker():
+    """Triggered once a day at 06:00 SGT by Cloud Scheduler (22:00 UTC the
+    previous calendar day - SGT has no DST, so this offset is fixed year-
+    round; see the README/deploy notes for the exact `gcloud scheduler
+    jobs create` command). Real auth: a shared secret header, not Slack-
+    style request signing - Cloud Scheduler's HTTP target supports a fixed
+    custom header, which is exactly what CRON_SECRET is checked against
+    here. Runs the real MoEngage pull synchronously (confirmed live: ~1-2
+    minutes for the whole account, well inside this service's own 300s
+    Cloud Run timeout) rather than the background-thread-plus-ack pattern
+    the Slack endpoints use - Cloud Scheduler doesn't need a fast ack the
+    way Slack's 3-second webhook window does."""
+    if not os.environ.get("CRON_SECRET") or request.headers.get("X-Cron-Secret") != os.environ.get("CRON_SECRET"):
+        return "Forbidden", 403
+
+    from moengage_export.daily_flow_tracker import run as run_daily_flow_tracker, _DEFAULT_OUT_PREFIX, _DEFAULT_HISTORY_PATH
+
+    try:
+        result = run_daily_flow_tracker(
+            days=1, status=None, out_prefix=_DEFAULT_OUT_PREFIX, history_path=_DEFAULT_HISTORY_PATH,
+            gcs_bucket=os.environ.get("MOENGAGE_EXPORT_GCS_BUCKET"),
+        )
+    except Exception as exc:  # noqa: BLE001 — surfaced in Cloud Scheduler's own run history either way
+        logging.exception("Daily MoEngage flow tracker cron run failed")
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(result)
+
+
 # --- Slack slash commands (for office testing) ---
 # Both endpoints must ack within Slack's 3-second window, so the real work
 # happens in a background thread and the final result is posted to Slack's

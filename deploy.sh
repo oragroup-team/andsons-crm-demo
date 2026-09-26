@@ -59,11 +59,17 @@ MOENGAGE_SECRETS="MOENGAGE_CAMPAIGN_API_KEY=moengage-campaign-api-key:latest"
 # one instance running 24/7 rather than scaling to zero - worth it for a
 # tool real teammates are relying on for real answers in Slack.
 #
-# --timeout raised from 120 to 300: confirmed live, a genuinely complex
-# multi-table/multi-brand question can take longer than 120s end to end on
-# the direct /ask endpoint (which blocks synchronously, unlike the Slack
-# path above) - a real "upstream request timeout" was reproduced live on
-# one such question. 300s is generous headroom without being unbounded.
+# --timeout raised from 120 to 300, then to 900 (2026-09-24): confirmed
+# live, a genuinely complex multi-table/multi-brand question can take
+# longer than 120s end to end on the direct /ask endpoint (which blocks
+# synchronously, unlike the Slack path above) - a real "upstream request
+# timeout" was reproduced live on one such question, fixed by the 120->300
+# raise. 300->900: the /cron/daily-flow-tracker endpoint (also synchronous,
+# no fast-ack+background-thread pattern yet) started pulling 7 real
+# MoEngage workspaces per run instead of 1 once multi-brand support was
+# added - a single-workspace run already took ~130s, so 7 sequentially
+# genuinely risked exceeding 300s. 900s is generous headroom for that,
+# without being unbounded (Cloud Run's own real max is 3600s).
 #
 # NOTE: this exact block has been found reverted on disk twice now by
 # something outside this session's own edits (not a deploy - the live
@@ -84,7 +90,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --env-vars-file=cloudrun-env.yaml \
   --set-secrets="/secrets/gcp-key.json=${SECRET_NAME}:latest,${SLACK_SECRETS},${MOENGAGE_SECRETS}" \
   --memory=1Gi \
-  --timeout=300 \
+  --timeout=900 \
   --min-instances=1 \
   --no-cpu-throttling
 
@@ -93,3 +99,10 @@ echo "Deployed. If this was the first-ever deploy, grab the Service URL"
 echo "printed above, put it in cloudrun-env.yaml's PUBLIC_BASE_URL, and"
 echo "run this script again (or use 'gcloud run services update' for a"
 echo "config-only change that skips the rebuild)."
+
+# --- Publish to GitHub (only reached if the deploy above succeeded) --------
+# Keeps the repo identical to what is live, whoever runs the deploy, so
+# teammates can just `git pull`. Optional commit message: ./deploy.sh "what changed".
+# Skip with SKIP_GIT_PUSH=1, preview with DRY_RUN=1. See publish_to_github.sh.
+./publish_to_github.sh "${1:-Deploy andsons-crm-demo ($(date -u '+%Y-%m-%d %H:%M') UTC)}" \
+  backend frontend Dockerfile deploy.sh publish_to_github.sh cloudrun-env.example.yaml README.md guides .gitignore

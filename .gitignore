@@ -13,7 +13,14 @@ backend/.env
 frontend/node_modules/
 frontend/dist/
 frontend/.env
+ova_email/vendor/
+ova_email/.env
 __pycache__/
 *.pyc
 .DS_Store
 cloudrun-env.yaml
+
+# Raw OVA brand source assets (148MB) - the curated, re-encoded copies the app
+# actually uses live in ova_email/static/hero_images/ and ARE tracked. Keeping the
+# originals out of git keeps the repo small and every deploy upload fast.
+01_OVA_Rebrand_2025/

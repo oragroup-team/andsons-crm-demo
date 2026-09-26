@@ -32,6 +32,7 @@ import argparse
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -140,19 +141,35 @@ def _funnel_payload(events: list, days: int) -> dict:
     }
 
 
-def entered_counts_for_path(path: list, days: int) -> dict:
+def entered_counts_for_path(path: list, days: int, retries: int = 1) -> dict:
     """Runs one real Funnels query for one path's TRIGGER/CONDITION steps,
     returns {stage_id: entered_count}. Skipped (returns {}) for a path with
     no funnel-representable steps at all (shouldn't happen - every path
-    starts at the flow's own TRIGGER - but guarded rather than assumed)."""
+    starts at the flow's own TRIGGER - but guarded rather than assumed).
+
+    Real, live-confirmed behavior: a genuinely high share of real Funnels
+    queries come back FAILED with no further detail from MoEngage's own
+    status endpoint (confirmed live: a brand-new flow with ~zero real
+    event history, or a narrow 1-day window, both do this) - `retries`
+    gives each path one real second attempt in case it's transient, but
+    this is NOT assumed to fix a systematic case (e.g. genuinely zero
+    events in the window) - a path that fails on every attempt still
+    returns {} and is reported, not silently retried forever."""
     steps = _funnel_steps_for_path(path)
     if not steps:
         return {}
     events = [_to_funnel_event(i, s) for i, s in enumerate(steps, start=1)]
-    try:
-        results = mc.run_funnel_query(_funnel_payload(events, days))
-    except Exception as exc:  # noqa: BLE001 - one path's funnel failing shouldn't drop the rest
-        print(f"  Funnel query failed for one path: {exc}")
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            results = mc.run_funnel_query(_funnel_payload(events, days))
+            break
+        except Exception as exc:  # noqa: BLE001 - one path's funnel failing shouldn't drop the rest
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(2)
+    else:
+        print(f"  Funnel query failed for one path: {last_exc}")
         return {}
     by_step = {}
     for row in results:

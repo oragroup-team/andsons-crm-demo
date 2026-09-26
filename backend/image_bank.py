@@ -46,6 +46,8 @@ Selection is bank-only: there is no image-generation fallback. If none of
 these genuinely fit an email, the correct choice is "none" (text-first).
 """
 
+import random
+
 HERO_BANK = {
     "smiling": {
         "url": "/hero-images/smiling.jpg",
@@ -292,12 +294,23 @@ def hero_bank_for_category(category: str) -> dict:
     DIFFERENT specific category. Falls back to the full "hair_loss" set
     (the original, largest, most-reviewed bank) for an unrecognised
     category string, so a typo or a not-yet-supported category never
-    silently returns an empty bank."""
+    silently returns an empty bank.
+
+    REAL BIAS FIX: the returned dict's order is shuffled on every call, not
+    HERO_BANK's own fixed definition order - copywriter_agent.py and
+    creative_director_agent.py both build their hero catalog text straight
+    from this dict's iteration order, and always presenting candidates in
+    the exact same order on every single call risks a real, well-
+    documented LLM failure mode (list-position bias: favouring an item
+    because of where it sits in a long list, not because it genuinely fits
+    best). Shuffling here, once, centrally, fixes it for every caller."""
     if category not in CATEGORIES:
         category = "hair_loss"
-    return {
-        key: entry
+    matches = [
+        (key, entry)
         for key, entry in HERO_BANK.items()
         if entry["category"] in (category, "general")
         and category not in entry.get("exclude_categories", [])
-    }
+    ]
+    random.shuffle(matches)
+    return dict(matches)

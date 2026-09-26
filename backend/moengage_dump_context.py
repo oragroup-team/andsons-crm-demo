@@ -2,48 +2,48 @@
 ONLY) - the DUMP-based mechanism, not the chart-catalog reasoning
 moengage_summary.py implements. moengage_summary.py is NOT touched or
 deleted by this file - it's still fully intact and still actively used by
-agents/insight_agent.py, which keeps importing it directly. This is a
-deliberate, parallel replacement scoped to analytics_agent.py alone: that
-agent's one import line was pointed at this module instead, and the old
-mechanism is left in place, unused from there, rather than removed - see
-analytics_agent.py's own comment at the import site.
+agents/insight_agent.py, which keeps importing it directly.
 
-MECHANISM (exactly as requested): every time this module is asked about a
-question, it (1) runs a FRESH full-account flow dump - moengage_export/
-dump_all_flow_stats.dump_all(), the same script built standalone for a
-one-off spreadsheet handoff - to a per-call temp Excel/SQLite file pair,
-(2) reads the Excel with pandas to find and summarize whatever's relevant
-to the question, then (3) deletes both files it just wrote in a `finally`,
-so nothing dump-related is ever left on disk between questions or across
-concurrent requests (each call uses its own uuid-suffixed temp path -
-matters because Slack questions each run on their own background thread,
-see moengage_client.py's module docstring).
+MECHANISM (real architecture change, 2026-09-24): this module used to run a
+FRESH full-account dump on every single question (minutes-slow, see git
+history for that version's own docstring on the real cost). It now READS
+the pre-generated files moengage_export/daily_flow_tracker.py's own daily
+cron run already produced - moengage_export/app.py's /cron/daily-flow-
+tracker endpoint runs that script once a day at 06:00 SGT (see app.py's own
+docstring on that route) - rather than paying the live-dump cost per
+question. Real trade made explicitly: this module can now be seconds-fast
+per question instead of minutes-slow, at the real cost that its numbers
+are only as fresh as the most recent daily run, not live-to-the-second.
+That's the same trade the actual daily_flow_tracker.xlsx handoff to Bryan
+already makes - this module just reads the same real files rather than
+re-deriving them.
 
-REAL COST TRADEOFF, stated plainly rather than hidden: a fresh full-account
-dump (150+ real flows, ~500 real campaigns, confirmed live) takes on the
-order of MINUTES, not seconds - confirmed live building this script for a
-one-off handoff. This module only pays that cost when the cheap flow-name
-selection step below judges the question plausibly needs flow/campaign
-data at all, but even then, a chat question answered via this path is now
-itself minutes-slow. That's a real, meaningful UX regression versus the
-chart-catalog mechanism this replaces (which fetched only the handful of
-already-built charts a question needed, not the whole account) - accepted
-here because the dump-based mechanism is what was explicitly asked for;
-worth revisiting (e.g. a short-TTL cache of the last dump) if this latency
-turns out to be a problem in practice for a live chat agent.
+TWO REAL FILES READ, not one - see daily_flow_tracker.py's own docstring
+for how each is produced:
+  1. THE LATEST PULL (daily_flow_tracker.csv) - most recent day's real
+     numbers, one row per flow's send node - used for "how is X doing"
+     / current-state questions.
+  2. THE HISTORY (daily_flow_tracker_history.csv) - every day's numbers,
+     upserted not overwritten - used to give a genuine multi-day/periodic
+     trend for a selected flow (e.g. day-by-day Sent/Revenue over the last
+     couple of weeks), not just a single day's snapshot. This is the real
+     fix for a live, previously-true complaint: earlier versions of this
+     whole mechanism only ever had "today's" or "yesterday's" one-day
+     window, with no way to answer a genuinely comparative/trend question
+     ("is this getting better or worse") at all.
 
-Same real 4-tuple return contract as moengage_summary.gather_moengage_
-context(question, llm) -> (text, relevant, raw_summary, checked) - see
-that function's own docstring for what each element means. Matching it
-exactly is why analytics_agent.py only had to change its import line; none
-of its own downstream verification/source-selection/prompt-injection logic
-needed to change."""
+GCS-AWARE READING - Cloud Run's own local disk is NOT durable across
+instances/redeploys (confirmed via Cloud Run's documented execution model),
+and this same deployed service can run more than one instance, so the
+instance answering a Slack question is not guaranteed to be the same one
+the daily cron endpoint ran on. When MOENGAGE_EXPORT_GCS_BUCKET is set,
+both files are downloaded fresh from GCS before being read - the real,
+durable source of truth in production. When unset (local/dev use), both
+are just read directly off local disk - see _load_dataframe()."""
 import logging
 import os
 import sys
-import tempfile
-import uuid
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 from langchain_core.prompts import ChatPromptTemplate
@@ -51,22 +51,38 @@ from pydantic import BaseModel, Field
 
 import moengage_client
 
-# dump_all_flow_stats.py lives in moengage_export/, not directly in backend/
+# daily_flow_tracker.py lives in moengage_export/, not directly in backend/
 # (where this file and moengage_client.py live) - add it to sys.path the
 # same way every moengage_export/*.py script already adds ITS OWN
-# dependencies (see dump_all_flow_stats.py's own top-of-file sys.path
-# lines), rather than turning moengage_export/ into a real installed
+# dependencies, rather than turning moengage_export/ into a real installed
 # package just for this one import.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "moengage_export"))
-from dump_all_flow_stats import dump_all  # noqa: E402
+from daily_flow_tracker import _DEFAULT_OUT_PREFIX, _DEFAULT_HISTORY_PATH, _BRAND_SHEET_NAMES  # noqa: E402
 
 logger = logging.getLogger("moengage_dump_context")
 
-# Same defaults dump_all_flow_stats.py itself uses standalone (30-day
-# window, every real flow status) - a live chat question gets the same
-# real account-wide picture a human running the script by hand would.
-_DUMP_DAYS = 30
-_DUMP_STATUS = None
+_LATEST_CSV_PATH = f"{_DEFAULT_OUT_PREFIX}.csv"
+_HISTORY_CSV_PATH = _DEFAULT_HISTORY_PATH
+_GCS_BUCKET = os.environ.get("MOENGAGE_EXPORT_GCS_BUCKET")
+_TREND_DAYS = 14  # how many of the most recent real days' history to show per selected flow
+
+
+def _load_dataframe(local_path: str, gcs_blob_name: str) -> pd.DataFrame:
+    """Reads one real CSV, GCS-aware - see module docstring for why this
+    isn't just a plain local file read in production. Raises FileNotFound
+    error / lets the real pandas/GCS exception propagate to the caller,
+    which already handles "file doesn't exist yet" (e.g. before the first
+    real cron run) as its own real, honest outcome rather than pretending
+    empty data is normal."""
+    if _GCS_BUCKET:
+        from google.cloud import storage
+
+        client = storage.Client()
+        blob = client.bucket(_GCS_BUCKET).blob(f"moengage_export/{gcs_blob_name}")
+        local_cache = os.path.join("/tmp", gcs_blob_name)
+        blob.download_to_filename(local_cache)
+        return pd.read_csv(local_cache)
+    return pd.read_csv(local_path)
 
 
 def _invoke_with_retry(chain, payload: dict, attempts: int = 5, label: str = "MoEngage dump LLM call"):
@@ -87,57 +103,72 @@ def _invoke_with_retry(chain, payload: dict, attempts: int = 5, label: str = "Mo
 
 
 class _FlowSelection(BaseModel):
-    flow_names: List[str] = Field(
-        description="Every real flow name (exact text, copied verbatim from the list below - never invent, "
-        "abbreviate, or paraphrase one) that could plausibly help answer this question, based on genuinely "
-        "understanding what each flow's own name says it's for. Empty list if, after actually reading the "
-        "real list, nothing plausibly applies - do not force a connection just to return something."
+    flow_labels: List[str] = Field(
+        description="Every real 'Brand: flow name' label (exact text, copied verbatim from the list below - "
+        "never invent, abbreviate, or paraphrase one, and never drop the 'Brand: ' prefix) that could "
+        "plausibly help answer this question, based on genuinely understanding what each flow's own name "
+        "says it's for. Empty list if, after actually reading the real list, nothing plausibly applies - do "
+        "not force a connection just to return something."
     )
     reasoning: str = Field(description="One or two sentences: your real reasoning for these flows (or for none).")
 
 
-_FLOW_SELECTION_PROMPT = """Below is the REAL, COMPLETE list of every flow name in this andSons MoEngage \
-workspace ({flow_count} flows total) - just pulled fresh, this run, directly from MoEngage. Read the real \
-question below, then genuinely reason about which of these real flows, if any, would actually help answer \
-it, based on what each flow's own name tells you it's for (e.g. "Abandon Cart DC_WL", "Winback_Subscription_\
-ED_3M", "WelcomeFlow_New") - not a literal keyword match, the same way an analyst reads a list of campaign \
-names. Err toward including a flow whose name plausibly represents the KIND of thing being asked about.
+_FLOW_SELECTION_PROMPT = """Below is the REAL, COMPLETE list of every flow in every real MoEngage brand/market \
+workspace this system has access to ({flow_count} flows total across all brands) - from the most recent daily \
+pull. Each one is labeled "Brand: flow name" - the SAME flow name can genuinely exist under multiple different \
+real brands (e.g. "Payment_Failed" exists separately under andSons SG AND Ova SG - two real, different flows, \
+never the same one), so always select the FULL "Brand: flow name" label, never just the flow name part. Read \
+the real question below, then genuinely reason about which of these real flows, if any, would actually help \
+answer it, based on what each flow's own name tells you it's for (e.g. "Abandon Cart DC_WL", \
+"Winback_Subscription_ED_3M", "WelcomeFlow_New") - not a literal keyword match, the same way an analyst reads \
+a list of campaign names. If the question names or implies a specific brand/market (e.g. "Ova SG", "andSons \
+Malaysia"), select ONLY that brand's matching flow(s) - never blend a different brand's flow in just because \
+it has a similar or identical name. If the question doesn't name a brand, select the plausibly relevant \
+flow(s) from every brand they exist under.
 
 The question:
 {question}
 
-Real flow names:
+Real flow labels ("Brand: flow name"):
 {flow_names}
 """
 
 
-def _select_relevant_flows(question: str, flow_names: list, llm) -> list:
-    """Real reasoning over the REAL, freshly-dumped flow list - the direct
-    analogy to moengage_summary._select_relevant_charts, just over flow
-    names instead of chart labels. A selected name that isn't actually in
-    the real list (a hallucinated flow name) is dropped, never trusted -
-    same validate-before-trust principle used throughout this codebase.
-    Fails closed to 'nothing selected' on any error, never to guessing."""
+def _select_relevant_flows(question: str, flow_labels: list, llm) -> list:
+    """Real reasoning over the REAL, most-recently-pulled, brand-labeled
+    flow list - the direct analogy to moengage_summary._select_relevant_
+    charts, just over "Brand: flow name" labels instead of chart labels.
+    Brand-labeled (not just flow_name) because the same flow name can
+    genuinely exist under more than one real brand's own workspace
+    (confirmed live, 2026-09-24: 34 real flow names collide across at
+    least 2 brands, one across 4) - selecting by bare flow_name alone
+    would silently blend two different brands' real numbers together as
+    if they were one flow, exactly the kind of real-number-wrong-scope
+    mistake analytics_agent.py's own system prompt calls out as a serious
+    failure. A selected label that isn't actually in the real list (a
+    hallucinated one) is dropped, never trusted - same validate-before-
+    trust principle used throughout this codebase. Fails closed to
+    'nothing selected' on any error, never to guessing."""
     structured_llm = llm.with_structured_output(_FlowSelection)
     prompt = ChatPromptTemplate.from_messages([("human", _FLOW_SELECTION_PROMPT)])
     chain = prompt | structured_llm
     try:
         result: _FlowSelection = _invoke_with_retry(
             chain,
-            {"question": question, "flow_count": len(flow_names), "flow_names": "\n".join(f"- {n}" for n in flow_names)},
+            {"question": question, "flow_count": len(flow_labels), "flow_names": "\n".join(f"- {n}" for n in flow_labels)},
             label="MoEngage dump flow selection call",
         )
     except Exception as exc:  # noqa: BLE001 - fail closed to "nothing selected"
         logger.warning("MoEngage dump flow selection failed for %r: %s", question, exc)
         return []
 
-    real_names = set(flow_names)
+    real_labels = set(flow_labels)
     selected, dropped = [], []
-    for raw_name in result.flow_names:
-        name = raw_name.strip()
-        (selected if name in real_names else dropped).append(name)
+    for raw_label in result.flow_labels:
+        label = raw_label.strip()
+        (selected if label in real_labels else dropped).append(label)
     if dropped:
-        logger.warning("MoEngage dump flow selection returned name(s) not in the real dump, dropped: %s", dropped)
+        logger.warning("MoEngage dump flow selection returned label(s) not in the real dump, dropped: %s", dropped)
     logger.info("MoEngage dump flow selection for %r: %s (%s)", question, selected, result.reasoning)
     return selected
 
@@ -153,7 +184,8 @@ class _DumpNarrative(BaseModel):
     summary: str = Field(
         description="If answers_question=True: three to six short plain-English sentences reporting ONLY "
         "what is genuinely present in the real data below - compute a real total/rate from the real numbers "
-        "shown (e.g. sum Sent/Delivered/Revenue across the listed nodes) rather than eyeballing one row; "
+        "shown (e.g. sum Sent/Delivered/Revenue across the listed nodes, or describe a real day-by-day trend "
+        "from the history section if the question is about change over time) rather than eyeballing one row; "
         "never invent or estimate a number that isn't really there. If part of the question isn't covered, "
         "say which part plainly in one added sentence. If answers_question=False: one honest sentence saying "
         "plainly that this real data doesn't cover what was asked. Either way, write this as a finished "
@@ -164,11 +196,12 @@ class _DumpNarrative(BaseModel):
     )
 
 
-_DUMP_NARRATIVE_PROMPT = """These real flows were selected as plausibly relevant to the question below - here \
-is their REAL data, just pulled fresh from MoEngage this run (one entry per flow, with that flow's own total \
-across all its send nodes, then each individual send node's own real Attempted/Sent/Delivered/Opened/\
-Adjusted-Opened/Clicked/Conversions/Revenue numbers for the {days}-day window ending today). Look at it \
-genuinely, validate whether it actually answers what was asked, and report honestly either way.
+_DUMP_NARRATIVE_PROMPT = """These real flows were selected as plausibly relevant to the question below. For \
+each one you get (1) its most recent day's real numbers per send node, and (2) a real day-by-day trend from \
+up to the last {trend_days} real days on record (empty/short if the daily pull hasn't been running that long \
+yet - say so plainly if a real trend question can't be answered because of that, don't fake a trend from one \
+data point). Look at it genuinely, validate whether it actually answers what was asked, and report honestly \
+either way.
 
 The question:
 {question}
@@ -183,38 +216,40 @@ def _narrate_from_rows(question: str, flow_data_text: str, llm) -> _DumpNarrativ
     prompt = ChatPromptTemplate.from_messages([("human", _DUMP_NARRATIVE_PROMPT)])
     chain = prompt | structured_llm
     return _invoke_with_retry(
-        chain, {"question": question, "flow_data": flow_data_text, "days": _DUMP_DAYS},
+        chain, {"question": question, "flow_data": flow_data_text, "trend_days": _TREND_DAYS},
         label="MoEngage dump narrative call",
     )
 
 
 _NODE_METRIC_COLUMNS = ["attempted", "sent", "delivered", "opened", "adjusted_opened", "clicked", "conversions", "revenue"]
+_TREND_METRIC_COLUMNS = ["sent", "delivered", "conversions", "revenue"]  # kept smaller - a trend line reads better short
 
 
-def _flow_text(df: pd.DataFrame, flow_name: str) -> str:
-    """One real flow's data, formatted as compact text: the flow-level
-    total across every send node, then each individual send node's own
-    real numbers - so both a flow-level question ("how did X do overall")
-    and a step-level one ("what's the open rate on the second email") can
-    be answered from the same block. Non-send nodes (waits/conditions/
-    branches) are left out here - they carry no metric columns in the
-    dump (see dump_all_flow_stats.py's own docstring for why), so they'd
-    add nothing but noise to this text."""
-    sub = df[df["flow_name"] == flow_name]
+def _latest_flow_text(latest_df: pd.DataFrame, brand: str, flow_name: str) -> str:
+    """One real flow's MOST RECENT day, formatted as compact text: the
+    flow-level total across every send node, then each individual send
+    node's own real numbers - so both a flow-level question ("how did X
+    do") and a step-level one ("what's the open rate on the second
+    email") can be answered from the same block. Non-send nodes (waits/
+    conditions/branches) are left out - they carry no metric columns (see
+    daily_flow_tracker.py's own docstring for why), so they'd add nothing
+    but noise here. Filtered by BOTH brand and flow_name - see
+    _select_relevant_flows' own docstring for why flow_name alone isn't
+    enough (real name collisions across brands, confirmed live)."""
+    sub = latest_df[(latest_df["flow_name"] == flow_name) & (latest_df["brand"] == brand)]
+    brand_label = _BRAND_SHEET_NAMES.get(brand, brand)
     if sub.empty:
-        return f"FLOW: {flow_name} - no data in this run's dump (may have been deleted/renamed since)."
+        return f"FLOW: {brand_label}: {flow_name} - no data in the most recent daily pull (may have been deleted/renamed since)."
 
     status = sub["flow_status"].iloc[0] if "flow_status" in sub else "?"
     send_rows = sub[sub["campaign_id"].notna()]
-    lines = [f"FLOW: {flow_name} (status={status}, {len(send_rows)} send node(s), {len(sub)} total node(s))"]
+    lines = [f"FLOW: {brand_label}: {flow_name} (status={status}, {len(send_rows)} send node(s), {len(sub)} total node(s))"]
 
     if not send_rows.empty:
         totals = send_rows[_NODE_METRIC_COLUMNS].sum(numeric_only=True)
-        lines.append("  FLOW TOTAL: " + ", ".join(f"{col}={totals[col]:g}" for col in _NODE_METRIC_COLUMNS if totals[col]))
+        lines.append("  MOST RECENT DAY TOTAL: " + ", ".join(f"{col}={totals[col]:g}" for col in _NODE_METRIC_COLUMNS if totals[col]))
         for _, row in send_rows.iterrows():
-            metrics = ", ".join(
-                f"{col}={row[col]:g}" for col in _NODE_METRIC_COLUMNS if pd.notna(row[col])
-            )
+            metrics = ", ".join(f"{col}={row[col]:g}" for col in _NODE_METRIC_COLUMNS if pd.notna(row[col]))
             channel = row.get("channel") or row.get("node_type")
             lines.append(f"  - {row['node_label']} ({channel}): {metrics}")
     else:
@@ -222,74 +257,114 @@ def _flow_text(df: pd.DataFrame, flow_name: str) -> str:
     return "\n".join(lines)
 
 
+def _trend_text(history_df: Optional[pd.DataFrame], brand: str, flow_name: str) -> str:
+    """Real day-by-day trend for one flow, from the real accumulated
+    history file - this is the actual "periodic context and historic
+    data" fix: earlier versions of this whole mechanism only ever had one
+    day's numbers, with no way to tell "is this getting better or worse"
+    at all. Sums each real distinct date_range_start's send-node rows for
+    this flow, most recent first, capped at _TREND_DAYS real days - never
+    fabricates a day that isn't actually on record. Filtered by BOTH
+    brand and flow_name - see _select_relevant_flows' own docstring for
+    why flow_name alone isn't enough (real name collisions across
+    brands, confirmed live)."""
+    if history_df is None or history_df.empty:
+        return "  TREND: no history recorded yet (daily pulls haven't run long enough to show a trend)."
+    sub = history_df[
+        (history_df["flow_name"] == flow_name) & (history_df["brand"] == brand) & history_df["campaign_id"].notna()
+    ]
+    if sub.empty:
+        return "  TREND: no historical send-node data for this flow yet."
+
+    by_day = sub.groupby("date_range_start")[_TREND_METRIC_COLUMNS].sum(numeric_only=True)
+    by_day = by_day.sort_index(ascending=False).head(_TREND_DAYS).sort_index()
+    lines = [f"  TREND (most recent {len(by_day)} real day(s) on record, oldest to newest):"]
+    for date, row in by_day.iterrows():
+        lines.append(f"    {date}: " + ", ".join(f"{col}={row[col]:g}" for col in _TREND_METRIC_COLUMNS if row[col]))
+    return "\n".join(lines)
+
+
+def _flow_text(latest_df: pd.DataFrame, history_df: Optional[pd.DataFrame], brand: str, flow_name: str) -> str:
+    return _latest_flow_text(latest_df, brand, flow_name) + "\n" + _trend_text(history_df, brand, flow_name)
+
+
 def gather_moengage_context(question: str, llm) -> tuple:
     """Returns (text, relevant, raw_summary, checked) - same real contract
     as moengage_summary.gather_moengage_context (see that function's own
     docstring for the precise meaning of each element); this is the
-    dump-based mechanism described in this module's own docstring above.
-    `text` deliberately includes the real underlying numbers (not just the
-    LLM's own narrative prose) so downstream number-verification in
-    analytics_agent.py has real ground truth to check against, not just
+    read-the-daily-pull mechanism described in this module's own docstring
+    above. `text` deliberately includes the real underlying numbers (not
+    just the LLM's own narrative prose) so downstream number-verification
+    in analytics_agent.py has real ground truth to check against, not just
     the narrative checking itself."""
     if not moengage_client.campaigns_api_configured():
         return "MoEngage is not connected.", False, "", False
 
-    run_id = uuid.uuid4().hex
-    xlsx_path = os.path.join(tempfile.gettempdir(), f"moengage_dump_context_{run_id}.xlsx")
-    db_path = os.path.join(tempfile.gettempdir(), f"moengage_dump_context_{run_id}.db")
     try:
-        try:
-            logger.info("Running a fresh full-account MoEngage flow dump for: %r", question)
-            dump_all(_DUMP_DAYS, _DUMP_STATUS, xlsx_path, db_path)
-        except Exception as exc:  # noqa: BLE001 - report, don't propagate
-            logger.warning("MoEngage full-account dump failed: %s", exc)
-            return f"MoEngage is connected but the flow dump failed ({exc}).", False, "", False
-
-        try:
-            df = pd.read_excel(xlsx_path)
-        except Exception as exc:  # noqa: BLE001 - report, don't propagate
-            logger.warning("Failed to read the MoEngage dump Excel file: %s", exc)
-            return f"MoEngage dump ran but the Excel file couldn't be read ({exc}).", False, "", False
-
-        if df.empty or "flow_name" not in df.columns:
-            return "MoEngage is connected but the fresh dump returned no flows.", False, "", False
-
-        flow_names = sorted(df["flow_name"].dropna().unique().tolist())
-        selected = _select_relevant_flows(question, flow_names, llm)
-        if not selected:
-            return (
-                f"Checked a real, fresh MoEngage flow dump ({len(flow_names)} flows) - none are relevant to "
-                "this question.", False, "", True,
-            )
-
-        flow_data_text = "\n\n".join(_flow_text(df, name) for name in selected)
-
-        try:
-            narrative = _narrate_from_rows(question, flow_data_text, llm)
-        except Exception as exc:  # noqa: BLE001 - a narration failure shouldn't kill the caller
-            logger.warning("MoEngage dump narrative call failed for %r: %s", question, exc)
-            return (
-                f"MoEngage is connected ({len(selected)} relevant flow(s) found in a fresh dump) but the "
-                "narrative step failed.", False, "", True,
-            )
-
-        if not narrative.answers_question:
-            return (
-                f"Checked {len(selected)} real MoEngage flow(s) from a fresh dump that looked relevant, but "
-                f"they don't actually answer this question: {narrative.summary}", False, "", True,
-            )
-
-        notes = (
-            f"MoEngage campaign/engagement data (fresh full-account dump, {len(selected)} relevant flow(s) "
-            f"checked):\n{narrative.summary}\n\nUnderlying real numbers this was drawn from:\n{flow_data_text}"
+        latest_df = _load_dataframe(_LATEST_CSV_PATH, "daily_flow_tracker.csv")
+    except FileNotFoundError:
+        return (
+            "MoEngage is connected but no daily flow pull has run yet - the /cron/daily-flow-tracker job "
+            "hasn't produced a file. Say so plainly rather than guessing at numbers.", False, "", False,
         )
-        return notes, True, narrative.summary, True
-    finally:
-        # Real requirement, not optional cleanup: nothing dump-related
-        # should be left on disk once this call is done, success or not.
-        for path in (xlsx_path, db_path):
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except OSError as exc:  # noqa: BLE001 - log, don't fail the whole call over a cleanup miss
-                logger.warning("Could not delete temp MoEngage dump file %r: %s", path, exc)
+    except Exception as exc:  # noqa: BLE001 - report, don't propagate
+        logger.warning("Failed to read the latest MoEngage daily pull: %s", exc)
+        return f"MoEngage is connected but the latest daily pull couldn't be read ({exc}).", False, "", False
+
+    if latest_df.empty or "flow_name" not in latest_df.columns:
+        return "MoEngage is connected but the latest daily pull has no flows in it.", False, "", False
+    if "brand" not in latest_df.columns:
+        # Real migration case, same reasoning as write_history()'s own -
+        # a file pulled before multi-brand support existed only ever had
+        # the one original workspace (andSons SG).
+        latest_df = latest_df.copy()
+        latest_df["brand"] = "AS_SG"
+
+    try:
+        history_df = _load_dataframe(_HISTORY_CSV_PATH, "daily_flow_tracker_history.csv")
+        if history_df is not None and not history_df.empty and "brand" not in history_df.columns:
+            history_df = history_df.copy()
+            history_df["brand"] = "AS_SG"
+    except Exception as exc:  # noqa: BLE001 - a missing/unreadable history file degrades to "no trend", not a hard failure
+        logger.warning("Could not read MoEngage history file (trend context will be unavailable): %s", exc)
+        history_df = None
+
+    # "Brand: flow name" labels, not bare flow names - real flow names
+    # collide across brands (confirmed live, 2026-09-24: 34 do, one
+    # across 4 brands at once), so the LLM must select by the full
+    # disambiguated label - see _select_relevant_flows' own docstring.
+    brand_flow_pairs = sorted(latest_df[["brand", "flow_name"]].dropna().drop_duplicates().itertuples(index=False, name=None))
+    label_to_pair = {f"{_BRAND_SHEET_NAMES.get(b, b)}: {name}": (b, name) for b, name in brand_flow_pairs}
+    flow_labels = sorted(label_to_pair.keys())
+
+    selected_labels = _select_relevant_flows(question, flow_labels, llm)
+    if not selected_labels:
+        return (
+            f"Checked the latest real MoEngage daily pull ({len(flow_labels)} flows across every connected "
+            "brand) - none are relevant to this question.", False, "", True,
+        )
+    selected = [label_to_pair[label] for label in selected_labels]
+
+    flow_data_text = "\n\n".join(_flow_text(latest_df, history_df, brand, name) for brand, name in selected)
+
+    try:
+        narrative = _narrate_from_rows(question, flow_data_text, llm)
+    except Exception as exc:  # noqa: BLE001 - a narration failure shouldn't kill the caller
+        logger.warning("MoEngage dump narrative call failed for %r: %s", question, exc)
+        return (
+            f"MoEngage is connected ({len(selected)} relevant flow(s) found) but the narrative step failed.",
+            False, "", True,
+        )
+
+    if not narrative.answers_question:
+        return (
+            f"Checked {len(selected)} real MoEngage flow(s) that looked relevant, but they don't actually "
+            f"answer this question: {narrative.summary}", False, "", True,
+        )
+
+    fetched_at = latest_df["fetched_at"].iloc[0] if "fetched_at" in latest_df.columns and not latest_df.empty else "unknown"
+    notes = (
+        f"MoEngage campaign/engagement data (daily pull, last refreshed {fetched_at}, {len(selected)} "
+        f"relevant flow(s) checked):\n{narrative.summary}\n\nUnderlying real numbers this was drawn from:\n{flow_data_text}"
+    )
+    return notes, True, narrative.summary, True

@@ -95,16 +95,52 @@ _catalog_cache_lock = threading.Lock()
 _cache_lock = threading.Lock()
 
 
-def is_configured() -> bool:
-    return bool(
-        os.environ.get("MOENGAGE_WORKSPACE_ID")
-        and os.environ.get("MOENGAGE_DATA_API_KEY")
-        and os.environ.get("MOENGAGE_DC")
-    )
+# Every real MoEngage brand/workspace this project has credentials for, as
+# of 2026-09-24 (see backend/.env.example's own comment block for the full
+# real list and where each came from) - AS_SG is the plain, unprefixed
+# MOENGAGE_* vars (the original single workspace, confirmed live to be
+# andSons SG), every other brand uses its own {BRAND}_MOENGAGE_* vars (same
+# convention as warehouse_client.py's {BRAND}_DB_* vars, deliberately
+# reusing the identical brand key set: AS_SG, AS_MY, AS_PH, OVA_SG, OVA_MY,
+# OVA_PH, plus MODERN_MOLECULES - a real workspace name from MoEngage
+# itself that doesn't map onto any existing brand key, kept as its own).
+MOENGAGE_BRANDS = ["AS_SG", "AS_MY", "AS_PH", "OVA_SG", "OVA_MY", "OVA_PH", "MODERN_MOLECULES"]
 
 
-def _base_url() -> str:
-    dc = os.environ.get("MOENGAGE_DC", "").strip()
+def _creds_for_brand(brand: Optional[str]) -> dict:
+    """Real credentials for one real brand's MoEngage workspace - AS_SG (or
+    brand=None, same thing) reads the original plain MOENGAGE_* vars for
+    backward compatibility (every caller written before multi-brand
+    support keeps working unchanged); every other real brand reads its own
+    {BRAND}_MOENGAGE_* vars. Never fabricates a value - a brand with no
+    credentials configured gets empty strings here, and the functions that
+    consume this raise their own clear RuntimeError, same as always."""
+    prefix = "" if (not brand or brand == "AS_SG") else f"{brand}_"
+    return {
+        "workspace_id": os.environ.get(f"{prefix}MOENGAGE_WORKSPACE_ID", ""),
+        "data_api_key": os.environ.get(f"{prefix}MOENGAGE_DATA_API_KEY", ""),
+        "campaign_api_key": os.environ.get(f"{prefix}MOENGAGE_CAMPAIGN_API_KEY", ""),
+        "dc": os.environ.get(f"{prefix}MOENGAGE_DC", "").strip(),
+    }
+
+
+def brand_configured(brand: Optional[str]) -> bool:
+    """True if this real brand has a genuinely complete credential set
+    (workspace id + at least one of the two real API keys + a data
+    center) - used to decide which brands a multi-workspace pull (see
+    moengage_export/daily_flow_tracker.py) can actually attempt, rather
+    than failing loudly mid-run on one missing credential."""
+    creds = _creds_for_brand(brand)
+    return bool(creds["workspace_id"] and creds["dc"] and (creds["data_api_key"] or creds["campaign_api_key"]))
+
+
+def is_configured(brand: Optional[str] = None) -> bool:
+    creds = _creds_for_brand(brand)
+    return bool(creds["workspace_id"] and creds["data_api_key"] and creds["dc"])
+
+
+def _base_url(brand: Optional[str] = None) -> str:
+    dc = _creds_for_brand(brand)["dc"]
     if not dc:
         raise RuntimeError(
             "MOENGAGE_DC is not set (e.g. '05' for the Singapore data center - check your MoEngage "
@@ -113,9 +149,9 @@ def _base_url() -> str:
     return f"https://api-{dc}.moengage.com"
 
 
-def _auth_header() -> dict:
-    workspace_id = os.environ.get("MOENGAGE_WORKSPACE_ID", "")
-    data_api_key = os.environ.get("MOENGAGE_DATA_API_KEY", "")
+def _auth_header(brand: Optional[str] = None) -> dict:
+    creds = _creds_for_brand(brand)
+    workspace_id, data_api_key = creds["workspace_id"], creds["data_api_key"]
     if not workspace_id or not data_api_key:
         raise RuntimeError(
             "MOENGAGE_WORKSPACE_ID / MOENGAGE_DATA_API_KEY are not set. MoEngage integration requires "
@@ -143,16 +179,12 @@ def campaigns_api_configured() -> bool:
     report/Business events/..." tile - a different key from
     MOENGAGE_DATA_API_KEY, which only works for the Analytics Dashboards
     API above)."""
-    return bool(
-        os.environ.get("MOENGAGE_WORKSPACE_ID")
-        and os.environ.get("MOENGAGE_CAMPAIGN_API_KEY")
-        and os.environ.get("MOENGAGE_DC")
-    )
+    return brand_configured(None) and bool(_creds_for_brand(None)["campaign_api_key"])
 
 
-def _campaign_auth_headers() -> dict:
-    workspace_id = os.environ.get("MOENGAGE_WORKSPACE_ID", "")
-    campaign_api_key = os.environ.get("MOENGAGE_CAMPAIGN_API_KEY", "")
+def _campaign_auth_headers(brand: Optional[str] = None) -> dict:
+    creds = _creds_for_brand(brand)
+    workspace_id, campaign_api_key = creds["workspace_id"], creds["campaign_api_key"]
     if not workspace_id or not campaign_api_key:
         raise RuntimeError(
             "MOENGAGE_WORKSPACE_ID / MOENGAGE_CAMPAIGN_API_KEY are not set. The Campaigns Search API "
@@ -237,6 +269,7 @@ def get_campaign_stats(
     end_date: str,
     attribution_type: str = "VIEW_THROUGH",
     metric_type: str = "TOTAL",
+    brand: Optional[str] = None,
 ) -> dict:
     """POST /core-services/v1/campaign-stats - the ONE real MoEngage surface
     that returns actual message performance numbers (sent/delivered/opened/
@@ -320,8 +353,8 @@ def get_campaign_stats(
                 ):
                     del node[key]
 
-    url = f"{_base_url()}/core-services/v1/campaign-stats"
-    headers = _campaign_auth_headers()
+    url = f"{_base_url(brand)}/core-services/v1/campaign-stats"
+    headers = _campaign_auth_headers(brand)
     date_chunks = _date_chunks(start_date, end_date)
 
     merged: dict = {}
@@ -364,7 +397,7 @@ def get_campaign_stats(
     return merged
 
 
-def search_flows(name: Optional[str] = None, status: Optional[list] = None, limit: int = 20) -> list:
+def search_flows(name: Optional[str] = None, status: Optional[list] = None, limit: int = 20, brand: Optional[str] = None) -> list:
     """POST /v5/flows/search - real MoEngage Flows (early-access API), the
     flow's own metadata only (name/status/version/tags) - NOT its
     structure or any performance numbers, see get_flow()/the module-level
@@ -374,8 +407,8 @@ def search_flows(name: Optional[str] = None, status: Optional[list] = None, limi
     permissions"). One page only (`limit`, real confirmed server-side max
     100 - see list_all_flows() below for "give me every real flow", which
     this function does NOT do on its own)."""
-    url = f"{_base_url()}/v5/flows/search"
-    headers = _campaign_auth_headers()
+    url = f"{_base_url(brand)}/v5/flows/search"
+    headers = _campaign_auth_headers(brand)
     payload = {"limit": limit}
     if name:
         payload["name"] = name
@@ -386,7 +419,7 @@ def search_flows(name: Optional[str] = None, status: Optional[list] = None, limi
     return resp.json().get("data", {}).get("flows", [])
 
 
-def list_all_flows(status: Optional[list] = None) -> list:
+def list_all_flows(status: Optional[list] = None, brand: Optional[str] = None) -> list:
     """Every real flow in the account, fully paginated - confirmed live:
     /v5/flows/search returns real cursor pagination (`has_more` +
     `next_cursor` in `data`, undocumented in the endpoint's own written
@@ -395,8 +428,8 @@ def list_all_flows(status: Optional[list] = None) -> list:
     workspace across ACTIVE/PAUSED/STOPPED/RETIRED/DRAFT - `status` (same
     real enum search_flows takes) filters server-side same as there; omit
     it for genuinely every flow regardless of status."""
-    url = f"{_base_url()}/v5/flows/search"
-    headers = _campaign_auth_headers()
+    url = f"{_base_url(brand)}/v5/flows/search"
+    headers = _campaign_auth_headers(brand)
     all_flows = []
     cursor = None
     while True:
@@ -415,7 +448,7 @@ def list_all_flows(status: Optional[list] = None) -> list:
     return all_flows
 
 
-def get_flow(flow_id: str, version_no: Optional[int] = None) -> dict:
+def get_flow(flow_id: str, version_no: Optional[int] = None, brand: Optional[str] = None) -> dict:
     """GET /v5/flows/{flow_id} - a real flow's full structure: every node
     (trigger/condition/split/branch/action/control), its real config
     (trigger event filters, condition event filters, campaign_ids), and
@@ -427,8 +460,8 @@ def get_flow(flow_id: str, version_no: Optional[int] = None) -> dict:
     in the MoEngage UI's flow canvas) - moengage_export/flow_funnel_
     approximation.py exists specifically to approximate that gap using
     this real structure plus the separate Funnels Query API below."""
-    url = f"{_base_url()}/v5/flows/{flow_id}"
-    headers = _campaign_auth_headers()
+    url = f"{_base_url(brand)}/v5/flows/{flow_id}"
+    headers = _campaign_auth_headers(brand)
     params = {"version_no": version_no} if version_no else None
     resp = _request_with_retry("GET", url, headers=headers, params=params)
     if resp.status_code == 401:

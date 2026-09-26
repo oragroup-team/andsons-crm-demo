@@ -1,15 +1,18 @@
 """Analytics chat agent - LangChain SQL agent over the live ORA BigQuery
 warehouse, plus real MoEngage campaign/engagement data when it's actually
 relevant to the question. MoEngage retrieval mechanism: moengage_dump_
-context.py - a fresh full-account flow dump (moengage_export/dump_all_
-flow_stats.py) read via pandas, then deleted, every time it's asked about
-a question (see that module's own docstring for the real cost tradeoff).
-This REPLACES the chart-catalog mechanism (moengage_summary.py) that used
-to be imported here - moengage_summary.py itself is untouched, still fully
-intact, and still actively used by agents/insight_agent.py; it's simply no
-longer called from this file. Kept in place rather than deleted so it's a
-one-line import swap back if the dump-based mechanism's latency (minutes
-per question, not seconds) turns out to be a problem in practice.
+context.py - reads moengage_export/daily_flow_tracker.py's own real daily
+output (a fresh full-account pull, run once a day at 06:00 SGT by the
+/cron/daily-flow-tracker endpoint, not per question anymore - see that
+module's own docstring for the real architecture and the earlier per-
+question-dump version's cost this replaced) plus its accumulated multi-day
+history file for genuine trend/periodic context, not just one day's
+snapshot. This REPLACES the chart-catalog mechanism (moengage_summary.py)
+that used to be imported here - moengage_summary.py itself is untouched,
+still fully intact, and still actively used by agents/insight_agent.py;
+it's simply no longer called from this file. Kept in place rather than
+deleted so it's a one-line import swap back if this mechanism turns out to
+be a problem in practice.
 
 The agent must NEVER state a number in its final answer that didn't come
 from an actual query result (or, for MoEngage, an actual flow-dump value).
@@ -215,7 +218,7 @@ MOENGAGE - THREE REAL, GENUINELY DIFFERENT DATA SURFACES, not one - each covers 
      - CORRECTED REAL FACT about control groups (a previous version of this note was WRONG and said no campaign ever has one - that was checked only against group 1's Flow-only population, not this real, complete one): 6 real campaigns DO have is_campaign_control_group_enabled = TRUE right now (all real "Rampup_Day_N_BoostErection" campaigns, control-group percentages 20-88%, confirmed live: 20/52/52/75/80/88) - query THIS table for any real "which campaigns have a control group" question, never assume the answer is universally zero. These 6 have NULL tags (control-group usage and tagging are independent, unrelated facts about a campaign - don't assume one implies the other).
      - CORRECTED REAL FACT about lifecycle categories (a previous version of this note wrongly said "Sale"/"Upgrade"/"Edu" don't exist anywhere in this real data, and separately understated how common some of these are - both corrected here from a live full-table check, not assumption): the real `tags` column has only 5 distinct non-null values across all 895 campaigns - winback (238 campaigns, by far the most common real tag), upgrade (6, a DIFFERENT set of 6 campaigns from the control-group 6 above - real names like "HL_Upgrades_HL_Active 3M Subs"), replenishment (4), promotional (2), cross-sell (1) - 645 campaigns have no tag at all, so absence of a tag is not evidence a campaign isn't e.g. a winback send, only that it wasn't tagged as one. Separately, "Edu" and "Sale" are both real, COMMON naming-convention segments in the `name` column itself (not the tags column) - Edu appears in 277 real campaign names (e.g. "Rampup_Day8_BoostErection_Edu_ED_All"), and Sale appears in 212 real campaign names, mostly real seasonal promo pushes following a "<Event>Sale_Sale_Generic_..." pattern (MoonlightSale, National Day Sale, Payweek Sale, 7.7 Sale, etc.) - a "how did our Sale campaigns do" question is real and answerable by name LIKE '%Sale%' here (config/targeting only - pair with group 1 if the question needs performance numbers for named campaigns that also appear there). Query this table (tags column AND name LIKE patterns - they capture different things) before concluding a lifecycle category doesn't exist; group 1 alone is not the complete real picture, and neither is assuming from memory.
 
-  3. The live MoEngage flow-dump tool (a separate real-time system, not a BigQuery table - given to you as context below when relevant, not queried via SQL) - genuinely live: a fresh full-account pull of every real flow's own send nodes (real Attempted/Sent/Delivered/Opened/Clicked/Conversions/Revenue per node, not a snapshot export) run fresh for this specific question. Use this ONLY for detail neither BigQuery table group above captures: node-level detail on a SPECIFIC named flow, or a number more current than the group-1 tables' static export date. PREFER the two BigQuery table groups above for anything they cover (revenue, CVR, control group, tags, unsubscribe/complaint/bounce rates, real UTM values) - they give an exact queried number without paying this tool's real cost (a fresh account-wide pull takes minutes, not seconds - use it deliberately, not by default). There is NO email/WhatsApp/push send/open/click EVENT-level table in BigQuery itself (row-per-send-per-event) - that granularity, if a question genuinely needs it, only exists via this flow-dump tool or the campaign-level aggregates in groups 1-2 above."""
+  3. The MoEngage daily-pull tool (a separate real system, not a BigQuery table - given to you as context below when relevant, not queried via SQL) - a full-account pull of every real flow's own send nodes (real Attempted/Sent/Delivered/Opened/Clicked/Conversions/Revenue per node), refreshed once a day at 06:00 SGT, plus a real day-by-day trend from its accumulated history for the selected flow(s) - genuinely useful for a "how has this been trending" question the static BigQuery export can't answer. Use this ONLY for detail neither BigQuery table group above captures: node-level detail on a SPECIFIC named flow, or a real multi-day trend. PREFER the two BigQuery table groups above for anything they cover (revenue, CVR, control group, tags, unsubscribe/complaint/bounce rates, real UTM values) - they give an exact queried number. Say plainly if asked how current this tool's numbers are - as of the most recent daily pull, not live-to-the-second. There is NO email/WhatsApp/push send/open/click EVENT-level table in BigQuery itself (row-per-send-per-event) - that granularity, if a question genuinely needs it, only exists via this daily-pull tool or the campaign-level aggregates in groups 1-2 above."""
 
 SYSTEM_PREFIX_TEMPLATE = """You are the andSons analytics assistant. andSons is a men's health telehealth \
 brand (hair loss is the flagship vertical, alongside weight loss and other supplements); all prices are \
@@ -403,6 +406,99 @@ def _get_db_cached() -> SQLDatabase:
     doesn't change mid-session, so this avoids paying the connectivity-check
     cost on every question."""
     return _connect_bigquery()
+
+
+# =============================================================================
+# SQL WAREHOUSE TOOLS - a real, separate per-brand production MySQL system
+# (warehouse_client.py; read access from Madan, 2026-09-24), NOT BigQuery and
+# NOT MoEngage. Added as extra_tools on the SAME agent_executor below rather
+# than a second agent, so the LLM can freely mix BigQuery SQL and warehouse
+# SQL within one answer when a question genuinely needs both (e.g. "how many
+# failed payments recovered within 24h" - only in the warehouse - "and what
+# was our total revenue that week" - only in BigQuery). Real, live-confirmed
+# state as of 2026-09-24: only the OVA_MY brand is network-reachable (the
+# other 7 real credential sets are configured but still blocked by an RDS
+# security-group whitelist gap, not a credentials problem) - warehouse_
+# brand_status lets the agent discover this live rather than being told a
+# static, possibly-stale list.
+from langchain_core.tools import tool  # noqa: E402
+
+import warehouse_client as _warehouse  # noqa: E402
+
+
+@tool
+def warehouse_brand_status() -> str:
+    """Live reachability check for the real per-brand/market SQL warehouse (a separate, real production
+    MySQL system - NOT BigQuery, NOT MoEngage). Call this FIRST before warehouse_query on a brand you
+    haven't already confirmed is reachable this session - some real brands are still blocked by a
+    network/whitelist gap, not a credentials problem, and this reports the live truth rather than a
+    guess. Real brand keys: AS_SG, OVA_SG, AS_MY, OVA_MY, AS_PH, OVA_PH, MODULES_SG, AS_GL."""
+    return "\n".join(f"{b}: {s}" for b, s in _warehouse.brand_status().items())
+
+
+@tool
+def warehouse_list_tables(brand: str) -> str:
+    """Lists every real table in one brand's production SQL warehouse. brand must be one of:
+    AS_SG, OVA_SG, AS_MY, OVA_MY, AS_PH, OVA_PH, MODULES_SG, AS_GL."""
+    try:
+        return ", ".join(_warehouse.list_tables(brand))
+    except Exception as exc:  # noqa: BLE001 - surfaced to the LLM as a real, actionable error, not a crash
+        return f"ERROR: {exc}"
+
+
+@tool
+def warehouse_table_schema(brand: str, table: str) -> str:
+    """Real column definitions (name/type/nullable/key) for one real table in one brand's production SQL
+    warehouse. ALWAYS call this before writing a query against a table you haven't already seen this
+    session - never guess a column name from memory, real schemas vary by brand even for a same-named
+    table."""
+    try:
+        cols = _warehouse.table_schema(brand, table)
+        return "\n".join(f"{c['column']} {c['type']} nullable={c['nullable']} key={c['key']}" for c in cols)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: {exc}"
+
+
+@tool
+def warehouse_query(brand: str, sql: str) -> str:
+    """Runs one real, READ-ONLY query (SELECT/SHOW/DESCRIBE/EXPLAIN only - anything else is rejected, this
+    is a real production database) against one brand's real SQL warehouse and returns the real result
+    rows. Use this for data MoEngage and BigQuery genuinely don't have: payment-failure/retry/recovery
+    detail (subscription_payment_failed, subscription_charge_logs, transactions tables), order/subscription
+    detail, user records. Always call warehouse_table_schema first for any table you haven't already seen
+    this session."""
+    try:
+        result = _warehouse.run_query(brand, sql)
+        if not result["rows"]:
+            return "Query returned 0 rows."
+        lines = [", ".join(result["columns"])] + [", ".join(str(v) for v in row) for row in result["rows"]]
+        if len(result["rows"]) == result["truncated_to"]:
+            lines.append(f"(truncated to {result['truncated_to']} rows)")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        return f"ERROR: {exc}"
+
+
+WAREHOUSE_SCHEMA_NOTES = """
+
+=== SQL WAREHOUSE (separate real production MySQL system, one per brand/market - NOT BigQuery, NOT \
+MoEngage) ===
+Reach it with the warehouse_brand_status / warehouse_list_tables / warehouse_table_schema / \
+warehouse_query tools, never via the BigQuery schema-inspection tool or plain SQL text (those only see \
+BigQuery). Real, live-confirmed state as of 2026-09-24: only the OVA_MY brand is network-reachable right \
+now - the other 7 (AS_SG, OVA_SG, AS_MY, AS_PH, OVA_PH, MODULES_SG, AS_GL) are configured but still \
+blocked by a real RDS security-group whitelist gap, not missing credentials - call warehouse_brand_status \
+to get the live, current truth rather than assuming this note is still accurate later.
+
+USE THIS WAREHOUSE ONLY for data that genuinely does not exist in BigQuery or MoEngage - primarily real \
+payment-failure/retry/recovery detail (subscription_payment_failed, subscription_charge_logs, \
+transactions tables - e.g. "how many failed renewal payments recovered within 24 hours"), and \
+order/subscription/user record detail at a grain BigQuery's own export doesn't carry. PREFER BigQuery for \
+anything it already covers (revenue, order counts/totals, marketing attribution) - it's the faster, \
+already-aggregated source; querying a real production OLTP database for something BigQuery already \
+answers wastes a real, slower query against a live production system for no benefit. If a question needs \
+both (e.g. "recovery rate AND total revenue"), it's fine to query both real sources and combine them \
+clearly, stating which source each number came from."""
 
 
 NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
@@ -1064,8 +1160,9 @@ class _MoEngageExclusive(BaseModel):
         "provide - no revenue, no order count, no customer count, no spend, and no per-campaign opens/ "
         "clicks/CVR/unsubscribe/control-group metric either, since those now live in real, exact BigQuery "
         "tables too (see schema notes: moengage_campaigns_email/whatsapp/push, moengage_flows_summary) - "
-        "prefer that real, queryable source over a live MoEngage pull whenever a question could be answered "
-        "either way (that pull is also real but far slower - minutes, not seconds). This should be True "
+        "prefer that real, queryable source over the MoEngage daily-pull tool whenever a question could be "
+        "answered either way (that source is exact and queryable; the daily-pull tool is real but only as "
+        "current as the most recent daily run). This should be True "
         "mainly for genuine node-level detail on a specific flow those tables don't capture. False if answering it needs a "
         "database query for anything, even partially, or if you're genuinely not sure."
     )
@@ -1263,7 +1360,7 @@ def ask_analytics(
     toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
     system_prefix = SYSTEM_PREFIX_TEMPLATE.format(
-        today=date.today().isoformat(), schema_notes=BIGQUERY_SCHEMA_NOTES
+        today=date.today().isoformat(), schema_notes=BIGQUERY_SCHEMA_NOTES + WAREHOUSE_SCHEMA_NOTES
     )
 
     agent_executor = create_sql_agent(
@@ -1272,6 +1369,11 @@ def ask_analytics(
         agent_type="tool-calling",
         prefix=system_prefix,
         verbose=False,
+        # The 4 real warehouse_* tools defined above - a second, separate
+        # real production data source alongside BigQuery, added here (not
+        # as a second agent) so one answer can freely combine both when a
+        # question genuinely needs to.
+        extra_tools=[warehouse_brand_status, warehouse_list_tables, warehouse_table_schema, warehouse_query],
         # max_iterations: real gap this raises - LangChain's own default (15)
         # was too low once real, verified, live-caught: a question needing
         # exploration across the 3 new real per-campaign MoEngage tables
@@ -1377,6 +1479,9 @@ def ask_analytics(
         except Exception as exc:  # noqa: BLE001 - every attempt logged, final one falls through gracefully
             last_exc = exc
             logger.warning("Analytics SQL agent call failed (attempt %d/3): %s", attempt + 1, exc)
+    # Real base label - refined below, after intermediate_steps is read, to
+    # also reflect real warehouse_* tool usage (see that loop for why this
+    # can't be decided here yet).
     data_source = "bigquery+moengage" if moengage_used else "bigquery"
 
     if result is None:
@@ -1407,17 +1512,37 @@ def ask_analytics(
 
     executed_queries = []
     query_observations = []  # (query_text, observation_text) - real SQL calls only, in run order
+    warehouse_used = False
+    warehouse_observations = []  # every real warehouse_* tool's own observation text (brand_status/
+    # list_tables/table_schema included, not just warehouse_query) - a number an answer cites from e.g.
+    # warehouse_brand_status's real reachability report ("1 of 8 brands reachable") is exactly as real and
+    # verifiable as one from a query result; excluding these would wrongly fail verification on it.
     for action, observation in intermediate_steps:
         tool_name = getattr(action, "tool", "")
         tool_input = getattr(action, "tool_input", "")
         obs_text = str(observation)
+        if tool_name.startswith("warehouse_"):
+            warehouse_used = True
+            warehouse_observations.append(obs_text)
         if "query" in tool_name.lower() and "checker" not in tool_name.lower() and "list" not in tool_name.lower() and "schema" not in tool_name.lower():
-            query = tool_input.get("query") if isinstance(tool_input, dict) else tool_input
+            # BigQuery's own sql_db_query tool uses {"query": ...}; the
+            # warehouse_query tool (see WAREHOUSE tools section above) uses
+            # {"brand": ..., "sql": ...} instead - a real, live-caught gap
+            # this fixes: without the "sql" fallback, any number sourced
+            # purely from a warehouse_query call had NO evidence text to
+            # verify against, so _verify_numbers always failed it, even
+            # though the number itself was genuinely real.
+            if isinstance(tool_input, dict):
+                query = tool_input.get("query") or tool_input.get("sql")
+            else:
+                query = tool_input
             if query:
                 executed_queries.append(str(query))
                 query_observations.append((str(query), obs_text))
 
     sql_query = "\n\n".join(executed_queries)
+    if warehouse_used:
+        data_source = data_source.replace("bigquery", "bigquery+warehouse") if "bigquery" in data_source else data_source + "+warehouse"
 
     if _contains_write_operation(sql_query):
         return {"answer": WRITE_BLOCKED_MESSAGE, "sql_query": sql_query, "verified": False, "data_source": data_source, "moengage_used": moengage_used}
@@ -1454,6 +1579,8 @@ def ask_analytics(
         recent_evidence_text += "\n" + file_context
     if moengage_used:
         recent_evidence_text += "\n" + moengage_context
+    if warehouse_observations:
+        recent_evidence_text += "\n" + "\n".join(warehouse_observations)
 
     verified = _verify_numbers(raw_answer, recent_evidence_text)
     if verified:

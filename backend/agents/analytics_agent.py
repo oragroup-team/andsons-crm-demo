@@ -55,6 +55,27 @@ BIGQUERY_SCHEMA_NOTES = """RAW SCHEMA - every real table this agent can query, e
 
 === ora-bigquery.ora_bigquery_pipeline (connected project - schema-inspection tool also works here) ===
 
+REAL MOENGAGE FLOW/NODE-LEVEL DATA, 7 real tables, one PER BRAND (added 2026-09-28 - use the schema-inspection \
+tool on any of these for exact columns, same as any other table here): moengage_daily_flow_tracker_AS_SG, \
+moengage_daily_flow_tracker_AS_MY, moengage_daily_flow_tracker_AS_PH, moengage_daily_flow_tracker_OVA_SG, \
+moengage_daily_flow_tracker_OVA_MY, moengage_daily_flow_tracker_OVA_PH, moengage_daily_flow_tracker_MODERN_MOLECULES \
+- one real row per (flow, send node, day), covering every real MoEngage flow in that brand's own workspace, \
+every real status, no filtering. Real columns include attempted/sent/delivered/opened/clicked/conversions/ \
+revenue PER SEND NODE (e.g. a specific WhatsApp or Email step inside a flow), date_range_start/date_range_end \
+(the real day this row covers), flow_name, node_label, channel, variation (all_variations vs control_group). \
+Real, current date coverage: 2026-09-08/09 through 2026-09-26, growing daily via a real cron pull - a question \
+about a date outside that range has no real data here yet, say so rather than guessing. USE THIS for any \
+question about a SPECIFIC MoEngage flow's own real send/open/click/delivery performance, or a real trend in \
+that flow's own numbers over time, PER BRAND (each brand's own workspace is a separate real table - "ASSG" \
+means the moengage_daily_flow_tracker_AS_SG table specifically, "Ova MY" means moengage_daily_flow_tracker_ \
+OVA_MY, etc. - never blend two brands' tables into one answer unless the question genuinely asks for a \
+cross-brand comparison, and if it does, state each brand's own number separately, never a summed total that \
+hides which brand drove it). This is DIFFERENT from and a REAL, separate source from flow_orders/ \
+dotcom_plus_marketplace (real completed ORDERS, not send/open/click events) and the moengage_campaigns_* \
+tables in the other project below (real per-CAMPAIGN aggregate stats, not per-flow-node) - prefer THIS table \
+group specifically when the question is about a named flow's own send-level behavior (e.g. "how many opens \
+did the abandoned cart WhatsApp message get") that those other two groups don't carry at this grain.
+
 TABLE dotcom_plus_marketplace (40 columns):
 Country STRING, Brand STRING, Channel STRING, order_id STRING, status STRING, created_at DATETIME, clean_sku STRING, Revenue_Type STRING, Cleaned_Revenue_Type STRING, quantity INT64, product_category STRING, new_product_category STRING, Prescription_Type STRING, Revenue FLOAT64, Final_Revenue FLOAT64, New_COGS FLOAT64, COGS_Less_RND FLOAT64, New_COGS_LCY FLOAT64, COGS_LCY_Less_RND FLOAT64, Order_Baskets INT64, Credit_Card_Expense FLOAT64, Delivery_Fee FLOAT64, Order_Type STRING, Applicable_Discount FLOAT64, Applicable_Cashback FLOAT64, Preponed STRING, Num_Orderlines_AV INT64, revenue_reporting_date DATETIME, sku_for_wms STRING, AV_GM2_Expenses FLOAT64, GM2_expenses FLOAT64, Seller_Discount_USD FLOAT64, Platform_Discount_USD FLOAT64, sku STRING, New_Quantity FLOAT64, Commission_Fee FLOAT64, Transaction_Fee FLOAT64, Service_Fee FLOAT64, Marketing_Fee FLOAT64, Selling_Price_USD FLOAT64
 

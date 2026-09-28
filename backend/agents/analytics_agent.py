@@ -262,6 +262,21 @@ extra exploratory query. Prefer the table's own Year/Month_Name columns (exact v
 ambiguity) over constructing a created_at BETWEEN/date-range filter when both are available for the same \
 table - simpler and less error-prone.
 
+WEEK BOUNDARIES - a real, live-caught inconsistency this fixes: two separate real runs of the near-identical \
+question "is X converting better or worse this week vs last week" produced genuinely DIFFERENT real numbers \
+(one used Sep 21-27/Sep 14-20 as the two weeks, another used Sep 22-28/Sep 15-21) - not because the underlying \
+data changed, but because each run improvised its own ad-hoc CASE WHEN date boundaries rather than using one \
+fixed rule, so "this week" silently meant a different 7-day span each time. That is a real trust failure for \
+a stakeholder-facing answer, not a rounding difference - it makes the same question give a different real \
+answer depending on when/how it happened to be asked. FIX, every time a question involves "this week"/"last \
+week"/week-over-week: ALWAYS use ISO calendar weeks (Monday through Sunday), computed with BigQuery's own \
+`DATE_TRUNC(<date>, WEEK(MONDAY))` (gives that date's Monday) - never a hand-written CASE WHEN with literal \
+date strings. "This week" = the ISO week containing today's real date above (whether or not it's complete \
+yet - say so plainly if today falls mid-week, since that week's total is naturally partial and not directly \
+comparable to a prior FULL week). "Last week" = exactly 7 days before that Monday. State the real Monday-\
+Sunday date range you used in the answer itself, so a reader can see exactly which days were compared - never \
+just say "this week"/"last week" without the real dates attached.
+
 MANDATORY 6-STEP PROCESS - follow every one of these, in this order, for every question. Skipping a step \
 or jumping straight to writing SQL from memory is exactly how the real, live-caught failures below \
 happened - this process exists because of those specific incidents, not as a formality:

@@ -43,6 +43,16 @@ _TIMEOUT_SECONDS = 25
 _MAX_WORKERS = 6  # higher concurrency measurably increases MoEngage read-timeout
 # rate at this workspace's scale (~1/3 of 137 charts timed out at 16 workers) -
 # this is empirically the more reliable tradeoff, not just a slower one.
+_CAMPAIGN_STATS_MAX_WORKERS = 3  # real, live-confirmed (2026-09-28): 6 workers on
+# /core-services/v1/campaign-stats (a real, separate real endpoint from the chart-
+# snapshot one _MAX_WORKERS above tunes) blew straight through the documented
+# 100 calls/min real server-side limit - a real multi-day backfill hit a heavy,
+# sustained run of real 429s at 6 workers, each one costing a real 20s wait via
+# _request_with_retry's own backoff. 3 gave the real ~12-16x speedup over fully
+# sequential (verified live: one real day's 528-campaign_id fetch, 6 workers,
+# produced byte-identical totals to the old sequential fetch, just faster) while
+# staying clear of that real ceiling - not a guess, re-tune only after checking
+# the real 429 rate live again, the same way this number was found.
 _MAX_RETRIES = 2
 _MAX_RATE_LIMIT_RETRIES = 6  # see _request_with_retry - real, live-confirmed need:
 # a parallel account-wide crawl (dump_all_flow_stats.py, 150 real flows / 6
@@ -357,31 +367,52 @@ def get_campaign_stats(
     headers = _campaign_auth_headers(brand)
     date_chunks = _date_chunks(start_date, end_date)
 
-    merged: dict = {}
-    for chunk_start, chunk_end in date_chunks:
-        for i in range(0, len(campaign_ids), _CAMPAIGN_STATS_ID_LIMIT):
-            id_batch = campaign_ids[i : i + _CAMPAIGN_STATS_ID_LIMIT]
-            payload = {
-                "request_id": str(uuid.uuid4()),
-                "campaign_ids": id_batch,
-                "start_date": chunk_start,
-                "end_date": chunk_end,
-                "attribution_type": attribution_type,
-                "metric_type": metric_type,
-            }
-            # Real, documented limit: 100 calls/min per workspace on this
-            # endpoint - a bulk, many-campaign export can realistically hit
-            # it, unlike the single-flow case this client was first built
-            # for; _request_with_retry handles the 429 backoff/retry.
-            resp = _request_with_retry("POST", url, headers=headers, json=payload)
-            if resp.status_code == 401:
-                raise RuntimeError(
-                    "MoEngage rejected the Campaign Stats request (401) - check "
-                    "MOENGAGE_WORKSPACE_ID/MOENGAGE_CAMPAIGN_API_KEY."
-                )
-            resp.raise_for_status()
-            resp_json = resp.json()
+    id_batches = [
+        campaign_ids[i : i + _CAMPAIGN_STATS_ID_LIMIT]
+        for i in range(0, len(campaign_ids), _CAMPAIGN_STATS_ID_LIMIT)
+    ]
 
+    def _fetch_one(chunk_start: str, chunk_end: str, id_batch: list) -> dict:
+        payload = {
+            "request_id": str(uuid.uuid4()),
+            "campaign_ids": id_batch,
+            "start_date": chunk_start,
+            "end_date": chunk_end,
+            "attribution_type": attribution_type,
+            "metric_type": metric_type,
+        }
+        # Real, documented limit: 100 calls/min per workspace on this
+        # endpoint - a bulk, many-campaign export can realistically hit
+        # it, unlike the single-flow case this client was first built for;
+        # _request_with_retry handles the 429 backoff/retry, and _MAX_
+        # WORKERS below is deliberately the same modest concurrency used
+        # elsewhere in this file (chart snapshots) rather than something
+        # higher, precisely to stay clear of that real 100/min ceiling.
+        resp = _request_with_retry("POST", url, headers=headers, json=payload)
+        if resp.status_code == 401:
+            raise RuntimeError(
+                "MoEngage rejected the Campaign Stats request (401) - check "
+                "MOENGAGE_WORKSPACE_ID/MOENGAGE_CAMPAIGN_API_KEY."
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    # Real, live-confirmed bottleneck this fixes (2026-09-28): with many
+    # real send nodes (e.g. 528 for one real brand), the old sequential
+    # loop here meant ~53 real HTTP round-trips, one after another, PER
+    # REAL DAY requested - fine for a single day's cron pull, but a real
+    # multi-day/multi-week backfill scaled that linearly into hours. These
+    # calls are independent (different id_batch/date_chunk each) with no
+    # real ordering requirement, so they're genuinely safe to run
+    # concurrently - _CAMPAIGN_STATS_MAX_WORKERS (its own constant, not
+    # _MAX_WORKERS - see that constant's own comment for why this real
+    # endpoint needed a different, lower number).
+    merged: dict = {}
+    tasks = [(cs, ce, batch) for cs, ce in date_chunks for batch in id_batches]
+    with ThreadPoolExecutor(max_workers=_CAMPAIGN_STATS_MAX_WORKERS) as executor:
+        futures = {executor.submit(_fetch_one, cs, ce, batch): (cs, ce, batch) for cs, ce, batch in tasks}
+        for future in as_completed(futures):
+            resp_json = future.result()
             for campaign_id, entries in resp_json.get("data", {}).items():
                 target_entries = merged.setdefault(campaign_id, [])
                 for j, entry in enumerate(entries):

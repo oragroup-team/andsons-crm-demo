@@ -195,9 +195,25 @@ def _checkmark_icon(draw, cx, cy, r, color):
     draw.line([(cx - r * 0.7, cy), (cx - r * 0.15, cy + r * 0.55), (cx + r * 0.75, cy - r * 0.6)], fill=color, width=lw, joint="curve")
 
 
-def _cover_crop(photo: Image.Image, width: int, height: int) -> Image.Image:
+def _cover_crop(photo: Image.Image, width: int, height: int, top_bias: float = 0.5) -> Image.Image:
     """Centre-crops+resizes a photo to exactly fill width x height (a
-    'cover' fit, never distorted/stretched)."""
+    'cover' fit, never distorted/stretched). top_bias controls where the
+    vertical crop window sits when the source needs its height trimmed:
+    0.5 (default) is a pure centre crop, right for generic body-content
+    images (product shots, icons) where the subject is genuinely centred.
+
+    Real, live-caught bug this parameter fixes for hero PHOTOS OF PEOPLE
+    specifically (see _draw_hero_rect/_draw_hero_circle, which now pass a
+    low top_bias): every real portrait in the hero bank is shot with
+    headroom ABOVE the head, standard portrait-photography convention -
+    a pure 50/50 centre crop on a tall source needing a much shorter/
+    squarer target keeps only the vertical middle, landing on the torso
+    and cropping the head off entirely (confirmed live: exactly this
+    happened with confidentease.jpg and warmlook.jpg). A low top_bias
+    keeps most of the top of the frame (head + face + some torso)
+    instead, sacrificing the lower body/legs - the right trade for a
+    hero photo, wrong for a generic centred product shot, hence this
+    being a per-call parameter, not a new default for every caller."""
     target_ratio = width / height
     src_ratio = photo.width / photo.height
     if src_ratio > target_ratio:
@@ -206,7 +222,7 @@ def _cover_crop(photo: Image.Image, width: int, height: int) -> Image.Image:
         photo = photo.crop((left, 0, left + new_width, photo.height))
     else:
         new_height = int(photo.width / target_ratio)
-        top = (photo.height - new_height) // 2
+        top = int((photo.height - new_height) * top_bias)
         photo = photo.crop((0, top, photo.width, top + new_height))
     return photo.resize((width, height), Image.LANCZOS)
 
@@ -226,7 +242,7 @@ def _draw_hero_rect(canvas: Image.Image, hero_key: str, x0: int, y: int, width: 
     draw.rounded_rectangle([x0, y, x0 + width, y + target_h], radius=_s(radius), fill=COLOR_LAVENDER)
     photo = _load_hero(hero_key)
     if photo:
-        photo = _cover_crop(photo, width, target_h)
+        photo = _cover_crop(photo, width, target_h, top_bias=0.08)
         mask = Image.new("L", (width, target_h), 0)
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, width, target_h], radius=_s(radius), fill=255)
         canvas.paste(photo, (x0, y), mask)
@@ -245,7 +261,7 @@ def _draw_hero_circle(canvas: Image.Image, hero_key: str, cx: int, cy: int, r: i
     photo = _load_hero(hero_key)
     if photo:
         d = r * 2
-        photo = _cover_crop(photo, d, d)
+        photo = _cover_crop(photo, d, d, top_bias=0.08)
         mask = Image.new("L", (d, d), 0)
         ImageDraw.Draw(mask).ellipse([0, 0, d, d], fill=255)
         canvas.paste(photo, (cx - r, cy - r), mask)

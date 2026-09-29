@@ -264,8 +264,7 @@ def _draw_hero(canvas: Image.Image, hero_key: str, hero_headline: Optional[str],
     # custom position - typically bottom-anchored, like the overlay this
     # renderer draws for raw heroes. A pure center-crop can clip straight
     # into that baked-in text, so baked heroes crop from the top instead
-    # (keeping the full bottom of the source image); raw heroes have no
-    # baked text to protect, so a center-crop is fine for them.
+    # (keeping the full bottom of the source image).
     is_baked = HERO_BANK.get(hero_key, {}).get("baked_headline") is not None
 
     target_ratio = CANVAS_WIDTH / HERO_HEIGHT
@@ -276,7 +275,26 @@ def _draw_hero(canvas: Image.Image, hero_key: str, hero_headline: Optional[str],
         photo = photo.crop((left, 0, left + new_width, photo.height))
     else:
         new_height = int(photo.width / target_ratio)
-        top = (photo.height - new_height) if is_baked else (photo.height - new_height) // 2
+        excess = photo.height - new_height
+        if is_baked:
+            top = excess
+        else:
+            # Real, live-caught bug this fixes: a pure 50/50 center crop
+            # assumes the subject is vertically centered in the source
+            # photo, which every real portrait in this bank isn't - every
+            # one of these is shot with headroom ABOVE the head, following
+            # standard portrait-photography convention (head + face in
+            # the top third, body filling the rest downward). A tall
+            # portrait source (e.g. 800x1200) needing a wide, short hero
+            # crop (600x320-scaled) only keeps ~36% of the source height -
+            # centering that window lands squarely on the torso and
+            # crops the head off entirely (confirmed live: exactly this
+            # happened with confidentease.jpg and warmlook.jpg). Biasing
+            # the crop window toward the top (keeping only a small real
+            # buffer above, not zero) reliably keeps head + face + some
+            # torso instead, sacrificing the lower body/legs, which
+            # matters far less for a hero banner.
+            top = int(excess * 0.08)
         photo = photo.crop((0, top, photo.width, top + new_height))
     photo = photo.resize((CANVAS_WIDTH, HERO_HEIGHT), Image.LANCZOS)
     canvas.paste(photo, (0, y))

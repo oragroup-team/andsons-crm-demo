@@ -61,6 +61,7 @@ from agents.feedback_node import (  # noqa: E402
     revise_flow_touchpoints,
     run_flow_pipeline,
     run_insight_flow_pipeline,
+    run_personalized_flow_pipeline,
     _resolve_structural_request,
 )
 from email_image_renderer import render_email_image  # noqa: E402
@@ -344,9 +345,9 @@ def slack_events_ova_email():
             template_reference = "\n\n".join(x for x in (pending_template_reference, template_reference) if x) or None
 
             if not combined_text and file_context:
-                intent = {"mode": "insight", "flow_name": None, "signal_question": None, "category": DEFAULT_CATEGORY}
+                intent = {"mode": "insight", "flow_name": None, "signal_question": None, "patient_identifier": None, "category": DEFAULT_CATEGORY}
             elif not combined_text and template_reference:
-                intent = {"mode": "direct", "flow_name": None, "signal_question": None, "category": DEFAULT_CATEGORY}
+                intent = {"mode": "direct", "flow_name": None, "signal_question": None, "patient_identifier": None, "category": DEFAULT_CATEGORY}
             else:
                 intent = parse_email_request(combined_text)
 
@@ -380,6 +381,37 @@ def slack_events_ova_email():
                 clear_pending_email_request(channel, thread_ts)
                 save_email_session(channel, thread_ts, {"flow_name": result["flow_name"], "touchpoints": result["touchpoints"], "feedback_history": [], "category": intent["category"]})
                 _post_flow_result(bot_token, channel, thread_ts, result, insight=result.get("insight_brief"))
+                return
+
+            if intent["mode"] == "personalized":
+                identifier = intent.get("patient_identifier")
+                if not identifier:
+                    save_pending_email_request(channel, thread_ts, _pending_to_save(pending_texts, text, template_reference))
+                    post_message(
+                        bot_token, channel, thread_ts=thread_ts,
+                        text="To personalize this to one real patient I need a real identifier (an order, "
+                        "customer, or subscription ID) - a first name alone isn't enough to look anything up. "
+                        "Reply with the ID and I'll pull her real situation before drafting.",
+                    )
+                    return
+                result = run_personalized_flow_pipeline(
+                    identifier, flow_name=intent["flow_name"], notes=combined_text, raw_request=combined_text,
+                    category=intent["category"], template_reference=template_reference or None,
+                )
+                if result["needs_flow_clarification"]:
+                    save_pending_email_request(channel, thread_ts, _pending_to_save(pending_texts, text, template_reference))
+                    post_message(
+                        bot_token, channel, thread_ts=thread_ts,
+                        text=(
+                            f"{result['patient_brief']['bigquery_answer']}\n\n"
+                            "None of our real flows clearly fit this patient's real situation - tell me which "
+                            "one to frame it as: " + ", ".join(sorted(VALID_FLOW_SLUGS))
+                        ),
+                    )
+                    return
+                clear_pending_email_request(channel, thread_ts)
+                save_email_session(channel, thread_ts, {"flow_name": result["flow_name"], "touchpoints": result["touchpoints"], "feedback_history": [], "category": intent["category"]})
+                _post_flow_result(bot_token, channel, thread_ts, result, insight=result.get("patient_brief"))
                 return
 
             resolved_flow_name = resolve_flow_for_request(combined_text, intent["flow_name"])

@@ -26,7 +26,7 @@ from .copywriter_agent import (
     pick_flow_for_signal,
 )
 from .head_of_crm_agent import brief_campaign, synthesize_flow_for_signal
-from .insight_agent import investigate
+from .insight_agent import investigate, investigate_patient
 from .learned_rules_agent import distill_and_save_rule, learned_rules_text
 from .llm_provider import get_llm, invoke_with_retry
 from .sweeper_agent import sweep_email, sweep_push, sweep_whatsapp
@@ -383,6 +383,63 @@ def run_insight_flow_pipeline(
     result["needs_flow_clarification"] = False
     result["insight_brief"] = brief
     result["signal_question"] = question
+    return result
+
+
+def run_personalized_email_pipeline(
+    identifier: str, first_name: str, flow_name: Optional[str] = None, notes: str = "",
+    category: str = DEFAULT_CATEGORY,
+) -> dict:
+    """A SINGLE email personalized to one real, specific patient's real
+    situation - looked up via investigate_patient() (the shared analytics
+    agent, identity-scrubbed - see that function's own docstring for the
+    real, honest limits of that scrubbing). If flow_name isn't given, the
+    real flow is picked from the patient's own real situation, same
+    reasoning as run_insight_email_pipeline picks one from a business
+    signal. The patient lookup result is always returned, even when it
+    found nothing or was blocked - never silently substituted with a
+    fabricated finding."""
+    patient_brief = investigate_patient(identifier, notes=notes)
+
+    if not flow_name:
+        flow_name = pick_flow_for_signal(patient_brief["brief_text"], patient_brief["brief_text"])
+    if not flow_name:
+        return {"needs_flow_clarification": True, "patient_brief": patient_brief, "identifier": identifier, "first_name": first_name}
+
+    result = _run_pipeline_loop(flow_name, first_name, insight_brief=patient_brief["brief_text"], category=category)
+    result["needs_flow_clarification"] = False
+    result["patient_brief"] = patient_brief
+    result["patient_identifier"] = identifier
+    return result
+
+
+def run_personalized_flow_pipeline(
+    identifier: str, flow_name: Optional[str] = None, notes: str = "", raw_request: Optional[str] = None,
+    category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
+) -> dict:
+    """The WHOLE-FLOW version of run_personalized_email_pipeline above -
+    every touchpoint in the real cadence, grounded in one real patient's
+    real situation instead of a business-wide signal. Reuses
+    run_flow_pipeline exactly as run_insight_flow_pipeline does; only the
+    source of insight_brief_text differs."""
+    patient_brief = investigate_patient(identifier, notes=notes)
+
+    if flow_name and not flow_genuinely_fits(patient_brief["brief_text"], flow_name):
+        flow_name = None
+    if not flow_name:
+        flow_name = pick_flow_for_signal(patient_brief["brief_text"], patient_brief["brief_text"])
+    if not flow_name:
+        flow_name = synthesize_flow_for_signal(patient_brief["brief_text"], patient_brief["brief_text"], raw_request=raw_request)
+    if not flow_name:
+        return {"needs_flow_clarification": True, "patient_brief": patient_brief, "identifier": identifier}
+
+    result = run_flow_pipeline(
+        flow_name, insight_brief_text=patient_brief["brief_text"], raw_request=raw_request,
+        category=category, template_reference=template_reference,
+    )
+    result["needs_flow_clarification"] = False
+    result["patient_brief"] = patient_brief
+    result["patient_identifier"] = identifier
     return result
 
 

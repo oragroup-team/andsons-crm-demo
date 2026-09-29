@@ -31,6 +31,7 @@ from agents.feedback_node import (
     run_email_pipeline,
     run_flow_pipeline,
     run_insight_flow_pipeline,
+    run_personalized_flow_pipeline,
     _resolve_structural_request,
 )
 from email_image_renderer import render_email_image
@@ -788,6 +789,45 @@ def slack_events_email():
                     },
                 )
                 _post_flow_result(bot_token, channel, thread_ts, result, insight=result.get("insight_brief"))
+                return
+
+            if intent["mode"] == "personalized":
+                identifier = intent.get("patient_identifier")
+                if not identifier:
+                    save_pending_email_request(channel, thread_ts, _pending_to_save(pending_texts, text, template_reference))
+                    post_message(
+                        bot_token, channel, thread_ts=thread_ts,
+                        text="To personalize this to one real patient I need a real identifier (an order, "
+                        "customer, or subscription ID) - a first name alone isn't enough to look anything up. "
+                        "Reply with the ID and I'll pull his real situation before drafting.",
+                    )
+                    return
+                result = run_personalized_flow_pipeline(
+                    identifier, flow_name=intent["flow_name"], notes=combined_text, raw_request=combined_text,
+                    category=intent["category"], template_reference=template_reference or None,
+                )
+                if result["needs_flow_clarification"]:
+                    save_pending_email_request(channel, thread_ts, _pending_to_save(pending_texts, text, template_reference))
+                    post_message(
+                        bot_token, channel, thread_ts=thread_ts,
+                        text=(
+                            f"{result['patient_brief']['bigquery_answer']}\n\n"
+                            "None of our real flows clearly fit this patient's real situation - tell me which "
+                            "one to frame it as: " + ", ".join(sorted(VALID_FLOW_SLUGS))
+                        ),
+                    )
+                    return
+                clear_pending_email_request(channel, thread_ts)
+                save_email_session(
+                    channel, thread_ts,
+                    {
+                        "flow_name": result["flow_name"],
+                        "touchpoints": result["touchpoints"],
+                        "feedback_history": [],
+                        "category": intent["category"],
+                    },
+                )
+                _post_flow_result(bot_token, channel, thread_ts, result, insight=result.get("patient_brief"))
                 return
 
             # Real, live-caught bug this fixes: parse_email_request's own

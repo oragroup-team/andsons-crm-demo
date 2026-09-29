@@ -846,14 +846,27 @@ def generate_flow_whatsapp_touchpoint(
 
 
 class EmailIntent(BaseModel):
-    mode: Literal["direct", "insight"] = Field(
+    mode: Literal["direct", "insight", "personalized"] = Field(
         description="'direct' if this names or clearly implies one specific flow. 'insight' if it "
-        "describes a business problem/signal to work out the flow from, or explicitly asks for live data."
+        "describes a business problem/signal to work out the flow from, or explicitly asks for live data. "
+        "'personalized' if the request explicitly asks for an email tailored to ONE SPECIFIC real patient "
+        "using their OWN real data/history (e.g. 'look up order #4521's real history and personalize this "
+        "for her') - the giveaway is a real identifier (an order/customer/subscription ID, not just a "
+        "first name for the greeting) plus a request to ground the content in THAT PERSON's own real "
+        "situation, not a general segment or business signal."
     )
     flow_name: Optional[Literal[tuple(VALID_FLOW_SLUGS)]] = Field(  # type: ignore[valid-type]
-        default=None, description="For 'direct': the flow slug. For 'insight': only if the message names one. Null if unclear - do not guess.",
+        default=None, description="For 'direct': the flow slug. For 'insight'/'personalized': only if the message names one. Null if unclear - do not guess.",
     )
-    signal_question: Optional[str] = Field(default=None, description="For 'insight' only: the business signal/question as its own clean sentence. Null for 'direct'.")
+    signal_question: Optional[str] = Field(default=None, description="For 'insight' only: the business signal/question as its own clean sentence. Null otherwise.")
+    patient_identifier: Optional[str] = Field(
+        default=None,
+        description="For 'personalized' only: the real identifier given for the specific patient to look "
+        "up (an order/customer/subscription ID, copied exactly as given). Never a name/email/phone alone "
+        "- if the request only gives a first name with no real identifier, that is NOT enough to be "
+        "'personalized' (treat it as 'direct' instead, since there's no real record to look up). Null "
+        "otherwise.",
+    )
     category: Literal[tuple(VALID_CATEGORY_SLUGS)] = Field(  # type: ignore[valid-type]
         default=DEFAULT_CATEGORY,
         description="Which OVA SG category: 'contraception', 'emergency_contraception', 'intimate_health', or 'weight_loss'. Default 'contraception' when there's no signal either way.",
@@ -866,10 +879,12 @@ def parse_email_request(text: str) -> dict:
     catalog = "\n".join(f'- "{slug}": {flow["label"]} ({flow["track"]} track, {flow["category"]}) - {flow["audience"]}' for slug, flow in FLOW_BY_SLUG.items())
     system_text = (
         "You classify a free-text CRM request against this real OVA Singapore flow catalog (slug: label - "
-        "who it's for):\n" + catalog + "\n\nThere is no real customer in this conversation - every draft "
-        "addresses a generic 'NAME' placeholder. For 'direct' mode, leave flow_name null rather than "
-        "guessing. For 'insight' mode, only fill flow_name if the message names/implies one. Also "
-        "classify 'category'."
+        "who it's for):\n" + catalog + "\n\nThere is no real customer in this conversation for 'direct'/"
+        "'insight' mode - every draft addresses a generic 'NAME' placeholder there. 'personalized' mode is "
+        "the one exception - it requires a real identifier (order/customer/subscription ID), not just a "
+        "name, to look up. For 'direct' mode, leave flow_name null rather than guessing. For 'insight'/"
+        "'personalized' mode, only fill flow_name if the message names/implies one. Also classify "
+        "'category'."
     )
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", text)])
     chain = prompt | structured_llm
@@ -877,8 +892,8 @@ def parse_email_request(text: str) -> dict:
         result: EmailIntent = chain.invoke({})
     except Exception:
         logger.warning("parse_email_request: model failed to return structured output for %r", text)
-        return {"mode": "unclear", "flow_name": None, "signal_question": None, "category": DEFAULT_CATEGORY}
-    return {"mode": result.mode, "flow_name": result.flow_name, "signal_question": result.signal_question, "category": result.category}
+        return {"mode": "unclear", "flow_name": None, "signal_question": None, "patient_identifier": None, "category": DEFAULT_CATEGORY}
+    return {"mode": result.mode, "flow_name": result.flow_name, "signal_question": result.signal_question, "patient_identifier": result.patient_identifier, "category": result.category}
 
 
 class FlowPick(BaseModel):

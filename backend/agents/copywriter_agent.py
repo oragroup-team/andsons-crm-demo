@@ -1290,7 +1290,7 @@ def generate_flow_push_touchpoint(
 
 
 class EmailIntent(BaseModel):
-    mode: Literal["direct", "insight"] = Field(
+    mode: Literal["direct", "insight", "personalized"] = Field(
         description="'direct' if this is a plain request naming (or clearly implying) one specific "
         "flow, e.g. 'write a P1 email for Marcus'. 'insight' if this describes a business problem/signal "
         "and asks for an email to address it, e.g. 'OTC serum sales are down, write something to fix "
@@ -1301,19 +1301,33 @@ class EmailIntent(BaseModel):
         "it also names a specific flow/customer (e.g. 'based on the live MoEngage flows, write a cart "
         "abandon email for Mark' is 'insight', not 'direct' - a flow name being present doesn't override "
         "an explicit request to actually check real data first; skipping that investigation because a "
-        "flow was also named would silently ignore what was actually asked for)."
+        "flow was also named would silently ignore what was actually asked for). "
+        "'personalized' if the request explicitly asks for an email tailored to ONE SPECIFIC real "
+        "customer using their OWN real data/history (e.g. 'look up order #4521's real usage and write a "
+        "personalized email based on it', 'use his actual order history to write this') - the giveaway is "
+        "a real identifier (an order/customer/subscription ID, not just a first name for the greeting) "
+        "plus a request to ground the content in THAT PERSON's own real situation, not a general segment "
+        "or business signal."
     )
     flow_name: Optional[Literal[tuple(VALID_FLOW_SLUGS)]] = Field(
         default=None,
-        description="For mode='direct': the flow slug this request is asking for. For mode='insight': "
-        "the flow slug ONLY if the message itself clearly names/implies one (e.g. mentions 'winback' by "
-        "name) - otherwise null, so the caller investigates first and picks the best-fitting flow. "
-        "Null if it can't be confidently determined either way - do not guess.",
+        description="For mode='direct': the flow slug this request is asking for. For mode='insight'/"
+        "'personalized': the flow slug ONLY if the message itself clearly names/implies one - otherwise "
+        "null, so the caller investigates first and picks the best-fitting flow. Null if it can't be "
+        "confidently determined either way - do not guess.",
     )
     signal_question: Optional[str] = Field(
         default=None,
         description="For mode='insight' only: the business signal/problem/question to investigate, "
-        "as its own clean sentence (e.g. 'Is OTC serum revenue declining?'). Null for mode='direct'.",
+        "as its own clean sentence (e.g. 'Is OTC serum revenue declining?'). Null otherwise.",
+    )
+    patient_identifier: Optional[str] = Field(
+        default=None,
+        description="For mode='personalized' only: the real identifier given for the specific customer "
+        "to look up (an order ID, customer ID, subscription ID - copied exactly as given, e.g. '4521' or "
+        "'ORD-4521'). Never a name/email/phone alone - if the request only gives a first name with no "
+        "real identifier, that is NOT enough to be 'personalized' (treat it as 'direct' instead, since "
+        "there's no real record to look up). Null for every other mode.",
     )
     category: Literal[tuple(VALID_CATEGORY_SLUGS)] = Field(
         default=DEFAULT_CATEGORY,
@@ -1352,13 +1366,14 @@ def parse_email_request(text: str) -> dict:
         "dashboard, 'live data', 'right now') - naming a flow doesn't make it 'direct' if the message is "
         "also explicitly asking for a real data check first; that check would be silently skipped "
         "otherwise, which ignores what was actually asked for. "
-        "There is no real customer in this conversation - never look for or expect a customer name; "
-        "every draft always addresses a generic 'NAME' placeholder, so ignore names entirely when "
-        "classifying. For 'direct' mode, leave flow_name null rather than guessing if it doesn't clearly "
-        "map to one of these flows - do not default to the first flow in the list. For 'insight' mode, "
-        "only fill flow_name if the message itself names/clearly implies a specific flow; otherwise leave "
-        "it null. Also classify 'category' (see its own field description) - default to 'hair_loss' "
-        "unless the request clearly signals a different one."
+        "There is no real customer in this conversation for 'direct'/'insight' mode - never look for or "
+        "expect a customer name there; every draft addresses a generic 'NAME' placeholder. 'personalized' "
+        "mode is the one exception - it requires a real identifier (order/customer/subscription ID), not "
+        "just a name, to look up. For 'direct' mode, leave flow_name null rather than guessing if it "
+        "doesn't clearly map to one of these flows - do not default to the first flow in the list. For "
+        "'insight'/'personalized' mode, only fill flow_name if the message itself names/clearly implies a "
+        "specific flow; otherwise leave it null. Also classify 'category' (see its own field description) "
+        "- default to 'hair_loss' unless the request clearly signals a different one."
     )
     prompt = ChatPromptTemplate.from_messages([("system", system_text), ("human", text)])
     chain = prompt | structured_llm
@@ -1373,11 +1388,12 @@ def parse_email_request(text: str) -> dict:
         # Slack. mode="unclear" lets the caller give a clean, on-brand
         # clarification instead of an API error dump.
         logger.warning("parse_email_request: model failed to return structured output for %r", text)
-        return {"mode": "unclear", "flow_name": None, "signal_question": None, "category": DEFAULT_CATEGORY}
+        return {"mode": "unclear", "flow_name": None, "signal_question": None, "patient_identifier": None, "category": DEFAULT_CATEGORY}
     return {
         "mode": result.mode,
         "flow_name": result.flow_name,
         "signal_question": result.signal_question,
+        "patient_identifier": result.patient_identifier,
         "category": result.category,
     }
 

@@ -6,17 +6,17 @@ from the andSons backend's agents/feedback_node.py - same retry-loop
 discipline (MAX_RETRIES, never just the raw reasons alone), same
 structural-edit reasoning, same touchpoint-reference resolution.
 
-REAL, DELIBERATE DIFFERENCE FROM THE ANDSONS VERSION: no live BigQuery/
-MoEngage investigation. OVA_SG_CRM_AGENT_SCOPE.md SS8A/SS8D are explicit,
-current blocking gaps - there is no OVA SG BigQuery access and no OVA SG
-MoEngage workspace API credentials yet, so this file never calls a real
-`investigate()`. Every seam where the andSons version would (run_flow_
-pipeline's mandatory pre-brief investigation, run_insight_*_pipeline,
-_run_live_data_lookup) is replaced with a plain, honest stub that says so
-- never a fabricated finding standing in for real data. The moment OVA SG
-gets real BigQuery/MoEngage access, wiring in a real insight_agent.py here
-(copy andSons' unchanged - it has zero andSons-specific content) is a
-small, contained change to just these stubs, not a rewrite.
+REAL, NOW-RESOLVED GAP: this file used to have no live BigQuery/MoEngage
+investigation at all (OVA SG had no data-source access). It now calls the
+SAME shared analytics agent @andSons Analytics runs on, over HTTP -
+agents/insight_agent.py wraps analytics_client.py's call to the andSons
+backend's own `/ask` endpoint. Every flow build is grounded in a real,
+live-investigated question first (matching andSons' own run_flow_pipeline
+exactly - see that function below), and a human reviewer's revision
+feedback gets a real live-data lookup whenever the agent itself judges the
+feedback is actually asking for one (_resolve_live_data_request - real
+LLM judgement, not keyword matching; unchanged from before, only what it
+feeds into changed).
 """
 import difflib
 import logging
@@ -37,6 +37,7 @@ from .copywriter_agent import (
     pick_flow_for_signal,
 )
 from .head_of_crm_agent import brief_campaign, synthesize_flow_for_signal
+from .insight_agent import investigate, investigate_patient
 from .learned_rules_agent import distill_and_save_rule, learned_rules_text
 from .llm_provider import get_llm, invoke_with_retry
 from .sweeper_agent import sweep_email, sweep_whatsapp
@@ -45,12 +46,6 @@ logger = logging.getLogger("feedback_node")
 logging.basicConfig(level=logging.INFO)
 
 MAX_RETRIES = 2
-
-_NO_LIVE_DATA_TEXT = (
-    "No live business-data source is connected for OVA Singapore yet (OVA_SG_CRM_AGENT_SCOPE.md SS8A/SS8D "
-    "- no OVA SG BigQuery access and no OVA SG MoEngage workspace credentials exist yet). This build is "
-    "grounded in this flow's own real, documented audience/goal/catalog data only, not a live signal."
-)
 
 
 def format_correction(reasons: list) -> str:
@@ -125,18 +120,17 @@ def run_email_pipeline(flow_name: str, first_name: str, file_context: str = "", 
 
 
 def run_insight_email_pipeline(question: str, first_name: str, flow_name: Optional[str] = None, file_context: str = "", category: str = DEFAULT_CATEGORY) -> dict:
-    """No live investigation exists for OVA yet (see module docstring) -
-    this always reports that plainly rather than fabricating a finding.
-    Still runs the normal generation pipeline (grounded in the flow's own
-    real data plus any uploaded file), just without a live-data brief."""
-    brief = {"brief_text": _NO_LIVE_DATA_TEXT, "bigquery_answer": _NO_LIVE_DATA_TEXT, "bigquery_verified": False}
+    """Investigates the real business signal via the shared analytics agent
+    (see module docstring) and writes an email addressing it, through the
+    same Copywriter -> Sweeper -> Feedback loop as run_email_pipeline."""
+    brief = investigate(question, file_context=file_context)
     if not flow_name:
         flow_name = pick_flow_for_signal(question, brief["brief_text"])
     if not flow_name:
         return {"needs_flow_clarification": True, "brief": brief, "question": question, "first_name": first_name}
 
-    combined_context = brief["brief_text"] + (f"\n\nDATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}" if file_context else "")
-    result = _run_pipeline_loop(flow_name, first_name, insight_brief=combined_context, category=category)
+    # investigate() already folds file_context into brief["brief_text"] - no need to re-append it here.
+    result = _run_pipeline_loop(flow_name, first_name, insight_brief=brief["brief_text"], category=category)
     result["needs_flow_clarification"] = False
     result["insight_brief"] = brief
     result["signal_question"] = question
@@ -166,15 +160,24 @@ def run_flow_pipeline(
     flow_name: str, file_context: str = "", insight_brief_text: Optional[str] = None,
     raw_request: Optional[str] = None, category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
 ) -> dict:
-    """Generate the WHOLE real flow. Unlike andSons' run_flow_pipeline, this
-    never runs a mandatory pre-brief live-data investigation - there is no
-    real OVA SG data source to investigate yet (see module docstring). The
-    Head of CRM still runs, briefed honestly on that gap plus this flow's
-    own real catalog data and any uploaded file."""
+    """Generate the WHOLE real flow. EVERY flow build is grounded in real,
+    live data before anything is decided - not only ones explicitly framed
+    as a business signal, matching andSons' own run_flow_pipeline exactly.
+    A direct 'write the missed-refill flow' request still gets a real
+    analytics check first; the only difference is what question gets
+    investigated (the human's own signal question there, a generated one
+    about this flow's real performance here). Skipped only when a caller
+    already did this investigation itself (run_insight_flow_pipeline) and
+    handed the result in, so this never double-queries the same request."""
     if insight_brief_text is None:
-        insight_brief_text = _NO_LIVE_DATA_TEXT
-        if file_context:
-            insight_brief_text += f"\n\nDATA FROM A FILE UPLOADED WITH THIS REQUEST:\n{file_context}"
+        flow_meta = FLOW_BY_SLUG.get(flow_name)
+        flow_label = flow_meta["label"] if flow_meta else flow_name
+        default_question = (
+            f"How is the OVA '{flow_label}' flow performing right now, and what does the real data "
+            "suggest about its cadence, channel mix, and messaging angle?"
+        )
+        investigation = investigate(default_question, file_context=file_context)
+        insight_brief_text = investigation["brief_text"]
 
     crm_brief = brief_campaign(flow_name, signal_context=insight_brief_text, learned_rules=learned_rules_text(), raw_request=raw_request)
 
@@ -242,11 +245,10 @@ def run_insight_flow_pipeline(
     question: str, flow_name: Optional[str] = None, file_context: str = "",
     raw_request: Optional[str] = None, category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
 ) -> dict:
-    """No live investigation exists for OVA yet (see module docstring) -
-    still picks/synthesizes a flow from the request's own text and the
-    real catalog, and still builds the whole flow, just without a live
-    signal brief."""
-    brief = {"brief_text": _NO_LIVE_DATA_TEXT, "bigquery_answer": _NO_LIVE_DATA_TEXT, "bigquery_verified": False}
+    """Investigates the real business signal via the shared analytics agent
+    (see module docstring), then picks/synthesizes a flow from the request's
+    own text, the real catalog, and that finding, and builds the whole flow."""
+    brief = investigate(question, file_context=file_context)
 
     if flow_name and not flow_genuinely_fits(question, flow_name):
         flow_name = None
@@ -261,6 +263,63 @@ def run_insight_flow_pipeline(
     result["needs_flow_clarification"] = False
     result["insight_brief"] = brief
     result["signal_question"] = question
+    return result
+
+
+def run_personalized_email_pipeline(
+    identifier: str, first_name: str, flow_name: Optional[str] = None, notes: str = "",
+    category: str = DEFAULT_CATEGORY,
+) -> dict:
+    """A SINGLE email personalized to one real, specific patient's real
+    situation - looked up via investigate_patient() (the shared analytics
+    agent, identity-scrubbed - see that function's own docstring for the
+    real, honest limits of that scrubbing). If flow_name isn't given, the
+    real flow is picked from the patient's own real situation, same
+    reasoning as run_insight_email_pipeline picks one from a business
+    signal. The patient lookup result is always returned, even when it
+    found nothing or was blocked - never silently substituted with a
+    fabricated finding."""
+    patient_brief = investigate_patient(identifier, notes=notes)
+
+    if not flow_name:
+        flow_name = pick_flow_for_signal(patient_brief["brief_text"], patient_brief["brief_text"])
+    if not flow_name:
+        return {"needs_flow_clarification": True, "patient_brief": patient_brief, "identifier": identifier, "first_name": first_name}
+
+    result = _run_pipeline_loop(flow_name, first_name, insight_brief=patient_brief["brief_text"], category=category)
+    result["needs_flow_clarification"] = False
+    result["patient_brief"] = patient_brief
+    result["patient_identifier"] = identifier
+    return result
+
+
+def run_personalized_flow_pipeline(
+    identifier: str, flow_name: Optional[str] = None, notes: str = "", raw_request: Optional[str] = None,
+    category: str = DEFAULT_CATEGORY, template_reference: Optional[str] = None,
+) -> dict:
+    """The WHOLE-FLOW version of run_personalized_email_pipeline above -
+    every touchpoint in the real cadence, grounded in one real patient's
+    real situation instead of a business-wide signal. Reuses
+    run_flow_pipeline exactly as run_insight_flow_pipeline does; only the
+    source of insight_brief_text differs."""
+    patient_brief = investigate_patient(identifier, notes=notes)
+
+    if flow_name and not flow_genuinely_fits(patient_brief["brief_text"], flow_name):
+        flow_name = None
+    if not flow_name:
+        flow_name = pick_flow_for_signal(patient_brief["brief_text"], patient_brief["brief_text"])
+    if not flow_name:
+        flow_name = synthesize_flow_for_signal(patient_brief["brief_text"], patient_brief["brief_text"], raw_request=raw_request)
+    if not flow_name:
+        return {"needs_flow_clarification": True, "patient_brief": patient_brief, "identifier": identifier}
+
+    result = run_flow_pipeline(
+        flow_name, insight_brief_text=patient_brief["brief_text"], raw_request=raw_request,
+        category=category, template_reference=template_reference,
+    )
+    result["needs_flow_clarification"] = False
+    result["patient_brief"] = patient_brief
+    result["patient_identifier"] = identifier
     return result
 
 
@@ -283,9 +342,8 @@ class _LiveDataRequest(BaseModel):
 
 
 def _resolve_live_data_request(feedback: str, flow_name: str) -> Optional[str]:
-    """Classification only - never itself performs a lookup (see
-    _run_live_data_lookup below for why that always fails closed for OVA
-    right now)."""
+    """Classification only - real LLM judgement, never keyword matching.
+    Never performs the lookup itself; see _run_live_data_lookup below."""
     llm = get_llm("HEAD_OF_CRM", temperature=0.0)
     structured_llm = llm.with_structured_output(_LiveDataRequest)
     system_text = (
@@ -333,14 +391,39 @@ def _feedback_asks_for_image_change(feedback: str) -> bool:
 
 
 def _run_live_data_lookup(query_question: str) -> str:
-    """Always fails closed and says so plainly - no `investigate()` exists
-    for OVA yet (see module docstring, OVA_SG_CRM_AGENT_SCOPE.md SS8A/SS8D).
-    Never fabricates a number to fill the gap."""
+    """Actually calls investigate() (the shared analytics agent, over HTTP)
+    and turns the result into a plain-text section for
+    format_human_feedback() - the real fix for the Copywriter inventing a
+    plausible-sounding excuse for why it 'couldn't retrieve' live data it
+    never actually had a way to try to retrieve. Now it genuinely tries,
+    and the outcome (real finding, or a real 'nothing usable came back')
+    is what gets handed to the Copywriter - never fabricated either way."""
+    try:
+        insight = investigate(query_question, file_context="")
+    except Exception:
+        logger.exception("Live data lookup failed for revision question %r", query_question[:120])
+        return (
+            "A live data lookup was just attempted for this request but failed technically (a real "
+            "error, not a missing capability). Do not invent a number or claim you found one - if the "
+            "feedback specifically required real data, say plainly in the note field that the lookup "
+            "failed, and proceed without fabricating a substitute."
+        )
+    if insight.get("bigquery_verified"):
+        return (
+            "A LIVE DATA LOOKUP WAS JUST RUN FOR THIS REQUEST (real, verified result from the shared "
+            f"analytics agent):\n{insight['bigquery_answer']}\n"
+            "Use this genuinely if it strengthens the message - as strategic context/angle by default, "
+            "or as a literal number in the copy ONLY if the feedback explicitly asked for a number to "
+            "appear AND this one is customer-safe (a real aggregate/social-proof count, e.g. total "
+            "customers - never an internal engagement/marketing metric, and never any individual "
+            "customer's own PII, which must never appear in customer copy regardless of what was asked). "
+            "Never invent a different number than this one."
+        )
     return (
-        "A live data lookup was requested for this revision, but " + _NO_LIVE_DATA_TEXT[0].lower() + _NO_LIVE_DATA_TEXT[1:] +
-        " Do not invent a number or claim one was found - if the feedback specifically required real data, "
-        "say plainly in the note field that no live data source is connected yet, and proceed without "
-        "fabricating a substitute."
+        "A live data lookup was just attempted for this request but did not return anything "
+        "verified/usable. Do not fabricate a number or claim you found one - if the feedback "
+        "specifically required real data, say plainly in the note field that the lookup ran but "
+        "returned nothing usable, and proceed without inventing a substitute."
     )
 
 

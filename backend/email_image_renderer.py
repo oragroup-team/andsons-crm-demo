@@ -264,40 +264,55 @@ def _draw_hero(canvas: Image.Image, hero_key: str, hero_headline: Optional[str],
     # custom position - typically bottom-anchored, like the overlay this
     # renderer draws for raw heroes. A pure center-crop can clip straight
     # into that baked-in text, so baked heroes crop from the top instead
-    # (keeping the full bottom of the source image).
+    # (keeping the full bottom of the source image) - unchanged, still a
+    # crop, since these are pre-composed graphics, not people photos.
     is_baked = HERO_BANK.get(hero_key, {}).get("baked_headline") is not None
 
     target_ratio = CANVAS_WIDTH / HERO_HEIGHT
     src_ratio = photo.width / photo.height
-    if src_ratio > target_ratio:
-        new_width = int(photo.height * target_ratio)
-        left = (photo.width - new_width) // 2
-        photo = photo.crop((left, 0, left + new_width, photo.height))
-    else:
-        new_height = int(photo.width / target_ratio)
-        excess = photo.height - new_height
-        if is_baked:
-            top = excess
+
+    if is_baked:
+        if src_ratio > target_ratio:
+            new_width = int(photo.height * target_ratio)
+            left = (photo.width - new_width) // 2
+            photo = photo.crop((left, 0, left + new_width, photo.height))
         else:
-            # Real, live-caught bug this fixes: a pure 50/50 center crop
-            # assumes the subject is vertically centered in the source
-            # photo, which every real portrait in this bank isn't - every
-            # one of these is shot with headroom ABOVE the head, following
-            # standard portrait-photography convention (head + face in
-            # the top third, body filling the rest downward). A tall
-            # portrait source (e.g. 800x1200) needing a wide, short hero
-            # crop (600x320-scaled) only keeps ~36% of the source height -
-            # centering that window lands squarely on the torso and
-            # crops the head off entirely (confirmed live: exactly this
-            # happened with confidentease.jpg and warmlook.jpg). Biasing
-            # the crop window toward the top (keeping only a small real
-            # buffer above, not zero) reliably keeps head + face + some
-            # torso instead, sacrificing the lower body/legs, which
-            # matters far less for a hero banner.
-            top = int(excess * 0.08)
-        photo = photo.crop((0, top, photo.width, top + new_height))
-    photo = photo.resize((CANVAS_WIDTH, HERO_HEIGHT), Image.LANCZOS)
-    canvas.paste(photo, (0, y))
+            new_height = int(photo.width / target_ratio)
+            top = photo.height - new_height
+            photo = photo.crop((0, top, photo.width, top + new_height))
+        photo = photo.resize((CANVAS_WIDTH, HERO_HEIGHT), Image.LANCZOS)
+        canvas.paste(photo, (0, y))
+    else:
+        # Real, live-caught bug this replaces (2026-09-29, Thalia Bondoc):
+        # every raw portrait in this bank is a TALL studio shot (e.g.
+        # 800x1200) needing to fill a WIDE, SHORT hero banner - a cover-
+        # style crop (fill the frame, trim the excess) has to throw away
+        # ~64% of the source height no matter where the crop window sits.
+        # A first fix biased that crop window toward the top to stop it
+        # landing on the torso and cutting the head off entirely - technically
+        # correct (the head was back in frame), but the real complaint that
+        # followed was that the result now reads as too tight/zoomed in,
+        # since keeping only the top ~36% of a portrait necessarily blows
+        # the head up to fill most of the banner. CONTAIN, not COVER, is
+        # the real fix: show the ENTIRE source photo, scaled down to fit
+        # HERO_HEIGHT with nothing cropped at all, and pad the leftover
+        # width with a colour sampled from the photo's own real corner
+        # pixels (every real photo in this bank is shot on a plain studio
+        # backdrop, so the sampled pad colour blends in seamlessly rather
+        # than showing as a visible seam or a guessed, mismatched colour).
+        scale = HERO_HEIGHT / photo.height
+        new_width = max(1, int(photo.width * scale))
+        resized = photo.resize((new_width, HERO_HEIGHT), Image.LANCZOS)
+        # Sample a small TOP-LEFT CORNER patch only, never the whole photo -
+        # averaging the whole image would blend in the subject's hair/skin/
+        # clothing colour, not just the plain backdrop it's shot against.
+        corner_size = max(1, min(20, photo.width, photo.height))
+        corner_patch = photo.crop((0, 0, corner_size, corner_size))
+        backdrop_color = corner_patch.resize((1, 1), Image.LANCZOS).getpixel((0, 0))
+        frame = Image.new("RGB", (CANVAS_WIDTH, HERO_HEIGHT), backdrop_color)
+        paste_x = (CANVAS_WIDTH - new_width) // 2
+        frame.paste(resized, (paste_x, 0))
+        canvas.paste(frame, (0, y))
 
     if hero_headline and not is_baked:
         # Bottom-up dark gradient (matches .hero-headline's CSS: linear-gradient

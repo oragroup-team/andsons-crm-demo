@@ -234,6 +234,28 @@ def _load_hero(hero_key: str) -> Optional[Image.Image]:
     return Image.open(path).convert("RGB")
 
 
+def _contain_fit_pad(photo: Image.Image, width: int, height: int, pad_color) -> Image.Image:
+    """Scales the WHOLE photo down to fit within width x height (nothing
+    cropped, aspect ratio preserved) and centres it on a width x height
+    canvas filled with pad_color. Real, live-caught bug this replaces
+    (2026-09-29, Thalia Bondoc): a cover-style crop on a tall studio
+    portrait needing a much wider/shorter target has to throw away most
+    of the source height regardless of where the crop window sits - a
+    first fix biased that window toward the top to stop it cutting the
+    head off, but the real complaint that followed was that the result
+    now reads as too tight/zoomed in (keeping only the top third of a
+    portrait necessarily blows the head up to fill most of the frame).
+    Showing the entire source photo at a smaller scale, padded rather
+    than cropped, is the real fix - nothing is ever cut off, zoomed or
+    not, regardless of the source's aspect ratio."""
+    scale = min(width / photo.width, height / photo.height)
+    new_w, new_h = max(1, int(photo.width * scale)), max(1, int(photo.height * scale))
+    resized = photo.resize((new_w, new_h), Image.LANCZOS)
+    frame = Image.new("RGB", (width, height), pad_color)
+    frame.paste(resized, ((width - new_w) // 2, (height - new_h) // 2))
+    return frame
+
+
 def _draw_hero_rect(canvas: Image.Image, hero_key: str, x0: int, y: int, width: int, target_h: int, radius: int = 10) -> int:
     """A rounded-rect photo inset on a lavender backdrop - used by
     image_spotlight and two_column blocks. Fails soft (blank lavender) if
@@ -242,7 +264,7 @@ def _draw_hero_rect(canvas: Image.Image, hero_key: str, x0: int, y: int, width: 
     draw.rounded_rectangle([x0, y, x0 + width, y + target_h], radius=_s(radius), fill=COLOR_LAVENDER)
     photo = _load_hero(hero_key)
     if photo:
-        photo = _cover_crop(photo, width, target_h, top_bias=0.08)
+        photo = _contain_fit_pad(photo, width, target_h, COLOR_LAVENDER)
         mask = Image.new("L", (width, target_h), 0)
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, width, target_h], radius=_s(radius), fill=255)
         canvas.paste(photo, (x0, y), mask)

@@ -221,8 +221,24 @@ def _narrate_from_rows(question: str, flow_data_text: str, llm) -> _DumpNarrativ
     )
 
 
-_NODE_METRIC_COLUMNS = ["attempted", "sent", "delivered", "opened", "adjusted_opened", "clicked", "conversions", "revenue"]
-_TREND_METRIC_COLUMNS = ["sent", "delivered", "conversions", "revenue"]  # kept smaller - a trend line reads better short
+_NODE_METRIC_COLUMNS = [
+    "attempted", "sent", "delivered", "opened", "adjusted_opened", "clicked",
+    "failed", "bounced", "unsubscribed", "complaints",
+    "conversions", "revenue",
+]
+# Real, live-caught gap this fixes (Sept 25 2026 OVA SG incident, Bryan Chang):
+# a question asking "how many attempted/opened" for a PAST date (not the single
+# most-recent pull day) could never be answered from this trend section at all -
+# attempted/opened were missing here even though the real daily_flow_tracker.csv
+# genuinely has them per day. That forced a fallback to querying BigQuery
+# directly, where the agent picked the wrong table entirely (moengage_campaigns_
+# email - a static Aug-20 snapshot with no Brand column at all, see analytics_
+# agent.py's own schema notes) and returned a wrong number with high confidence.
+# Every metric a real "how did this flow do on day X" question could plausibly
+# ask for is now in this list - correctness over brevity, since the previous
+# "kept smaller" trade is exactly what caused the wrong answer.
+_TREND_METRIC_COLUMNS = ["attempted", "sent", "delivered", "opened", "failed", "bounced", "conversions", "revenue"]
+_FAILURE_REASONS_COLUMN = "failure_reasons"  # concatenated text, never summed as a number - see daily_flow_tracker.py's own _TEXT_FIELDS
 
 
 def _latest_flow_text(latest_df: pd.DataFrame, brand: str, flow_name: str) -> str:
@@ -248,10 +264,24 @@ def _latest_flow_text(latest_df: pd.DataFrame, brand: str, flow_name: str) -> st
     if not send_rows.empty:
         totals = send_rows[_NODE_METRIC_COLUMNS].sum(numeric_only=True)
         lines.append("  MOST RECENT DAY TOTAL: " + ", ".join(f"{col}={totals[col]:g}" for col in _NODE_METRIC_COLUMNS if totals[col]))
+        # Real named failure reasons (e.g. mo_engage_suppression, f_c_removed) -
+        # a text field, never summed numerically like the metrics above. Real,
+        # live-caught gap this fixes: this data genuinely exists per day in
+        # daily_flow_tracker.csv but was never surfaced here at all, so a
+        # "why did sends fail" question could never be answered from this
+        # mechanism even for the single most recent day.
+        if _FAILURE_REASONS_COLUMN in send_rows.columns:
+            all_reasons = [r for r in send_rows[_FAILURE_REASONS_COLUMN].dropna().tolist() if r]
+            if all_reasons:
+                lines.append("  FAILURE REASONS (most recent day, across all send nodes): " + "; ".join(all_reasons))
         for _, row in send_rows.iterrows():
             metrics = ", ".join(f"{col}={row[col]:g}" for col in _NODE_METRIC_COLUMNS if pd.notna(row[col]))
             channel = row.get("channel") or row.get("node_type")
-            lines.append(f"  - {row['node_label']} ({channel}): {metrics}")
+            line = f"  - {row['node_label']} ({channel}): {metrics}"
+            reasons = row.get(_FAILURE_REASONS_COLUMN)
+            if pd.notna(reasons) and reasons:
+                line += f" [failure reasons: {reasons}]"
+            lines.append(line)
     else:
         lines.append("  (no send nodes with real Campaign Stats data in this window)")
     return "\n".join(lines)

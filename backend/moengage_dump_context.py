@@ -42,6 +42,7 @@ durable source of truth in production. When unset (local/dev use), both
 are just read directly off local disk - see _load_dataframe()."""
 import logging
 import os
+import re
 import sys
 from typing import List, Optional
 
@@ -219,6 +220,14 @@ def _narrate_from_rows(question: str, flow_data_text: str, llm) -> _DumpNarrativ
         chain, {"question": question, "flow_data": flow_data_text, "trend_days": _TREND_DAYS},
         label="MoEngage dump narrative call",
     )
+
+
+_TEST_DUPLICATE_FLOW_NAME_RE = re.compile(r"testing|duplicate|test[_ ]|^test$", re.IGNORECASE)
+_QUESTION_WANTS_TEST_FLOWS_RE = re.compile(r"\b(test|testing|duplicate|internal)\b", re.IGNORECASE)
+
+
+def _is_test_or_duplicate_flow_name(flow_name: str) -> bool:
+    return bool(_TEST_DUPLICATE_FLOW_NAME_RE.search(flow_name))
 
 
 _NODE_METRIC_COLUMNS = [
@@ -444,6 +453,18 @@ def gather_moengage_context(question: str, llm) -> tuple:
     brand_flow_pairs = sorted(latest_df[["brand", "flow_name"]].dropna().drop_duplicates().itertuples(index=False, name=None))
     label_to_pair = {f"{_BRAND_SHEET_NAMES.get(b, b)}: {name}": (b, name) for b, name in brand_flow_pairs}
     flow_labels = sorted(label_to_pair.keys())
+
+    # Real, live-confirmed contamination risk this guards against: 23 of
+    # 393 real flow names across the account are test/duplicate artifacts
+    # (e.g. "Internal Testing - Replenishment_ED_RX_OF" sitting right next
+    # to the real production "Replenishment_ED_RX_OF") - near-identical
+    # names an LLM flow-selection call could easily conflate or double-
+    # select, silently blending test traffic into a real business answer.
+    # Excluded from selection UNLESS the question itself is genuinely
+    # asking about test/internal/duplicate flows - never hidden from a
+    # question that actually wants them.
+    if not _QUESTION_WANTS_TEST_FLOWS_RE.search(question):
+        flow_labels = [label for label in flow_labels if not _is_test_or_duplicate_flow_name(label_to_pair[label][1])]
 
     selected_labels = _select_relevant_flows(question, flow_labels, llm)
     if not selected_labels:

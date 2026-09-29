@@ -107,21 +107,75 @@ class TestLatestFlowTextReportsRealNumbers:
         assert "opened=90" not in result
 
 
+class TestLatestFlowTextChannelBreakdown:
+    """Regression: a flow mixing Email + WhatsApp send nodes must expose a
+    per-channel breakdown, and the combined total must be labelled clearly
+    enough that it's never mistaken for one channel's own number - the
+    exact live incident (OVA SG "Abandon Cart - WL", Sept 25 2026)."""
+
+    def test_multi_channel_flow_gets_per_channel_totals(self):
+        df = pd.DataFrame([
+            {
+                "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "flow_status": "Published",
+                "node_label": "Email #1: Abandon WL", "channel": "EMAIL", "campaign_id": "camp_email",
+                "attempted": 3, "sent": 3, "delivered": 3, "opened": 3, "adjusted_opened": 3,
+                "clicked": 0, "failed": 0, "bounced": 0, "unsubscribed": 0, "complaints": 0,
+                "conversions": 0, "revenue": 0.0, "failure_reasons": None,
+            },
+            {
+                "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "flow_status": "Published",
+                "node_label": "WhatsApp #1: AC DC WL", "channel": "whatsapp", "campaign_id": "camp_wa",
+                "attempted": None, "sent": 3, "delivered": 2, "opened": 1, "adjusted_opened": None,
+                "clicked": 0, "failed": 0, "bounced": 0, "unsubscribed": 0, "complaints": 0,
+                "conversions": 0, "revenue": 0.0, "failure_reasons": None,
+            },
+        ])
+        result = _latest_flow_text(df, "OVA_SG", "Abandon Cart - WL")
+
+        # Real regression: email's own sent=3 must be independently visible,
+        # not silently blended with WhatsApp's sent=3 into a combined sent=6.
+        assert "EMAIL ONLY" in result
+        assert "WHATSAPP ONLY" in result
+        assert "ALL CHANNELS COMBINED" in result
+        # The combined total (sent=6) is fine to show, but ONLY when clearly
+        # labelled - the bug was an unlabelled blended number standing in
+        # for "how many emails", not the existence of a combined figure.
+        assert "ALL CHANNELS COMBINED" in result.split("EMAIL ONLY")[0] or "ALL CHANNELS COMBINED, " in result
+
+    def test_single_channel_flow_gets_no_redundant_breakdown(self):
+        """A flow with only one channel doesn't need a per-channel section -
+        the combined total already IS that channel's own number."""
+        df = pd.DataFrame([
+            {
+                "brand": "OVA_SG", "flow_name": "Single Channel Flow", "flow_status": "Published",
+                "node_label": "Email #1", "channel": "EMAIL", "campaign_id": "camp_1",
+                "attempted": 5, "sent": 5, "delivered": 5, "opened": 2, "adjusted_opened": 2,
+                "clicked": 0, "failed": 0, "bounced": 0, "unsubscribed": 0, "complaints": 0,
+                "conversions": 0, "revenue": 0.0, "failure_reasons": None,
+            },
+        ])
+        result = _latest_flow_text(df, "OVA_SG", "Single Channel Flow")
+
+        assert "EMAIL ONLY" not in result  # no per-channel section needed for a single-channel flow
+
+
 class TestTrendTextReportsPastDateMetrics:
     """The exact regression scenario: a question about Sept 25 specifically
     (not 'today'), asking for attempted/opened - must come from the trend
     section since Sept 25 is not the single most-recent pull day."""
 
     def test_past_date_shows_attempted_and_opened(self):
+        """Single-channel flow - the flat per-day total is already
+        unambiguous, no channel breakdown needed."""
         history_df = pd.DataFrame([
             {
-                "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "campaign_id": "camp_1",
+                "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "campaign_id": "camp_1", "channel": "EMAIL",
                 "date_range_start": "2026-09-24",
                 "attempted": 4, "sent": 4, "delivered": 4, "opened": 1, "failed": 0, "bounced": 0,
                 "conversions": 0, "revenue": 0.0,
             },
             {
-                "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "campaign_id": "camp_1",
+                "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "campaign_id": "camp_1", "channel": "EMAIL",
                 "date_range_start": "2026-09-25",
                 "attempted": 3, "sent": 3, "delivered": 3, "opened": 2, "failed": 0, "bounced": 0,
                 "conversions": 1, "revenue": 380.0,
@@ -137,3 +191,45 @@ class TestTrendTextReportsPastDateMetrics:
     def test_empty_history_reports_plainly(self):
         trend = _trend_text(None, "OVA_SG", "Abandon Cart - WL")
         assert "no history recorded" in trend
+
+
+class TestTrendTextChannelBlending:
+    """Regression for the SECOND, more severe bug found in the same
+    incident: a flow with BOTH an Email node and a WhatsApp node had its
+    trend numbers summed across channels with NO way to recover a
+    channel-specific historical figure at all (unlike _latest_flow_text,
+    which at least had a per-node breakdown for the single latest day).
+    Real, live-confirmed scope: 123 of 429 real flows across every brand
+    mix 2+ channels this way - this is not a one-off edge case."""
+
+    def _make_history(self):
+        return pd.DataFrame([
+            # Email node - the real "Abandon Cart - WL" email step
+            {
+                "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "campaign_id": "camp_email",
+                "channel": "EMAIL", "date_range_start": "2026-09-25",
+                "attempted": 3, "sent": 3, "delivered": 3, "opened": 3, "failed": 0, "bounced": 0,
+                "conversions": 0, "revenue": 0.0,
+            },
+            # WhatsApp node - a DIFFERENT, parallel step of the SAME flow
+            {
+                "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "campaign_id": "camp_wa",
+                "channel": "whatsapp", "date_range_start": "2026-09-25",
+                "attempted": None, "sent": 3, "delivered": 2, "opened": 1, "failed": 0, "bounced": 0,
+                "conversions": 0, "revenue": 0.0,
+            },
+        ])
+
+    def test_channels_reported_separately_not_blended(self):
+        trend = _trend_text(self._make_history(), "OVA_SG", "Abandon Cart - WL")
+
+        # The real regression: email's own sent=3 must be visible on its
+        # own, never silently combined with WhatsApp's sent=3 into sent=6.
+        assert "EMAIL: attempted=3, sent=3, delivered=3, opened=3" in trend
+        assert "WHATSAPP: sent=3, delivered=2, opened=1" in trend
+        # The exact wrong number from the live incident must never appear
+        assert "sent=6" not in trend
+
+    def test_multi_channel_flow_is_labelled_as_such(self):
+        trend = _trend_text(self._make_history(), "OVA_SG", "Abandon Cart - WL")
+        assert "broken down by channel" in trend

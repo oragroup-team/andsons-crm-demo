@@ -242,16 +242,30 @@ _FAILURE_REASONS_COLUMN = "failure_reasons"  # concatenated text, never summed a
 
 
 def _latest_flow_text(latest_df: pd.DataFrame, brand: str, flow_name: str) -> str:
-    """One real flow's MOST RECENT day, formatted as compact text: the
-    flow-level total across every send node, then each individual send
-    node's own real numbers - so both a flow-level question ("how did X
-    do") and a step-level one ("what's the open rate on the second
-    email") can be answered from the same block. Non-send nodes (waits/
-    conditions/branches) are left out - they carry no metric columns (see
-    daily_flow_tracker.py's own docstring for why), so they'd add nothing
-    but noise here. Filtered by BOTH brand and flow_name - see
-    _select_relevant_flows' own docstring for why flow_name alone isn't
-    enough (real name collisions across brands, confirmed live)."""
+    """One real flow's MOST RECENT day, formatted as compact text: an
+    ALL-CHANNELS-COMBINED total, a PER-CHANNEL breakdown, then each
+    individual send node's own real numbers - so a flow-level question
+    ("how did X do"), a CHANNEL-specific one ("how many EMAILS"), and a
+    step-level one ("what's the open rate on the second email") can all be
+    answered from the same block. Non-send nodes (waits/conditions/
+    branches) are left out - they carry no metric columns (see daily_flow_
+    tracker.py's own docstring for why), so they'd add nothing but noise
+    here. Filtered by BOTH brand and flow_name - see _select_relevant_
+    flows' own docstring for why flow_name alone isn't enough (real name
+    collisions across brands, confirmed live).
+
+    REAL, LIVE-CAUGHT BUG THIS SECTION FIXES: a real flow (e.g. OVA SG's
+    "Abandon Cart - WL") can have BOTH an Email send node AND a separate
+    WhatsApp send node as parallel steps of the SAME flow (confirmed live:
+    123 of 429 real flows across every brand mix 2+ channels this way).
+    The combined total alone previously answered "how many emails were
+    sent" with the EMAIL node's count blended together with the WhatsApp
+    node's count (e.g. a real incident: 3 real emails sent got reported as
+    6, because 3 WhatsApp sends on the same day were silently added in) -
+    a real number, but for the wrong, broader population than what was
+    asked. The per-channel breakdown below is what actually answers a
+    channel-scoped question correctly; the combined total is now labelled
+    unambiguously so it's never mistaken for one channel's own number."""
     sub = latest_df[(latest_df["flow_name"] == flow_name) & (latest_df["brand"] == brand)]
     brand_label = _BRAND_SHEET_NAMES.get(brand, brand)
     if sub.empty:
@@ -263,7 +277,20 @@ def _latest_flow_text(latest_df: pd.DataFrame, brand: str, flow_name: str) -> st
 
     if not send_rows.empty:
         totals = send_rows[_NODE_METRIC_COLUMNS].sum(numeric_only=True)
-        lines.append("  MOST RECENT DAY TOTAL: " + ", ".join(f"{col}={totals[col]:g}" for col in _NODE_METRIC_COLUMNS if totals[col]))
+        lines.append(
+            "  MOST RECENT DAY TOTAL, ALL CHANNELS COMBINED (email + WhatsApp + push together - use ONLY for a "
+            "whole-flow question, NEVER as one channel's own number): "
+            + ", ".join(f"{col}={totals[col]:g}" for col in _NODE_METRIC_COLUMNS if totals[col])
+        )
+        channels_present = send_rows["channel"].dropna().str.upper().unique()
+        if len(channels_present) > 1:
+            for channel_value in sorted(channels_present):
+                chan_rows = send_rows[send_rows["channel"].str.upper() == channel_value]
+                chan_totals = chan_rows[_NODE_METRIC_COLUMNS].sum(numeric_only=True)
+                lines.append(
+                    f"  MOST RECENT DAY TOTAL, {channel_value} ONLY (use THIS for a question about {channel_value.lower()} "
+                    "specifically): " + ", ".join(f"{col}={chan_totals[col]:g}" for col in _NODE_METRIC_COLUMNS if chan_totals[col])
+                )
         # Real named failure reasons (e.g. mo_engage_suppression, f_c_removed) -
         # a text field, never summed numerically like the metrics above. Real,
         # live-caught gap this fixes: this data genuinely exists per day in
@@ -297,7 +324,18 @@ def _trend_text(history_df: Optional[pd.DataFrame], brand: str, flow_name: str) 
     fabricates a day that isn't actually on record. Filtered by BOTH
     brand and flow_name - see _select_relevant_flows' own docstring for
     why flow_name alone isn't enough (real name collisions across
-    brands, confirmed live)."""
+    brands, confirmed live).
+
+    REAL, LIVE-CAUGHT BUG THIS FIXES: this used to sum every send node for
+    the day regardless of channel, so a flow with both an Email node and a
+    WhatsApp node (123 of 429 real flows do - see _latest_flow_text's own
+    docstring for the full incident) blended both channels' numbers into
+    one per-day figure - there was NO way at all to recover a channel-
+    specific historical number, unlike _latest_flow_text which at least
+    has a per-node breakdown for the single latest day. Now groups by
+    (day, channel) so a channel-scoped historical question (e.g. "how many
+    EMAILS were sent on the 25th") can be answered correctly instead of
+    silently getting an all-channels-combined number."""
     if history_df is None or history_df.empty:
         return "  TREND: no history recorded yet (daily pulls haven't run long enough to show a trend)."
     sub = history_df[
@@ -306,11 +344,36 @@ def _trend_text(history_df: Optional[pd.DataFrame], brand: str, flow_name: str) 
     if sub.empty:
         return "  TREND: no historical send-node data for this flow yet."
 
-    by_day = sub.groupby("date_range_start")[_TREND_METRIC_COLUMNS].sum(numeric_only=True)
-    by_day = by_day.sort_index(ascending=False).head(_TREND_DAYS).sort_index()
-    lines = [f"  TREND (most recent {len(by_day)} real day(s) on record, oldest to newest):"]
-    for date, row in by_day.iterrows():
-        lines.append(f"    {date}: " + ", ".join(f"{col}={row[col]:g}" for col in _TREND_METRIC_COLUMNS if row[col]))
+    channels_present = sub["channel"].dropna().str.upper().unique()
+    recent_dates = sorted(sub["date_range_start"].unique())[-_TREND_DAYS:]
+    sub = sub[sub["date_range_start"].isin(recent_dates)]
+
+    if len(channels_present) <= 1:
+        # Single channel - the old flat per-day total already IS the
+        # channel-specific number, no ambiguity to fix, keep it simple.
+        by_day = sub.groupby("date_range_start")[_TREND_METRIC_COLUMNS].sum(numeric_only=True).sort_index()
+        lines = [f"  TREND (most recent {len(by_day)} real day(s) on record, oldest to newest):"]
+        for date, row in by_day.iterrows():
+            lines.append(f"    {date}: " + ", ".join(f"{col}={row[col]:g}" for col in _TREND_METRIC_COLUMNS if row[col]))
+        return "\n".join(lines)
+
+    lines = [f"  TREND (most recent {len(recent_dates)} real day(s) on record, oldest to newest, broken down by "
+             "channel - this flow has more than one send channel, so a combined cross-channel number would blend "
+             "them incorrectly):"]
+    sub = sub.copy()
+    sub["_channel_upper"] = sub["channel"].str.upper()
+    by_day_channel = sub.groupby(["date_range_start", "_channel_upper"])[_TREND_METRIC_COLUMNS].sum(numeric_only=True)
+    for date in sorted(recent_dates):
+        day_lines = []
+        for channel_value in sorted(channels_present):
+            if (date, channel_value) not in by_day_channel.index:
+                continue
+            row = by_day_channel.loc[(date, channel_value)]
+            metrics = ", ".join(f"{col}={row[col]:g}" for col in _TREND_METRIC_COLUMNS if row[col])
+            if metrics:
+                day_lines.append(f"{channel_value}: {metrics}")
+        if day_lines:
+            lines.append(f"    {date}: " + " | ".join(day_lines))
     return "\n".join(lines)
 
 

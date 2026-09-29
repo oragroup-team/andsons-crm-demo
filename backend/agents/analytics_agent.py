@@ -63,8 +63,15 @@ moengage_daily_flow_tracker_OVA_MY, moengage_daily_flow_tracker_OVA_PH, moengage
 every real status, no filtering. Real columns include attempted/sent/delivered/opened/clicked/conversions/ \
 revenue PER SEND NODE (e.g. a specific WhatsApp or Email step inside a flow), date_range_start/date_range_end \
 (the real day this row covers), flow_name, node_label, channel, variation (all_variations vs control_group). \
-Real, current date coverage: 2026-09-08/09 through 2026-09-26, growing daily via a real cron pull - a question \
-about a date outside that range has no real data here yet, say so rather than guessing. USE THIS for any \
+DATE COVERAGE GROWS DAILY VIA A REAL CRON PULL - NEVER STATE OR ASSUME A SPECIFIC COVERAGE WINDOW FROM MEMORY, \
+even one that sounds like it came from these very notes. A real, live-caught incident this fixes: an earlier \
+version of this text hardcoded a specific date range here, and the agent kept citing that exact stale range \
+(and refusing to check dates that had since become available) for days after the real underlying coverage had \
+already grown well past it - a backfill or the daily cron can extend real coverage at any time, so a hardcoded \
+sentence here is wrong the moment coverage changes and there is no way to know from this prompt alone whether \
+that has happened. Before saying a date has no data, ALWAYS run `SELECT MIN(date_range_start), \
+MAX(date_range_start) FROM <this table>` yourself first (one cheap query) and answer from THAT real result - \
+never from a remembered range, and never from what this note said coverage was at some earlier point. USE THIS for any \
 question about a SPECIFIC MoEngage flow's own real send/open/click/delivery performance, or a real trend in \
 that flow's own numbers over time, PER BRAND (each brand's own workspace is a separate real table - "ASSG" \
 means the moengage_daily_flow_tracker_AS_SG table specifically, "Ova MY" means moengage_daily_flow_tracker_ \

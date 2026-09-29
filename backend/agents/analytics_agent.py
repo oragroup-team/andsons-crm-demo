@@ -702,6 +702,31 @@ def _invoke_with_retry(chain, payload: dict, attempts: int = 5, label: str = "An
     raise last_exc
 
 
+def _extract_brand_country_from_sql(sql_query: str) -> tuple:
+    """Extract Brand and Country filters from the agent's own SQL query so
+    verification checks use the SAME scope. Real, live-caught bug this fixes:
+    verification functions were hardcoded to Brand='AndSons' even when the
+    original question (and the agent's query) targeted OVA or another brand,
+    silently re-verifying against the wrong brand's data and "correcting"
+    right answers into wrong ones. Returns (brand, country) - both default
+    to None if not found, so fallback logic in the caller can decide what to
+    do (fail open, use a default, or ask the question again)."""
+    brand = None
+    country = None
+
+    # Look for Brand='...' or Brand = '...' patterns (case-insensitive column, quoted or unquoted values)
+    brand_match = re.search(r"Brand\s*=\s*['\"]?(\w+)['\"]?", sql_query, re.IGNORECASE)
+    if brand_match:
+        brand = brand_match.group(1)
+
+    # Look for Country='...' or Country = '...' patterns
+    country_match = re.search(r"Country\s*=\s*['\"]?(\w+)['\"]?", sql_query, re.IGNORECASE)
+    if country_match:
+        country = country_match.group(1)
+
+    return brand, country
+
+
 class _MetricIntent(BaseModel):
     metric: Literal["revenue", "order_count", "other"] = Field(
         description="What number this question is actually asking for. 'revenue' for a dollar/SGD amount "
@@ -802,7 +827,13 @@ def _verify_campaign_family_total(question: str, answer: str, sql_query: str) ->
     month_match = _last(_MONTH_EQ_RE, sql_query)
     created_ge = _last(_CREATED_AT_GE_RE, sql_query)
     created_lt = _last(_CREATED_AT_LT_RE, sql_query)
-    scope_sql = "WHERE Brand='AndSons' AND Country='Singapore'"
+
+    # Extract Brand and Country from the ORIGINAL query so verification uses the same scope
+    extracted_brand, extracted_country = _extract_brand_country_from_sql(sql_query)
+    brand = extracted_brand or "AndSons"  # default to andSons if not found
+    country = extracted_country or "Singapore"  # default to Singapore if not found
+
+    scope_sql = f"WHERE Brand='{brand}' AND Country='{country}'"
     period = ""
     if year_match:
         scope_sql += f" AND Year={int(year_match.group(1))}"
@@ -1083,7 +1114,12 @@ def _verify_flow_orders_answer(question: str, answer: str, sql_query: str) -> Op
         # very check meant to catch exactly this failure mode. Look up the
         # most recent year with real data for this scope directly.
         try:
-            year_probe = ["Brand='AndSons'", "Country='Singapore'", f"Month_Name='{month_name}'"]
+            # Extract Brand and Country from the ORIGINAL query for correct scope
+            extracted_brand, extracted_country = _extract_brand_country_from_sql(sql_query)
+            brand = extracted_brand or "AndSons"
+            country = extracted_country or "Singapore"
+
+            year_probe = [f"Brand='{brand}'", f"Country='{country}'", f"Month_Name='{month_name}'"]
             if category_code:
                 year_probe.append(f"new_product_category='{category_code}'")
             year_result = db.run(
@@ -1096,7 +1132,12 @@ def _verify_flow_orders_answer(question: str, answer: str, sql_query: str) -> Op
         except Exception:
             logger.warning("Year lookup for month-only flow_orders check failed - proceeding without a year filter.")
 
-    where = ["Brand='AndSons'", "Country='Singapore'"]
+    # Extract Brand and Country from the ORIGINAL query so verification uses the same scope
+    extracted_brand, extracted_country = _extract_brand_country_from_sql(sql_query)
+    brand = extracted_brand or "AndSons"
+    country = extracted_country or "Singapore"
+
+    where = [f"Brand='{brand}'", f"Country='{country}'"]
     period = ""
     if year:
         where.append(f"Year={year}")

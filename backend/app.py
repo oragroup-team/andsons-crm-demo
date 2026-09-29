@@ -223,6 +223,16 @@ def cron_daily_flow_tracker():
         result = run_daily_flow_tracker(
             days=1, status=None, out_prefix=_DEFAULT_OUT_PREFIX, history_path=_DEFAULT_HISTORY_PATH,
             gcs_bucket=os.environ.get("MOENGAGE_EXPORT_GCS_BUCKET"),
+            # Real, live-caught staleness fix (2026-09-29, Bryan Chang): a
+            # single "yesterday, once" pull never re-checks a day's numbers
+            # after that one pull, but real MoEngage Campaign Stats for a
+            # given day keep accruing for a day or two afterward (delayed/
+            # retried sends). Re-pulling the last 3 real calendar days every
+            # run lets write_history()'s own upsert-by-day-key correct any
+            # already-recorded day whose real numbers have since changed -
+            # see build_tracker_with_refresh's own docstring for the full
+            # incident this fixes.
+            refresh_days_back=3,
         )
     except Exception as exc:  # noqa: BLE001 — surfaced in Cloud Scheduler's own run history either way
         logging.exception("Daily MoEngage flow tracker cron run failed")

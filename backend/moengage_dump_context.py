@@ -265,11 +265,24 @@ def _latest_flow_text(latest_df: pd.DataFrame, brand: str, flow_name: str) -> st
     a real number, but for the wrong, broader population than what was
     asked. The per-channel breakdown below is what actually answers a
     channel-scoped question correctly; the combined total is now labelled
-    unambiguously so it's never mistaken for one channel's own number."""
+    unambiguously so it's never mistaken for one channel's own number.
+
+    SECOND REAL FIX, same principle applied to DATE instead of channel:
+    `latest_df` is no longer guaranteed to hold only a single calendar
+    day's rows - the daily cron now also re-pulls a rolling window of the
+    last few days to fix a separate real staleness bug (see daily_flow_
+    tracker.build_tracker_with_refresh's own docstring), so this function
+    must explicitly narrow to the MOST RECENT date_range_start present,
+    never trust that "everything in latest_df" is automatically one day -
+    that would silently blend multiple real days together exactly like
+    the channel bug blended channels together."""
     sub = latest_df[(latest_df["flow_name"] == flow_name) & (latest_df["brand"] == brand)]
     brand_label = _BRAND_SHEET_NAMES.get(brand, brand)
     if sub.empty:
         return f"FLOW: {brand_label}: {flow_name} - no data in the most recent daily pull (may have been deleted/renamed since)."
+
+    most_recent_date = sub["date_range_start"].max()
+    sub = sub[sub["date_range_start"] == most_recent_date]
 
     status = sub["flow_status"].iloc[0] if "flow_status" in sub else "?"
     send_rows = sub[sub["campaign_id"].notna()]
@@ -278,8 +291,10 @@ def _latest_flow_text(latest_df: pd.DataFrame, brand: str, flow_name: str) -> st
     if not send_rows.empty:
         totals = send_rows[_NODE_METRIC_COLUMNS].sum(numeric_only=True)
         lines.append(
-            "  MOST RECENT DAY TOTAL, ALL CHANNELS COMBINED (email + WhatsApp + push together - use ONLY for a "
-            "whole-flow question, NEVER as one channel's own number): "
+            f"  MOST RECENT DAY ON RECORD IS {most_recent_date} - TOTAL FOR THAT DATE, ALL CHANNELS COMBINED "
+            "(email + WhatsApp + push together - use ONLY for a whole-flow question, NEVER as one channel's own "
+            f"number, and NEVER as a stand-in for a DIFFERENT date someone actually asked about - if the question "
+            f"named a date other than {most_recent_date}, look in the TREND section below instead): "
             + ", ".join(f"{col}={totals[col]:g}" for col in _NODE_METRIC_COLUMNS if totals[col])
         )
         channels_present = send_rows["channel"].dropna().str.upper().unique()
@@ -288,7 +303,7 @@ def _latest_flow_text(latest_df: pd.DataFrame, brand: str, flow_name: str) -> st
                 chan_rows = send_rows[send_rows["channel"].str.upper() == channel_value]
                 chan_totals = chan_rows[_NODE_METRIC_COLUMNS].sum(numeric_only=True)
                 lines.append(
-                    f"  MOST RECENT DAY TOTAL, {channel_value} ONLY (use THIS for a question about {channel_value.lower()} "
+                    f"  {most_recent_date}, {channel_value} ONLY (use THIS for a question about {channel_value.lower()} "
                     "specifically): " + ", ".join(f"{col}={chan_totals[col]:g}" for col in _NODE_METRIC_COLUMNS if chan_totals[col])
                 )
         # Real named failure reasons (e.g. mo_engage_suppression, f_c_removed) -

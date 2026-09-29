@@ -416,6 +416,51 @@ def build_tracker(days: int, status: list, brand: str = None) -> pd.DataFrame:
     return _fill_stats_for_window(base_rows, start_str, end_str, workspace_id, brand=brand)
 
 
+def build_tracker_with_refresh(refresh_days_back: int, status: list, brand: str = None) -> pd.DataFrame:
+    """Real, live-caught bug this fixes (2026-09-29, Bryan Chang, multiple
+    real flows across AS_SG and OVA_SG): the plain daily cron only ever
+    pulls "yesterday" ONCE, the single moment it runs each morning - real
+    MoEngage Campaign Stats for that exact calendar day can keep changing
+    for a day or two afterward (delayed/retried sends, async recounting
+    on MoEngage's own side), and this pipeline had no mechanism to ever
+    re-pull and correct an already-recorded day. Confirmed live: a real
+    day's stored sent/delivered/opened counts (e.g. 7 WhatsApp sent, 3
+    emails sent) were BELOW what Bryan could tally directly from the live
+    MoEngage frontend for that exact same real day a day or two later (10
+    WhatsApp, 4 emails) - not a code bug in how this file aggregates, but
+    a genuine staleness gap in WHEN a day's numbers get captured versus
+    when MoEngage itself finishes counting them.
+
+    FIX: like build_tracker(), but pulls `refresh_days_back` DISTINCT
+    single-calendar-day windows (yesterday, the day before, etc.) instead
+    of one day OR one blended multi-day aggregate - each day keeps its own
+    real date_range_start/date_range_end, exactly like backfill_history()
+    already does, so write_history()'s own upsert-by-day-key logic
+    naturally REPLACES an already-recorded day's stale numbers with
+    whatever MoEngage reports now, rather than only ever adding new days.
+    Real flow/node discovery still happens ONCE (the slow part), reused
+    across every one of the refreshed days - same real efficiency
+    reasoning as backfill_history()'s own docstring."""
+    workspace_id = mc._creds_for_brand(brand)["workspace_id"] or "?"
+    print(f"Listing every real flow in MoEngage workspace {workspace_id} (brand={brand or 'AS_SG'})...")
+    base_rows = discover_base_rows(status, brand=brand)
+    if not base_rows:
+        print("No real send nodes found across the matched flows.")
+        return pd.DataFrame(columns=_TRACKER_COLUMNS)
+
+    today = datetime.now(timezone.utc).date()
+    day_dfs = []
+    for offset in range(refresh_days_back, 0, -1):  # oldest first, matches backfill_history's own ordering
+        day = today - timedelta(days=offset)
+        day_str = day.strftime("%Y-%m-%d")
+        df = _fill_stats_for_window(base_rows, day_str, day_str, workspace_id, brand=brand)
+        if not df.empty:
+            day_dfs.append(df)
+    if not day_dfs:
+        return pd.DataFrame(columns=_TRACKER_COLUMNS)
+    return pd.concat(day_dfs, ignore_index=True)
+
+
 def backfill_history(days_back: int, status: list, history_path: str, gcs_bucket: str = None, brand: str = None) -> pd.DataFrame:
     """Populates REAL past days into the history file directly, instead of
     waiting for the daily cron to accumulate them one real day at a time -
@@ -751,7 +796,10 @@ _BRAND_SHEET_NAMES = {
 }
 
 
-def run(days: int, status: list, out_prefix: str, history_path: str, gcs_bucket: str = None) -> dict:
+def run(
+    days: int, status: list, out_prefix: str, history_path: str, gcs_bucket: str = None,
+    refresh_days_back: int = 0,
+) -> dict:
     """The real, importable entry point - same work main() does from the
     CLI, callable directly (e.g. from a Flask cron endpoint) without
     shelling out to a subprocess. Returns a small real summary dict, not
@@ -766,7 +814,14 @@ def run(days: int, status: list, out_prefix: str, history_path: str, gcs_bucket:
     failure or empty result on one brand doesn't drop the others), and
     writes each to its own real sheet in the same .xlsx, per Hari's own
     direct instruction (2026-09-24: "each workspace data should go into
-    one sheet in the excel book")."""
+    one sheet in the excel book").
+
+    refresh_days_back: real, live-caught staleness fix (see
+    build_tracker_with_refresh's own docstring) - 0 (the default)
+    preserves the exact prior single-day behavior for any other caller of
+    this function; the real cron endpoint passes a small positive number
+    (e.g. 3) so each run also RE-pulls and corrects the last few already-
+    recorded days, not only "yesterday" once and never again."""
     if gcs_bucket:
         download_history_from_gcs(gcs_bucket, history_path)
 
@@ -776,7 +831,10 @@ def run(days: int, status: list, out_prefix: str, history_path: str, gcs_bucket:
             continue
         print(f"\n=== Brand {brand} ===")
         try:
-            df = build_tracker(days, status, brand=brand)
+            if refresh_days_back > 0:
+                df = build_tracker_with_refresh(refresh_days_back, status, brand=brand)
+            else:
+                df = build_tracker(days, status, brand=brand)
         except Exception as exc:  # noqa: BLE001 - one brand failing shouldn't drop the others
             print(f"  [skip brand {brand}] {exc}")
             continue

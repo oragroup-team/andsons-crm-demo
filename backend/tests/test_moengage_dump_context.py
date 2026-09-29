@@ -54,6 +54,7 @@ class TestLatestFlowTextReportsRealNumbers:
         row = {
             "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "flow_status": "Published",
             "node_label": "Email #1: Abandon WL", "channel": "Email", "campaign_id": "camp_1",
+            "date_range_start": "2026-09-25",
             "attempted": 3, "sent": 3, "delivered": 3, "opened": 2, "adjusted_opened": 2,
             "clicked": 0, "failed": 0, "bounced": 0, "unsubscribed": 0, "complaints": 0,
             "conversions": 1, "revenue": 380.0, "failure_reasons": None,
@@ -106,6 +107,25 @@ class TestLatestFlowTextReportsRealNumbers:
         assert "sent=100" not in result
         assert "opened=90" not in result
 
+    def test_multiple_days_in_latest_pull_do_not_blend(self):
+        """Regression: the daily cron now also re-pulls a rolling window of
+        recent days to fix a separate staleness bug (see daily_flow_tracker.
+        build_tracker_with_refresh), so the "latest pull" file can legitimately
+        contain more than one calendar day per flow. _latest_flow_text must
+        narrow to only the single most recent date, never blend two real
+        days together the same way it used to blend two real channels."""
+        df = pd.DataFrame([
+            self._make_row(date_range_start="2026-09-24", sent=10, opened=5),
+            self._make_row(date_range_start="2026-09-25", sent=3, opened=2, campaign_id="camp_2"),
+        ])
+        result = _latest_flow_text(df, "OVA_SG", "Abandon Cart - WL")
+
+        # Only the later date's own numbers may appear - never a 10+3=13 blend
+        assert "sent=3" in result
+        assert "sent=10" not in result
+        assert "sent=13" not in result
+        assert "2026-09-25" in result
+
 
 class TestLatestFlowTextChannelBreakdown:
     """Regression: a flow mixing Email + WhatsApp send nodes must expose a
@@ -118,6 +138,7 @@ class TestLatestFlowTextChannelBreakdown:
             {
                 "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "flow_status": "Published",
                 "node_label": "Email #1: Abandon WL", "channel": "EMAIL", "campaign_id": "camp_email",
+                "date_range_start": "2026-09-25",
                 "attempted": 3, "sent": 3, "delivered": 3, "opened": 3, "adjusted_opened": 3,
                 "clicked": 0, "failed": 0, "bounced": 0, "unsubscribed": 0, "complaints": 0,
                 "conversions": 0, "revenue": 0.0, "failure_reasons": None,
@@ -125,6 +146,7 @@ class TestLatestFlowTextChannelBreakdown:
             {
                 "brand": "OVA_SG", "flow_name": "Abandon Cart - WL", "flow_status": "Published",
                 "node_label": "WhatsApp #1: AC DC WL", "channel": "whatsapp", "campaign_id": "camp_wa",
+                "date_range_start": "2026-09-25",
                 "attempted": None, "sent": 3, "delivered": 2, "opened": 1, "adjusted_opened": None,
                 "clicked": 0, "failed": 0, "bounced": 0, "unsubscribed": 0, "complaints": 0,
                 "conversions": 0, "revenue": 0.0, "failure_reasons": None,
@@ -149,6 +171,7 @@ class TestLatestFlowTextChannelBreakdown:
             {
                 "brand": "OVA_SG", "flow_name": "Single Channel Flow", "flow_status": "Published",
                 "node_label": "Email #1", "channel": "EMAIL", "campaign_id": "camp_1",
+                "date_range_start": "2026-09-25",
                 "attempted": 5, "sent": 5, "delivered": 5, "opened": 2, "adjusted_opened": 2,
                 "clicked": 0, "failed": 0, "bounced": 0, "unsubscribed": 0, "complaints": 0,
                 "conversions": 0, "revenue": 0.0, "failure_reasons": None,

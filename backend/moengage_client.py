@@ -559,14 +559,24 @@ def run_funnel_query(payload: dict, poll_interval: float = 3.0, max_wait: float 
     raise RuntimeError(f"Funnel query {request_id} did not complete within {max_wait}s.")
 
 
-def _get(path: str, params: Optional[dict] = None) -> dict:
+def _get(path: str, params: Optional[dict] = None, brand: Optional[str] = None) -> dict:
     """A read timeout under concurrent load is common at this workspace's
     scale (empirically ~1/3 of requests at high concurrency) and usually
     transient, so a couple of quick retries meaningfully improves the real
     success rate - a genuine failure (404, bad auth) still raises straight
-    away, only timeouts/connection errors are retried."""
-    url = f"{_base_url()}{path}"
-    headers = _auth_header()
+    away, only timeouts/connection errors are retried.
+
+    Real, live-caught gap this fixes: _base_url()/_auth_header() have
+    supported a brand parameter since multi-brand support was added
+    (_creds_for_brand), but this function - and every one of the Custom
+    Dashboards functions below that call it - never forwarded it, so
+    list_dashboards/get_dashboard_charts/get_chart_data were silently
+    hardcoded to whichever brand's plain MOENGAGE_* vars resolve by
+    default (AS_SG), even though real per-brand credentials (e.g.
+    OVA_SG_MOENGAGE_DATA_API_KEY) were already configured and sitting
+    unused."""
+    url = f"{_base_url(brand)}{path}"
+    headers = _auth_header(brand)
     last_exc = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -584,23 +594,26 @@ def _get(path: str, params: Optional[dict] = None) -> dict:
     raise last_exc  # unreachable, satisfies type checkers
 
 
-def list_dashboards() -> list:
-    """GET /v5/analytics/dashboards - workspace-level (public) dashboards only."""
-    return _get("/v5/analytics/dashboards").get("data", [])
+def list_dashboards(brand: Optional[str] = None) -> list:
+    """GET /v5/analytics/dashboards - workspace-level (public) dashboards only.
+    brand=None (or "AS_SG") keeps the original single-workspace behaviour;
+    any other configured brand (e.g. "OVA_SG") now reaches that brand's own
+    real dashboards instead of always defaulting to AS_SG's."""
+    return _get("/v5/analytics/dashboards", brand=brand).get("data", [])
 
 
-def get_dashboard_charts(dashboard_id: str) -> list:
+def get_dashboard_charts(dashboard_id: str, brand: Optional[str] = None) -> list:
     """GET /v5/analytics/dashboards/{dashboard_id}/charts - the charts on one
     dashboard (id + name only, not their data - see get_chart_data)."""
-    return _get(f"/v5/analytics/dashboards/{dashboard_id}/charts").get("data", {}).get("chart_ids", [])
+    return _get(f"/v5/analytics/dashboards/{dashboard_id}/charts", brand=brand).get("data", {}).get("chart_ids", [])
 
 
-def get_chart_data(dashboard_id: str, chart_id: str) -> dict:
+def get_chart_data(dashboard_id: str, chart_id: str, brand: Optional[str] = None) -> dict:
     """GET /v5/analytics/dashboards/{dashboard_id}/charts/{chart_id} - a single
     chart's data. Shape varies by analysis type (Behavior/Funnels/Retention/
     User/Session and Source) - callers should treat `data` as opaque and let
     the LLM summarize it rather than assuming specific fields."""
-    return _get(f"/v5/analytics/dashboards/{dashboard_id}/charts/{chart_id}")
+    return _get(f"/v5/analytics/dashboards/{dashboard_id}/charts/{chart_id}", brand=brand)
 
 
 def _list_all_chart_refs() -> list:

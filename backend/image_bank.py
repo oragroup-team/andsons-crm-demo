@@ -199,6 +199,177 @@ HERO_BANK = {
         "moment": "premium kit / bundle moments - AOV growth, a considered upgrade",
         "category": "hair_loss",
     },
+    # --- Hair Loss, round 2 - reviewed 2026-10-01, from a full pass of the
+    # remaining real Image_Bank/ files (both the main folder's generic
+    # "ChatGPT Image"/"Image Generation" files and the ANDSONS HL PRODUCT
+    # SHOT subfolder's product renders) that the first pass never got to.
+    # Real, deliberate exclusions from this same pass, for the record: two
+    # near-identical mint-green product shots with a stray AI-tool sparkle
+    # watermark baked into a corner (kept only the one where the watermark
+    # could be cropped out cleanly), two product renders with garbled/
+    # misspelled label text ("andSans", "Redonayl" - an AI text-rendering
+    # defect, not a real label), one shower photo that turned out to be
+    # unfixably mirrored (the brand text was garbled, not just flipped),
+    # a two-handed "gripping hair in distress" stock photo that read as
+    # over-dramatized/stigmatizing rather than this brand's dignified tone,
+    # several near-duplicate crops of the same shoot (e.g. three versions of
+    # the same "pink sweater, phone, laughing" moment), and several more
+    # generic pensive/confident portraits that didn't add a genuinely new
+    # moment beyond what round 1 already covered.
+    "profiledown": {
+        "url": "/hero-images/profiledown.jpg",
+        "description": "Man seen from behind and slightly to the side, looking down, rust t-shirt, pale background",
+        "baked_headline": None,
+        "moment": "quiet, uncertain, looking inward - a softer alternative to 'thoughtful'",
+        "category": "hair_loss",
+    },
+    "hairlinetouch": {
+        "url": "/hero-images/hairlinetouch.jpg",
+        "description": "Close front-facing portrait, hand at the hairline, calm composed direct gaze, rust sweater, pale background",
+        "baked_headline": None,
+        "moment": "neither worried nor celebrating - a calm, neutral-toned moment for an informational or routine message",
+        "category": "hair_loss",
+    },
+    "armscrossedfront": {
+        "url": "/hero-images/armscrossedfront.jpg",
+        "description": "Front-facing portrait, arms crossed, confident relaxed half-smile, brown t-shirt, pale background",
+        "baked_headline": None,
+        "moment": "confident and direct, not pensive - a good steady/reassuring opening moment",
+        "category": "hair_loss",
+    },
+    "combinghairline": {
+        "url": "/hero-images/combinghairline.jpg",
+        "description": "Man combing his hairline with a black comb, other hand steadying his head, warm brown background",
+        "baked_headline": None,
+        "moment": "a grooming ritual using a real tool, not just a hand - routine care framing",
+        "category": "hair_loss",
+    },
+    "showerwash": {
+        "url": "/hero-images/showerwash.jpg",
+        "description": "Close shot of a hand massaging shampoo lather into the hair and scalp, real suds visible, pale background",
+        "baked_headline": None,
+        "moment": "the actual washing routine - a shampoo or scalp-care moment",
+        "category": "hair_loss",
+    },
+    "toweldry": {
+        "url": "/hero-images/toweldry.jpg",
+        "description": "Man drying his hair with a white towel, profile view, calm expression, rust t-shirt, warm cream background",
+        "baked_headline": None,
+        "moment": "the post-shower routine - a calm, practical everyday moment",
+        "category": "hair_loss",
+    },
+    "serumsmile": {
+        "url": "/hero-images/serumsmile.jpg",
+        "description": "Man smiling and holding the real andSons 3% Redensyl Anti-Hair Loss Serum bottle up near his face, plain white background",
+        "baked_headline": None,
+        "moment": "a happy customer together with the real product - a different, warmer alternative to a hand-only product shot",
+        "category": "hair_loss",
+    },
+    "lookingup": {
+        "url": "/hero-images/lookingup.jpg",
+        "description": "Profile portrait, chin up, looking upward, long hair flowing back, small earring visible, plain background",
+        "baked_headline": None,
+        "moment": "aspirational, optimistic, looking forward - a distinct upward-looking alternative to the mostly downward-gazing set",
+        "category": "hair_loss",
+    },
+    "earlysignsparted": {
+        "url": "/hero-images/earlysignsparted.jpg",
+        "description": "Profile view, a hand parting the hair at the crown to clearly show early thinning, rust t-shirt, pale background",
+        "baked_headline": None,
+        "moment": "a direct, literal 'noticing early signs' moment - calm and exploratory, not alarmed",
+        "category": "hair_loss",
+    },
+    "earlysignsclose": {
+        "url": "/hero-images/earlysignsclose.jpg",
+        "description": "Close overhead-angle shot, a hand parting the hair to reveal a thinning patch at the crown, rust t-shirt",
+        "baked_headline": None,
+        "moment": "the clearest, most literal early-signs visual in the bank - pairs well with first-contact or diagnosis-stage copy",
+        "category": "hair_loss",
+    },
+    "scalpmassager": {
+        "url": "/hero-images/scalpmassager.jpg",
+        "description": "Man from behind using a black silicone scalp massager on wet hair, real bathroom setting with sink and mirror visible",
+        "baked_headline": None,
+        "moment": "a real device-based routine moment, not just a hand or a bottle - fits a scalp-care or accessory callout",
+        "category": "hair_loss",
+    },
+    "sprayapply": {
+        "url": "/hero-images/sprayapply.jpg",
+        "description": "Man smiling while spraying the real andSons serum bottle (legible label) directly onto his hair, bright plain background",
+        "baked_headline": None,
+        "moment": "the product actually being used, not just held - good for a 'how to apply' or routine-reminder moment",
+        "category": "hair_loss",
+    },
+    "overshoulder": {
+        "url": "/hero-images/overshoulder.jpg",
+        "description": "Man glancing back over his shoulder, intense confident gaze, dark maroon t-shirt, warm moody background",
+        "baked_headline": None,
+        "moment": "a more dramatic, editorial confident moment - distinct body angle from the mostly front/profile set",
+        "category": "hair_loss",
+    },
+    "serumretail": {
+        "url": "/hero-images/serumretail.jpg",
+        "description": "Real product photography: two andSons 3% Redensyl Anti-Hair Loss Serum bottles and the retail box, warm tan background, wooden ball prop",
+        "baked_headline": None,
+        "moment": "clean retail-style product moment - real photography, not a render",
+        "category": "hair_loss",
+    },
+    "fullrangeshelf": {
+        "url": "/hero-images/fullrangeshelf.jpg",
+        "description": "Real product photography: the full andSons range (serum, shampoo, conditioner, Daily Cleanser, Daily Moisturiser) on a warm orange-gradient shelf",
+        "baked_headline": None,
+        "moment": "cross-sell across the whole range, hair and skin together - real photography",
+        "category": "hair_loss",
+    },
+    "cleanshelf": {
+        "url": "/hero-images/cleanshelf.jpg",
+        "description": "Real product photography: shampoo, conditioner, and serum on a glass shelf with soft shadows, minimal white background",
+        "baked_headline": None,
+        "moment": "a clean, minimal alternate product moment - real photography, different styling from the warm-toned shots",
+        "category": "hair_loss",
+    },
+    "moisturiserlineup": {
+        "url": "/hero-images/moisturiserlineup.jpg",
+        "description": "Real product photography, wide landscape crop: shampoo, conditioner, and the Daily Moisturiser on a green-gradient background with a cream swatch",
+        "baked_headline": None,
+        "moment": "a wide banner-ready shot spanning hair and skin care together",
+        "category": "hair_loss",
+    },
+    "otcrangeplus": {
+        "url": "/hero-images/otcrangeplus.jpg",
+        "description": "The andSons OTC range including Biotin Gummies, DHT Blocker, shampoo, and conditioner, staged on an orange-to-tan gradient",
+        "baked_headline": None,
+        "moment": "a broader cross-sell shot than 'productlineup' - includes the gummies and DHT blocker",
+        "category": "hair_loss",
+    },
+    "bannertrio": {
+        "url": "/hero-images/bannertrio.jpg",
+        "description": "Serum, conditioner, and the dermaroller staged together on an orange gradient, wide crop with generous open space for a headline",
+        "baked_headline": None,
+        "moment": "a banner-ready product trio shot with built-in copy space",
+        "category": "hair_loss",
+    },
+    "serumfoam": {
+        "url": "/hero-images/serumfoam.jpg",
+        "description": "The andSons serum bottle on real shampoo foam/suds, mint-green background",
+        "baked_headline": None,
+        "moment": "a fresher, foam-styled alternate to the plain-background serum shots",
+        "category": "hair_loss",
+    },
+    "shampoofoam": {
+        "url": "/hero-images/shampoofoam.jpg",
+        "description": "The andSons shampoo bottle on real foam/suds, mint-green background",
+        "baked_headline": None,
+        "moment": "a shampoo-specific product moment - distinct from the serum-only shots",
+        "category": "hair_loss",
+    },
+    "fullrangereflective": {
+        "url": "/hero-images/fullrangereflective.jpg",
+        "description": "The full andSons range (serum, conditioner, shampoo, Daily Cleanser, Daily Moisturiser) on a reflective bronze surface, orange-gradient background",
+        "baked_headline": None,
+        "moment": "the widest cross-category range shot in the bank - hair and skin together",
+        "category": "hair_loss",
+    },
     # --- Sexual Health (ED, PE) - reviewed 2026-08-25. Only 2 real entries -
     # the discretion rule ruled out most of the raw stock photos available
     # (couples, overtly suggestive shots) as unsuitable, so this stays a

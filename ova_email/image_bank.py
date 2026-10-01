@@ -112,6 +112,13 @@ deliberately generic so no trade name ever surfaces in a prompt, a Sweeper
 reason, or a Slack caption - only what a customer would actually see on
 the vial or pack.
 
+REAL FIX #5 (2026-10-01): 2 more real photos added, found while sorting a
+new andSons photo drop (`New_IMAGE_LIBRARY/`) that turned out to contain 2
+loose files of women, not the men's-brand subjects the rest of that drop
+was for - see `linen_striped_laughing_portrait` and
+`magazine_armchair_laughing_portrait` below. Genuinely on-brand, reviewed
+the same way as every other entry, just misfiled at the source.
+
 To add more real OVA photos later (especially real photography for
 EC/intimate health - the real gap above), add entries in this exact shape
 and the matching re-encoded file under static/hero_images/<key>.jpg, then
@@ -133,6 +140,27 @@ HERO_BANK = {
         "url": "/hero-images/focused_at_laptop.jpg",
         "description": "A real OVA brand photo: a close crop of a woman with long dark hair typing on a laptop at a wooden desk, warm neutral tones. No product, no text.",
         "moment": "managing care online, at her own pace - fits a 'book your consult online', 'manage everything from your phone', a refill/logistics action, or general convenience moment",
+        "baked_headline": None,
+        "category": "general",
+        "exclude_categories": [],
+    },
+    # --- Round 2, reviewed 2026-10-01 - found while sorting a new andSons
+    # photo drop (New_IMAGE_LIBRARY): these 2 files were loose in that
+    # folder's root but show women, not the andSons men's-brand subjects the
+    # rest of that drop was for - routed here instead since they're genuine,
+    # warm, on-brand OVA photos, not stray/unusable files.
+    "linen_striped_laughing_portrait": {
+        "url": "/hero-images/linen_striped_laughing_portrait.jpg",
+        "description": "A warm close portrait of a woman with dark hair in a loose striped linen shirt, arms crossed, laughing and looking up and to the side, small gold hoop earrings and a watch, soft neutral home background with a plant. No product, no text.",
+        "moment": "warm, genuine, unselfconscious laughter - a strong opening/hero moment for a welcome, a good-news, or a general confident-woman email",
+        "baked_headline": None,
+        "category": "general",
+        "exclude_categories": [],
+    },
+    "magazine_armchair_laughing_portrait": {
+        "url": "/hero-images/magazine_armchair_laughing_portrait.jpg",
+        "description": "A woman with shoulder-length dark hair laughing openly, head tilted back, sitting in a dark armchair on a herringbone wood floor with a magazine open on her lap, delicate necklace and earrings. No product, no text.",
+        "moment": "relaxed, at-home, genuinely delighted - fits a lighter/casual-tone email or a 'treat yourself' / downtime moment",
         "baked_headline": None,
         "category": "general",
         "exclude_categories": [],

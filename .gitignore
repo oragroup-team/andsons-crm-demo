@@ -1,5 +1,6 @@
 BigQuery Metadata.xlsx
 Image_Bank/
+ova_email/New_IMAGE_LIBRARY/
 # Real MoEngage CSV exports (internal staff emails, real WhatsApp/email
 # template text, real campaign data) - real business data, not code. The
 # loader that turns these into BigQuery tables is tracked

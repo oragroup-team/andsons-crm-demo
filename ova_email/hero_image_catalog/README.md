@@ -24,6 +24,26 @@ There is also always a `none` option (a deliberate text-only email, no hero) tha
 
 ---
 
+## linen_striped_laughing_portrait.jpg
+
+**Used for category:** general
+
+**What the photo actually shows:** A warm close portrait of a woman with dark hair in a loose striped linen shirt, arms crossed, laughing and looking up and to the side, small gold hoop earrings and a watch, soft neutral home background with a plant. No product, no text.
+
+**When the Copywriter picks it:** warm, genuine, unselfconscious laughter - a strong opening/hero moment for a welcome, a good-news, or a general confident-woman email
+
+---
+
+## magazine_armchair_laughing_portrait.jpg
+
+**Used for category:** general
+
+**What the photo actually shows:** A woman with shoulder-length dark hair laughing openly, head tilted back, sitting in a dark armchair on a herringbone wood floor with a magazine open on her lap, delicate necklace and earrings. No product, no text.
+
+**When the Copywriter picks it:** relaxed, at-home, genuinely delighted - fits a lighter/casual-tone email or a 'treat yourself' / downtime moment
+
+---
+
 ## weekly_injectable_dual_hormone.jpg
 
 **Used for category:** weight_loss

@@ -14,19 +14,35 @@ the source files were resized/re-encoded into backend/static/hero_images/,
 served by Flask at /hero-images/<key>.jpg (see app.py) so they work both
 locally and once deployed, without depending on any external host.
 
-A REAL, HONEST GAP, not a placeholder to quietly fill in later: the newer
-categories have far fewer reviewed images than Hair Loss (17 real entries)
-- Sexual Health has 2, Weight Loss has 3, Skin has 3, plus 2 cross-category
-entries (a real named andSons doctor, a general "resuming a routine" shot).
-That's the true state of what's been reviewed and approved so far, not an
-oversight - many of the raw "Stock Photos" folders for these categories
-contain genuinely unsuitable images (explicit/suggestive shots for Sexual
-Health that break the discretion rule, body-shaming "before" photos for
-Weight Loss that break the never-shame rule) that were deliberately
-excluded rather than included just to pad out the count. If a category
-genuinely has no fitting photo for a given email, "none" (text-first) is
-the correct, expected choice - it is not a smaller or lesser option than a
-forced, mismatched photo.
+REAL FIX #2 (2026-10-01): a stakeholder (Thalia) flagged the Weight Loss
+bank specifically as thin/weak. Reviewed the manager's new
+"New_IMAGE_LIBRARY/ASWL_SEPT26" drop (ova_email/New_IMAGE_LIBRARY/ - shared
+across both app folders since it isn't OVA-specific) image by image: 8
+genuine, warm, dignified photos of plus-size men in real everyday moments
+(walking, laughing, phone, thinking, coffee) were added to weight_loss,
+plus 2 more general-purpose mature-lifestyle shots from the same drop's
+root folder. Several near-identical crops of the same underlying photo
+shoot (extra square crops of the same laughing-at-phone moment, a solo
+crop pulled from the two-men-walking photo, a transparent-background
+cutout of the grass-field photo) were deliberately left out as redundant,
+not reviewed-and-rejected for quality - see the "round 2" comments below
+for exactly which crop was kept and why. Two more files in that same drop
+showed women, not men - those don't belong in andSons' bank at all (this
+is a men's brand) and were added to OVA's bank instead (see
+ova_email/image_bank.py's own "round 2" entries).
+
+A REAL, HONEST GAP, not a placeholder to quietly fill in later: Sexual
+Health and Skin are still much thinner than Hair Loss (17 entries) or the
+now-11-strong Weight Loss - Sexual Health has 2, Skin has 3, plus 4
+cross-category "general" entries. That's the true state of what's been
+reviewed and approved so far, not an oversight - many of the raw source
+folders for these categories contain genuinely unsuitable images
+(explicit/suggestive shots for Sexual Health that break the discretion
+rule, body-shaming "before" photos for Weight Loss that break the
+never-shame rule) that were deliberately excluded rather than included
+just to pad out the count. If a category genuinely has no fitting photo
+for a given email, "none" (text-first) is the correct, expected choice -
+it is not a smaller or lesser option than a forced, mismatched photo.
 
 Two entries ("smiling", "adjusting") are the "locked" heroes with a baked-in
 headline (the real approved P1 golden example) - the Copywriter must NOT add
@@ -35,12 +51,20 @@ The rest are RAW photos with no baked text, so they need a concrete,
 plain-language overlay headline (2-5 words) when used.
 
 Every entry has a real `category` tag: one of "hair_loss", "sexual_health",
-"weight_loss", "skin", or "general" (usable for ANY category - currently
-just the real named doctor photo and the routine/resuming-a-habit shot).
-Use hero_bank_for_category() to get the right subset for a given category's
+"weight_loss", "skin", or "general" (usable for ANY category). Use
+hero_bank_for_category() to get the right subset for a given category's
 email, rather than reading HERO_BANK directly and risking a Hair-Loss-only
 photo (a man with his hand in his hair) surfacing on an ED/PE/Weight-Loss/
 Skin email, where it would be actively wrong, not just a mismatch.
+
+A REAL GAP ACROSS THE WHOLE BANK, not yet closed: the project's own
+Image_Bank/ source folder (project root, gitignored) has ~70 real files in
+total, of which only a subset is individually catalogued here - the rest
+(mostly generically-named "Image Generation"/"ChatGPT Image [date]" files,
+plus most of the real ANDSONS HL PRODUCT SHOT product renders) have not yet
+been individually reviewed for inclusion. Treat the current bank as
+comprehensive for Weight Loss specifically (the category that was
+flagged), not yet as a complete catalogue of every usable asset on disk.
 
 Selection is bank-only: there is no image-generation fallback. If none of
 these genuinely fit an email, the correct choice is "none" (text-first).
@@ -222,6 +246,73 @@ HERO_BANK = {
         "moment": "booking or attending the online doctor consult - warm, welcoming, practical",
         "category": "weight_loss",
     },
+    # --- Weight Loss, round 2 - reviewed 2026-10-01, from the manager's
+    # "New_IMAGE_LIBRARY/ASWL_SEPT26" drop (andSons Weight Loss, Sept 2026).
+    # This is the real fix for the thin-weight_loss-coverage complaint: 8
+    # genuine, warm, dignified photos of plus-size men in real everyday
+    # moments (walking, laughing, on the phone, thinking, having coffee) -
+    # never a "before" shot, never body comparison, never isolated-on-white
+    # pointing at a belly. Several near-identical crops of the same shoot
+    # (e.g. two other square crops of the "phonelaugh" moment, a solo crop
+    # pulled from the "walktogether" pair, a transparent-background cutout
+    # of "outdoorlaugh") were deliberately left out as redundant, not
+    # reviewed-and-rejected for quality.
+    "outdoorglance": {
+        "url": "/hero-images/outdoorglance.jpg",
+        "description": "A plus-size man in a green t-shirt and khaki trousers, glancing back over his shoulder with a big genuine smile while walking, clear blue sky background, wide candid crop with open space to one side",
+        "baked_headline": None,
+        "moment": "confident, mid-stride, caught off guard by something good - a strong opening/hero moment, not body-focused",
+        "category": "weight_loss",
+    },
+    "phonelaugh": {
+        "url": "/hero-images/phonelaugh.jpg",
+        "description": "A plus-size man in a coral sweater, sitting with legs crossed, laughing at his phone, plain blue-grey background, wide crop with generous open space to the left for a headline",
+        "baked_headline": None,
+        "moment": "a light, everyday phone moment - good for a casual nudge or reminder email",
+        "category": "weight_loss",
+    },
+    "quietreflection": {
+        "url": "/hero-images/quietreflection.jpg",
+        "description": "A plus-size man in a beige sweater, sitting with hand on chin in a thoughtful pose, looking up and to the side, plain grey-blue background",
+        "baked_headline": None,
+        "moment": "quietly thinking something over - fits a 'considering your options' or decision-point email, not a sad or defeated moment",
+        "category": "weight_loss",
+    },
+    "walktogether": {
+        "url": "/hero-images/walktogether.jpg",
+        "description": "Two plus-size men walking together through a sunlit grassy field, both laughing, one holding a water bottle, candid side-on view",
+        "baked_headline": None,
+        "moment": "doing this with someone, not alone - good for a community/support or 'you're not the only one' angle",
+        "category": "weight_loss",
+    },
+    "loungeconfidence": {
+        "url": "/hero-images/loungeconfidence.jpg",
+        "description": "A plus-size man in a black long-sleeve top, relaxed in an armchair in a moody, book-lined lounge, warm confident half-smile, wedding ring visible on his hand",
+        "baked_headline": None,
+        "moment": "settled, confident, at home in his own life - a good calm/established-routine moment",
+        "category": "weight_loss",
+    },
+    "outdoorlaugh": {
+        "url": "/hero-images/outdoorlaugh.jpg",
+        "description": "A plus-size man in a grey t-shirt, crouched in a grassy field laughing openly, holding a blade of grass, real green outdoor background",
+        "baked_headline": None,
+        "moment": "pure, unguarded joy outdoors - a strong feel-good opening image",
+        "category": "weight_loss",
+    },
+    "ruststool": {
+        "url": "/hero-images/ruststool.jpg",
+        "description": "A plus-size man in a rust-orange sweater, sitting on a black stool laughing at his phone, one leg crossed up showing a white sneaker, warm dappled studio light",
+        "baked_headline": None,
+        "moment": "warm, relaxed, a good general lifestyle moment for almost any weight-loss email",
+        "category": "weight_loss",
+    },
+    "windowespresso": {
+        "url": "/hero-images/windowespresso.jpg",
+        "description": "An older bearded man in a white linen band-collar shirt, sitting by a sunlit window holding a small espresso cup, a checkers board visible on the side table, content and relaxed",
+        "baked_headline": None,
+        "moment": "a quiet, settled, mature moment - good for an older-audience or routine-maintenance message",
+        "category": "weight_loss",
+    },
     # --- Skin - reviewed 2026-08-25. Real andSons product shots (Daily
     # Serum, Daily Moisturiser) rather than face/body photography, since no
     # reviewed lifestyle portrait was available yet for this category - an
@@ -272,6 +363,27 @@ HERO_BANK = {
         # candidate (confirmed live: the Copywriter kept re-proposing it
         # across retries despite the correction).
         "exclude_categories": ["sexual_health"],
+    },
+    # --- General, round 2 - reviewed 2026-10-01, from the same
+    # New_IMAGE_LIBRARY drop (two loose files sitting in its root, outside
+    # the ASWL_SEPT26 weight-loss subfolder). Both are mature, average-build
+    # men in calm everyday moments - genuinely usable for any category, but
+    # not tagged weight_loss since neither shows the plus-size
+    # representation that makes that category's own photos meaningfully
+    # relevant to its real audience.
+    "laptopathome": {
+        "url": "/hero-images/laptopathome.jpg",
+        "description": "A greying man with salt-and-pepper hair, working on a laptop balanced on his lap, relaxed on a low wooden stool in a warm minimal living room with a plant and a mug of coffee nearby",
+        "baked_headline": None,
+        "moment": "a calm working-from-home or settled-routine moment - fits any category needing an older/mature-audience lifestyle shot",
+        "category": "general",
+    },
+    "phoneoffice": {
+        "url": "/hero-images/phoneoffice.jpg",
+        "description": "A man with a greying beard, glasses, and wireless earbuds, wearing a beige vest over a white t-shirt, smiling at his phone in a modern office/lounge setting",
+        "baked_headline": None,
+        "moment": "a light, everyday phone-check moment - good general opener for any category",
+        "category": "general",
     },
 }
 

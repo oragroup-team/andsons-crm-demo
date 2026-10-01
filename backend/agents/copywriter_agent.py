@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from categories import DEFAULT_CATEGORY, VALID_CATEGORY_SLUGS, category_notes_text
 from flows import FLOW_BY_SLUG, VALID_FLOW_SLUGS
+from hero_usage_tracker import record_hero_use, recent_heroes_prompt_block
 from image_bank import HERO_BANK, HERO_KEYS, hero_bank_for_category
 from text_sanitize import sanitize_text
 
@@ -265,7 +266,7 @@ def _build_hero_catalog(category: str = DEFAULT_CATEGORY) -> str:
         lines.append(f'- "{key}"{locked}: {entry["description"]}. Best for: {entry["moment"]}.')
     if not lines:
         return "(No reviewed photos exist for this category yet - always choose \"none\" (text-first).)"
-    return "\n".join(lines)
+    return "\n".join(lines) + recent_heroes_prompt_block(category)
 
 
 def _build_flow_brief(flow_slug: str, category: str = DEFAULT_CATEGORY) -> str:
@@ -720,6 +721,7 @@ def generate_email(
 
     hero_info = resolve_hero(content)
     rendered = render_email(content, first_name, hero_info=hero_info)
+    record_hero_use(category, hero_info["hero"])
 
     result_content = content.model_dump()
     result_content.update(
@@ -1151,6 +1153,7 @@ def generate_flow_email_touchpoint(
 
     hero_info = resolve_hero(content)
     rendered = render_email(content, "NAME", hero_info=hero_info)
+    record_hero_use(category, hero_info["hero"])
     result_content = content.model_dump()
     result_content.update(
         {

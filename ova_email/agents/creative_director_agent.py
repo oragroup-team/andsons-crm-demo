@@ -19,6 +19,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from categories import DEFAULT_CATEGORY
+from hero_usage_tracker import recent_heroes_prompt_block
 from image_bank import HERO_BANK, HERO_KEYS, hero_bank_for_category
 
 from .llm_provider import get_llm, invoke_with_retry
@@ -68,7 +69,7 @@ def _hero_catalog_text(category: str = DEFAULT_CATEGORY) -> str:
         lines.append(f'- "{key}": {entry["description"]}. Best for: {entry["moment"]}.')
     if not lines:
         return "(No reviewed photos exist for this category yet - always choose \"none\".)"
-    return "\n".join(lines)
+    return "\n".join(lines) + recent_heroes_prompt_block(category)
 
 
 def direct_touchpoint(content: dict, prior_summaries: List[dict], category: str = DEFAULT_CATEGORY) -> dict:

@@ -303,6 +303,24 @@ def set_learned_rules(rules: list) -> None:
 # checks here transparently on a cache miss.
 
 
+# --- Generic doc access --------------------------------------------------
+# Thin public wrappers around the REST plumbing above, for callers (e.g.
+# hero_usage_tracker.py) that need a plain arbitrary-collection doc store
+# rather than one of the domain-specific helpers above. Callers must use
+# an "ova_"-prefixed collection name, same as every collection below -
+# this app shares its Firestore project with andSons' backend/ service
+# (see _DEFAULT_PROJECT), so an unprefixed name would silently read/write
+# the SAME documents as the other app's equivalent data.
+
+
+def get_doc(collection: str, doc_id: str) -> Optional[dict]:
+    return _get_doc(collection, doc_id)
+
+
+def set_doc(collection: str, doc_id: str, data: dict) -> None:
+    _set_doc(collection, doc_id, data)
+
+
 def get_synthesized_flow(slug: str) -> Optional[dict]:
     try:
         return _get_doc("ova_synthesized_flows", slug)
